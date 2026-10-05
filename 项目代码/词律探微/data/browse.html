@@ -1,0 +1,66 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>在线多条件检索 · 词律探微</title></head><body><header class="top"><div class="in"><div class="brand">词律探微<small>清代词律声情研究助手 · 本地离线视图</small></div><nav class="tabs"><a href="index.html">总览</a><a href="parse.html">逐字解析与检索</a><a class="on" href="browse.html">在线检索（需服务）</a><a href="graph.html">知识图谱</a><a href="review.html">校订队列</a></nav><button id="theme" class="ghost" title="切换日间/夜间">☾ 夜间</button></div></header><main>
+<div class="card">
+  <div class="row">
+    <label class="f">朝代
+      <select id="dynasty"><option>清</option><option>宋</option><option>元</option></select></label>
+    <label class="f">关键词（题名／原文）
+      <input id="q" type="text" size="14" placeholder="如：江南"></label>
+    <label class="f">词人
+      <input id="author" type="text" size="10" placeholder="如：纳兰性德"></label>
+    <label class="f">词牌
+      <input id="cipai" type="text" size="9" placeholder="如：临江仙"></label>
+    <label class="f">句脚字（可多字，取并集）
+      <input id="tail" type="text" size="6" placeholder="愁 灯"></label>
+    <label class="f">句脚平仄
+      <select id="tailPz"><option value="">不限</option><option>平</option><option>仄</option></select></label>
+    <label class="f">声律模式（? = 任意）
+      <input id="pz" type="text" size="9" placeholder="仄仄平平仄"></label>
+    <label class="f">字数 ≥ <input id="minLen" type="number" size="4"></label>
+    <label class="f">字数 ≤ <input id="maxLen" type="number" size="4"></label>
+    <label class="f">句数 ≥ <input id="minSent" type="number" size="3"></label>
+    <label class="f">句数 ≤ <input id="maxSent" type="number" size="3"></label>
+    <label class="f">仄比 ≥% <input id="minZe" type="number" size="4"></label>
+    <label class="f">仄比 ≤% <input id="maxZe" type="number" size="4"></label>
+    <label class="f">最长句 ≥ <input id="minLong" type="number" size="3"></label>
+    <label class="f">变化值 ≥ <input id="changeMin" type="number" step="0.1" size="5"></label>
+    <label class="f">变化值 ≤ <input id="changeMax" type="number" step="0.1" size="5"></label>
+    <label class="f">长句阈值 ≥ <input id="thrMin" type="number" size="3"></label>
+    <label class="f">长句阈值 ≤ <input id="thrMax" type="number" size="3"></label>
+    <label class="f">声情
+      <select id="scene"><option value="">不限</option><option>后段上升</option>
+        <option>后段下降</option><option>前后持平</option></select></label>
+    <label class="f">排序
+      <select id="sort"><option value="pid">篇号</option><option value="ze_desc">仄比 高→低</option>
+        <option value="ze_asc">仄比 低→高</option><option value="len_desc">字数 多→少</option>
+        <option value="len_asc">字数 少→多</option>
+        <option value="sent_desc">句数 多→少</option><option value="sent_asc">句数 少→多</option>
+        <option value="long_desc">最长句 长→短</option><option value="long_asc">最长句 短→长</option>
+        <option value="change_desc">变化值 大→小</option>
+        <option value="change_asc">变化值 小→大</option></select></label>
+    <label class="f">每页
+      <select id="size"><option>20</option><option selected>50</option><option>100</option>
+        <option>200</option></select></label>
+    <button id="go">检索</button>
+    <button id="reset" class="ghost">清空</button>
+    <button id="csv" class="ghost">导出 CSV</button>
+  </div>
+  <p class="dim">在线模式：条件由本地 SQLite 引擎执行（句脚字／声脚平仄／声律模式在 lines 表上判定）；离线视图只含清词，这里可选朝代（清／宋／元）。条件之间是「且」；句脚字与声律模式在
+    <b>句</b>一级判定（句脚字＝该句最后一个汉字，句脚平仄＝该句平仄串的末字）。也可用链接参数直达：
+    <code>parse.html?tail=愁&amp;minZe=50</code> 或 <code>parse.html?pid=&lt;篇号&gt;</code>。</p>
+</div>
+<div class="card tight"><div id="meta"></div><div id="facets"></div></div>
+<div class="card">
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>词人</th><th>题名</th><th>词牌</th><th>句数</th><th>字数</th>
+      <th>仄比</th><th>声情</th><th>操作</th></tr></thead>
+    <tbody id="rows"></tbody></table></div>
+  <div id="pager"></div>
+</div>
+<div class="card"><h2>逐字解析</h2>
+  <div id="detail"><p class="dim">点上面任意一行的「逐字解析」看逐字平仄表；命中条件的句子会高亮
+    （✳ 句脚字命中、〜 声律模式命中）。</p></div>
+</div>
+<script src="metrics.js"></script><script src="ui.js"></script>
+<script src="app_parse.js"></script>
+<script>ParseApp.setLive('');ParseApp.mount();UI.mountTheme();</script>
+</main><footer class="foot">在线检索由 web/serve.py 提供；页面生成时间：2026-10-04 21:47:18　·　数据：<code>data/corpus.db</code>（清词 26742 首，由 <code>web/build_views.py</code> 生成）　·　若你看到 NaN 或空表格，说明打开的是旧副本：按 Ctrl+F5 强制刷新，或重新跑 <code>python web/build_views.py</code>。</footer></body></html>
