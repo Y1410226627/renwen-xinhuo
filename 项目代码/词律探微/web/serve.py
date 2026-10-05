@@ -645,6 +645,20 @@ def q_parse(pid):
     out = {k: d.get(k) for k in ('pid', 'dynasty', 'author', 'title', 'cipai', 'sent_n', 'han_len',
                                  'ping', 'ze', 'ze_ratio', 'f_ratio', 'b_ratio', 'change',
                                  'abs_change', 'longest_seq', 'longest_len', 'threshold', 'scene')}
+    # ⚠ 2026-10-06 修（在线「逐字解析」显示「最长句第 NaN 句」的根因）：
+    #   库里 `longest_seq` 存的是 **JSON 数组字面量的字符串**（`build_corpus.py` 用
+    #   `json.dumps` 写入，如 `'[4]'` / `'[1, 3]'`），而前端曾按「、／，」纯文本分隔解析 →
+    #   `'[4]'.split(/[、,，]/)` = `['[4]']` → `Number('[4]')` = `NaN` → 渲染成「第 NaN 句」。
+    #   这里在**服务端出口统一规范化成真数组**（一处收口，所有消费者拿到同一形态）；
+    #   离线路径本就走前端自算（真数组），故只有在线页面中招。
+    #   注：`SEARCH_FIELDS` 不含 longest_seq，故检索列表页不受影响。
+    _ls = out.get('longest_seq')
+    if isinstance(_ls, str):
+        try:
+            _ls = json.loads(_ls)
+        except Exception:
+            _ls = [int(x) for x in re.split(r'[、,，\s]+', _ls) if x.strip().isdigit()]
+    out['longest_seq'] = [int(x) for x in _ls] if isinstance(_ls, (list, tuple)) else []
     out['lines'] = lines
     out['raw'] = d.get('raw')
     return out

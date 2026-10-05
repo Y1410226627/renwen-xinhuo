@@ -230,6 +230,18 @@ def main():
     ok('解析接口：句脚字是最后一个汉字',
        all(L['tail'] == re.sub(r'[^\u3400-\u4dbf\u4e00-\u9fff]', '', L['text'])[-1:]
            for L in pj['lines'] if L['han_len'] > 0))
+    # ⚠ 2026-10-06 新增（历史缺陷回归护栏）：`longest_seq` 必须是**数字数组**。
+    #   库里的存储形态是 JSON 字符串（build_corpus 用 json.dumps 写入，如 '[4]'），
+    #   接口出口必须规范化成数组——旧版直出字符串，前端按「、」分隔解析得到
+    #   Number('[4]')=NaN，页面显示「最长句第 NaN 句」（只有在线模式中招，离线自算为真数组）。
+    _ls = pj.get('longest_seq') or []
+    ok('解析接口：longest_seq 是数组（不是 JSON 字符串）',
+       isinstance(pj.get('longest_seq'), list), repr(pj.get('longest_seq')))
+    ok('解析接口：longest_seq 元素均为正整数',
+       all(isinstance(x, int) and x > 0 for x in _ls), repr(_ls))
+    ok('解析接口：longest_seq 指向的句长 == longest_len',
+       (not _ls) or all(pj['lines'][i - 1]['han_len'] == pj['longest_len'] for i in _ls),
+       '%s / longest_len=%s' % (_ls, pj['longest_len']))
 
     # ---------- 七、流式问答（SSE）：「答案先到」契约（本地桩，不联网） ----------
     import time as _time

@@ -164,6 +164,24 @@ function resetAll() {
   run(1);
 }
 
+/* 最长句序的规范化（2026-10-06 修「第 NaN 句」）：
+   数据可能以三种形态到达——① 真数组（离线自算 / 新服务端）；② JSON 数组字面量字符串
+   （库里原样存 '[4]'，旧服务端会这么返回）；③ 纯文本「1、3」/「1,3」（更早的格式）。
+   旧版只认第 ③ 种，于是第 ② 种被整串当作一个元素 → Number('[4]') = NaN → 渲染「第 NaN 句」。
+   这里三种都认，并过滤非有限数，保证产出恒为「数字数组」。 */
+function parseSeq(v) {
+  if (Array.isArray(v)) return v.map(Number).filter(Number.isFinite);
+  if (v === undefined || v === null) return [];
+  const s = String(v).trim();
+  if (s.charAt(0) === '[') {
+    try {
+      const a = JSON.parse(s);
+      if (Array.isArray(a)) return a.map(Number).filter(Number.isFinite);
+    } catch (e) { /* 退回纯文本分支 */ }
+  }
+  return s.split(/[、,，\s]+/).filter((x) => x !== '').map(Number).filter(Number.isFinite);
+}
+
 async function showDetail(pid) {
   detailHtml.value = '<span class="spin"></span> 取逐字解析…';
   if (online) {
@@ -173,8 +191,7 @@ async function showDetail(pid) {
       const lines = (j.lines || []).map((L) => ({ text: L.text, pz: L.pz, tail: L.tail }));
       const row = [j.pid, j.dynasty, j.author, j.cipai, j.title, j.raw || ''];
       const jm = Object.assign({}, j);
-      jm.longest_seq = String(j.longest_seq === undefined || j.longest_seq === null ? '' : j.longest_seq)
-        .split(/[、,，]/).filter((x) => x !== '').map(Number);
+      jm.longest_seq = parseSeq(j.longest_seq);
       detailHtml.value = ParseApp.detailHtml(row, {
         lines, metrics: jm, tails: lines.map((L) => L.tail)
       }, lastCond);
