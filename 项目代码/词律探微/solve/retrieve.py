@@ -1255,6 +1255,18 @@ def _parse_core(conn, text, keep_names=False):
             #   （FRAME_WORDS ∪ 提问/指标虚词），否则「蝶恋花·的平仄」会把「的平仄」当题名 →
             #   「词牌=蝶恋花；题名=的平仄」0 命中（实测），而用户只是想问「蝶恋花的平仄」。
             _FRAME_ALL = tuple(FRAME_WORDS) + tuple(STOPWORDS) + tuple(_Q_FRAME)
+            # ⚠ 2026-10-06 修（实测「蝶恋花·四月一日感粤事是谁的作品」答非所问）：
+            #   中文问句里「题名」与「疑问框架」之间**常常没有空格**，而上面那条正则的右边界
+            #   只认「标点／空白／结尾」→ 会把框架一起吞进来（实测捕获到「四月一日感粤事是谁的作品」），
+            #   再被框架词检查**整条判负 → 题名丢失** → 只剩词牌条件 → 命中 1069 篇、端上融合
+            #   排序前 3 篇（答非所问）。对照：带空格写法「…原白斋中 的作者是谁」因正则在空格处
+            #   停下而正常识别——**同一个问题，写法不同结果不同**。
+            #   修法：**切开**而不是整条丢——取「最靠左出现的框架词」的位置，从那里截断；
+            #   仅当截断后仍 ≥2 字、且剩余不再含任何框架词时才认作题名（宁缺勿滥，保持原纪律）。
+            if any(w in cand for w in _FRAME_ALL):
+                _pos = min(cand.find(w) for w in _FRAME_ALL if w in cand)
+                if _pos >= 2:
+                    cand = cand[:_pos]
             if len(cand) >= 2 and not any(w in cand for w in _FRAME_ALL):
                 spec.title_any.append(cand)
                 rest = rest.replace(m_t.group(1).strip(), ' ')
@@ -1305,8 +1317,24 @@ def _parse_core(conn, text, keep_names=False):
     #   （剔掉「正好有」还剩「一句」、剔掉「中位数」还剩「仄是平的」）。
     #   规则：剩下的 2+ 汉字串里，只要**含**框架词/虚词，就不是「要检索的内容」，一律丢弃。
     _FRAME_SUB = tuple(FRAME_WORDS) + ('的', '是', '其', '之', '都', '也', '还', '再', '又')
-    spec.keywords = [c for c in re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]{2,}', rest)
-                     if c.strip() and not any(w in c for w in _FRAME_SUB)]
+    # ⚠ 2026-10-06 修（与 D21 同源：**「含框架词就整条丢」**这条判据在中文问句上过粗）：
+    #   中文里「要检索的内容」与「疑问框架」之间**常常没有空格**，于是
+    #   `'四月一日感粤事是谁的作品'` 因为含「作品」「是」被**整条丢弃** → 词面为空 →
+    #   裸题名无法走 D09 已采纳的 `rescue_title()` 通道 → 无语义条件 → 答非所问（实测）。
+    #   修法：不再整条丢，而是**从最靠左的框架词处截断**；仅当剩余 ≥2 字且不再含框架词时保留。
+    _kws = []
+    for _c in re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]{2,}', rest):
+        if not _c.strip():
+            continue
+        _hit = [w for w in _FRAME_SUB if w in _c]
+        if _hit:
+            _pos = min(_c.find(w) for w in _hit)
+            _c2 = _c[:_pos]
+            if len(_c2) >= 2 and not any(w in _c2 for w in _FRAME_SUB):
+                _kws.append(_c2)
+            continue
+        _kws.append(_c)
+    spec.keywords = _kws
 
     # 越界的数值条件：**如实披露**（文案只用字段标签，**不含阿拉伯数字**——
     # 答案里每行数字都必须以证据为源，自带数字会撞护栏；标签由构造保证干净）。
