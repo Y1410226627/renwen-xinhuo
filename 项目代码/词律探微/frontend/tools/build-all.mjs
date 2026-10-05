@@ -104,6 +104,32 @@ function cleanStale(dir, before, keepFn) {
   if (removed) { console.log('  清理陈旧文件 ' + removed + ' 个（' + dir + '）'); }
 }
 
+/* ⚠ 2026-10-06 修：上面 cleanStale 的判据（「构建前有、构建后无」）对 Vite 的
+ * **hash 文件名**是无效的——每次构建生成新 hash（如 ParseView-BquPgi4M → ParseView-DMWKPgDH），
+ * 旧 hash 文件 Vite 既不删、也不在「本轮生成列表」里，于是永远命中「本轮仍产出」分支 →
+ * **从不清理**，assets/ 逐轮堆积（实测同目录并存 CIHANf2s / BquPgi4M / G2sLu_Xe 等多轮残留）。
+ * 正解：以**本轮 HTML 实际引用的资源**为活性判据，删除 assets/ 下未被任何 HTML 引用的文件。
+ * 安全性：① 只在读到≥1 条引用时才动手（读不到就宁可不删，避免误删）；② 单次清理量通常
+ * 十余个文件，远低于宿主「安全删除批量护栏」的阈值。 */
+function cleanUnreferencedAssets(dir) {
+  const assets = path.join(dir, 'assets');
+  if (!fs.existsSync(assets)) { return; }
+  const refs = new Set();
+  for (const f of fs.readdirSync(dir)) {
+    if (!/\.html$/.test(f)) { continue; }
+    let t = '';
+    try { t = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
+    for (const m of t.matchAll(/assets\/([\w.\-]+)/g)) { refs.add(m[1]); }
+  }
+  if (!refs.size) { return; }               /* 读不到引用：不动手 */
+  let removed = 0;
+  for (const f of fs.readdirSync(assets)) {
+    if (refs.has(f)) { continue; }
+    try { fs.rmSync(path.join(assets, f)); removed++; } catch { /* 忽略 */ }
+  }
+  if (removed) { console.log('  清理未被引用的历史产物 ' + removed + ' 个（' + assets + '）'); }
+}
+
 /* 1) Vite 构建（两条产线）。构建前快照，构建后清理陈旧文件。 */
 const VUE = path.resolve(ROOT, 'data', 'vue');
 const ASK = path.resolve(ROOT, 'web', 'dist', 'ask');
@@ -114,6 +140,9 @@ run(process.execPath, [viteBin, 'build', '--mode', 'views'], FRONTEND,
 run(process.execPath, [viteBin, 'build'], FRONTEND, '② 构建问答页 → web/dist/ask/');
 cleanStale(VUE, snapVue, VITE_OWNED);
 cleanStale(ASK, snapAsk, null);       /* ask 目录是 Vite 独占，整体清理安全 */
+/* 补一道「按引用活性」的清理：上面那道抓不到 hash 更名留下的旧产物（见函数注释） */
+cleanUnreferencedAssets(VUE);
+cleanUnreferencedAssets(ASK);
 
 /* 2) Python 造数据（必须在 Vite 之后，否则被 emptyOutDir 清掉） */
 const py = pythonExe();
