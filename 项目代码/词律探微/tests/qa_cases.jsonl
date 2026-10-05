@@ -32,3 +32,5 @@
 {"id": "Q032", "question": "句脚是灯或者声的清词有哪些", "kind": "数值型", "refuse": false, "expect_pid": null, "note": "无引号多值+体裁尾巴：灯∪声都要取到（答案解析实测）"}
 {"id": "Q033", "question": "字数不到五十的清词", "kind": "数值型", "refuse": false, "expect_pid": null, "note": "中文数字口语（答案解析实测）"}
 {"id": "Q034", "question": "句数在五到八之间的清词", "kind": "数值型", "refuse": false, "expect_pid": null, "note": "区间口语（答案解析实测）"}
+{"id": "Q035", "question": "蝶恋花·四月一日感粤事是谁的作品", "kind": "数值型", "refuse": false, "expect_pid": "ci.清.0000.base.json#111", "note": "【回归】词牌·题名 + 疑问框架（**无空格**）：题名不得被框架吞掉而只剩词牌条件（2026-10-06 主人实测缺陷，DECISIONS D21）"}
+{"id": "Q036", "question": "四月一日感粤事是谁的作品", "kind": "数值型", "refuse": false, "expect_pid": "ci.清.0000.base.json#111", "note": "【回归】裸题名 + 疑问框架：词面须保留题名，经 rescue_title 提升为题名条件（2026-10-06 实测缺陷，DECISIONS D21）"}
