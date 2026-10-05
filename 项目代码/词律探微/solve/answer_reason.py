@@ -66,12 +66,32 @@ _RULES = (
 def classify(res) -> dict:
     """从 `answer()` 的结果 dict 推断结构化理由。
 
+    判据优先顺序（外部审查 P2-56 后调整，从「纯文案反推」升级为「结构化优先」）：
+      ① `res['reason']` —— `answer()` 已**直接给出**结构化理由时直接采用（最可靠）；
+      ② **结构化字段**（如 `spec.unsupported`）—— 不再依赖文案猜测；
+      ③ 文案判据 `_RULES` —— 兼容层（旧调用方/日志里只有文案时仍可用）。
+
     返回 `{'reason': Reason, 'label': 中文标签, 'refused': bool, 'total': int|None,
            'note': 一句话依据}`。
     """
-    text = str((res or {}).get('answer') or '')
-    refused = bool((res or {}).get('refused'))
-    total = (res or {}).get('total')
+    res = res or {}
+    refused = bool(res.get('refused'))
+    total = res.get('total')
+
+    # ① answer() 直接给出的结构化理由（最可靠，优先采用）
+    _direct = res.get('reason')
+    if _direct:
+        try:
+            _r = _direct if isinstance(_direct, Reason) else Reason(_direct)
+            return _mk(_r, refused, total, 'answer() 直接给出的结构化理由')
+        except ValueError:
+            pass
+    # ② 结构化字段（spec.unsupported 等）——不依赖文案
+    _sp = res.get('spec')
+    if isinstance(_sp, dict) and _sp.get('unsupported'):
+        return _mk(Reason.UNSUPPORTED, refused, total, 'spec.unsupported=%s' % _sp['unsupported'])
+
+    text = str(res.get('answer') or '')
 
     for reason, pats in _RULES:
         for p in pats:

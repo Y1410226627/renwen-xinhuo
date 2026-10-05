@@ -56,7 +56,7 @@ def parse_question(text: str):
     return out
 
 
-def solve_one(q, poems, eng):
+def solve_one(q, poems, eng, strict_locate=False):
     cls = CLS_MAP.get(q.get('类别'), '')
     suffix = (q.get('题号') or '')[-2:]
     mismatch = ''
@@ -91,6 +91,16 @@ def solve_one(q, poems, eng):
             # 低置信不得静默当作确定答案（采纳自另一 AI 版本的 errors 标注设计）：
             # 1000 题实测全走 A4，故本标注不改变任何一条交付答案。
             errs.append('%s 定位低置信：[%s] %s《%s》' % (tag, path, spec['作者'], spec['题名']))
+    # ⚠ 2026-10-06 修（外部审查 P1-26）：低置信定位原先**仍继续计算并给出答案**——对竞赛题，
+    #   「错误定位」比「定位失败」危险得多（一个错答案比一个明确的"算不出"更糟）。
+    #   新增 strict 开关（**默认关**，故交付答案逐字节不变）：开启后低置信篇目一律不参与计算
+    #   （等价 insufficient_evidence），宁可拒答也不拿错定位的数值充数。
+    if strict_locate:
+        _low = sorted(t for t in located if not paths.get(t, '').startswith('A4'))
+        if _low:
+            for _t in _low:
+                located.pop(_t, None)
+            ans = {}
     if cls == 'C1' and '甲' in located and '乙' in located:
         ans = eng.c1(located['甲'].raw, located['乙'].raw)
     elif cls == 'C2' and '甲' in located and '乙' in located:
@@ -132,6 +142,12 @@ def main():
     ap.add_argument('--output', required=True)
     ap.add_argument('--overrides', default=default_overrides_path())
     ap.add_argument('--limit', type=int, default=0)
+    # ⚠ 2026-10-06 新增（外部审查 P1-26/27）：两个**默认关**的显式开关——既满足
+    #   「低置信不作答 / error 即失败」的严格诉求，又保证默认路径与交付答案逐字节一致。
+    ap.add_argument('--strict-locate', action='store_true',
+                    help='低置信定位（非 A4）时不作答（默认关：保持交付答案不变）')
+    ap.add_argument('--fail-on-error', action='store_true',
+                    help='存在 error 时以非 0 退出码结束（供 CI/批处理区分 fatal 与 warning）')
     args = ap.parse_args()
 
     poems = load_corpus(args.corpus)
@@ -160,7 +176,7 @@ def main():
     ncls = {}
     with open(args.output, 'w', encoding='utf-8') as f:
         for i, q in enumerate(qs, 1):
-            r = solve_one(q, poems, eng)
+            r = solve_one(q, poems, eng, strict_locate=args.strict_locate)
             ncls[r['类别']] = ncls.get(r['类别'], 0) + 1
             if r['errors']:
                 nerr += 1
@@ -172,6 +188,12 @@ def main():
     print('类别分布：%s' % dict(sorted(ncls.items())), file=sys.stderr)
     print('完成：%d 题，其中 %d 题有 error、%d 题有 warning -> %s' % (len(qs), nerr, nwarn, args.output),
           file=sys.stderr)
+    # ⚠ 2026-10-06 修（外部审查 P1-27）：原先无论有多少 error 都 exit 0——「日志写着 error、
+    #   进程却成功」，CI 会一路绿灯。新增 --fail-on-error 开关显式区分 fatal 与 warning。
+    if args.fail_on_error and nerr:
+        print('❌ --fail-on-error：%d 题有 error，以非 0 退出' % nerr, file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':

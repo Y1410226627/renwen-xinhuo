@@ -9,7 +9,7 @@
  * （旧版是一百多行手写 <label>），这是本次「降低维护成本」的核心改进之一。
  * 判定表、分页语义、逐字解析渲染全部复用 core/parse.js 的纯函数（字符串契约不变）。
  */
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { ParseApp, UI } from '../core/index.mjs';
 import AppShell from '../components/AppShell.vue';
 import { api } from '../api.js';
@@ -83,12 +83,29 @@ function readCond() {
     const v = cond[f.id];
     const s = (v === null || v === undefined) ? '' : String(v).trim();
     if (f.type === 'number') { o[f.id] = s === '' ? '' : Number(s); }
-    else if (f.id === 'sort' || f.id === 'size') { /* 排序与页长不进条件 */ }
+    /* ⚠ 2026-10-06 修（修复过程中发现的**新缺陷**）：`sort` 与 `size` 原先被一起排除，
+       但两者性质不同——size 是「页长」（由上面的 `size` ref 驱动分页，不进检索条件），
+       sort 是**检索参数**（服务端 `SORTS` 白名单要用它生成 ORDER BY）。
+       排除 sort 后 `c.sort` 恒为 undefined → 服务端永远走默认 `ORDER BY p.pid`
+       → **排序下拉框在在线/离线都不生效**；也让本轮的「离线/在线 tie-break 一致」
+       修复在真实 UI 里根本走不到。现只排除 size，sort 正常进入条件。 */
+    else if (f.id === 'size') { /* 页长不进条件 */ }
     else { o[f.id] = s; }
   });
   o.dynasty = o.dynasty || '清';
   return o;
 }
+
+/* 「每页」下拉框（cond.size）**不进检索条件**，只驱动分页。
+   旧版把 size 从条件里排除后忘了接到分页上 → 用户改下拉框完全无效（永远 50/页）。
+   这里监听它，改了就更新页长并回到第 1 页**重新检索/重切页**（否则只改数字、列表不重排）。 */
+watch(() => cond.size, (v) => {
+  const n = parseInt(v, 10);
+  if (n > 0 && n !== size.value) { size.value = n; page.value = 1; run(1); }
+});
+
+/* 声律模式白名单（与 core/parse.js 的 PZ_OK / web/serve.py _pz_glob 同一口径） */
+const PZ_OK = ParseApp.PZ_OK;
 
 /* ---------- 渲染（在线/离线统一入口） ---------- */
 function paint(res, c, alreadyPaged) {
@@ -111,6 +128,14 @@ function paint(res, c, alreadyPaged) {
 async function run(p) {
   page.value = p || 1;
   const c = readCond();
+  /* 声律模式含非法字符：明确报错并中止（不静默替换成通配符），与 web/serve.py 的
+     400 INVALID_QUERY 同口径。 */
+  if (c.pz && !PZ_OK.test(String(c.pz).trim())) {
+    metaHtml.value = '<span class="bad">声律模式含非法字符：只允许「平」「仄」「?」「？」</span>';
+    rows.value = []; total.value = 0; pages.value = 1; facets.value = null;
+    pagerHtml.value = ''; lastHits.value = [];
+    return;
+  }
   if (online) {
     metaHtml.value = '<span class="spin"></span> 正在向本地引擎检索…';
     try {
@@ -164,15 +189,24 @@ async function showDetail(pid) {
   detailHtml.value = `<span class="bad">没有这一篇：${UI.esc(pid)}</span>`;
 }
 
+/* 导出范围（F6）：离线 lastHits 是**全部命中**；在线是服务端分页后的**当前页**。
+   旧版两种模式都只导出 lastHits，在线时悄悄把「当前页」当成「全部」。
+   这里不偷偷换语义，而是把范围**显式标注**在按钮文案与 CSV 首列上：
+     · 在线且总命中 > 当前页行数 → 「当前页 N 篇」；
+     · 其余（离线 / 在线凑巧一页装下）→ 「全部 N 篇」。
+   这样导出结果始终可预期（低风险：不动分页与检索，只改展示）。 */
+const csvScope = computed(() => (online && lastHits.value.length < total.value) ? '当前页' : '全部');
+const csvLabel = computed(() => `导出 CSV（${csvScope.value} ${lastHits.value.length} 篇）`);
+
 function exportCsv() {
-  const out = [['pid', '朝代', '词人', '词牌', '题名', '句数', '字数', '平', '仄', '仄声比例%', '声情', '变化值', '阈值', '原文']];
+  const out = [['导出范围', 'pid', '朝代', '词人', '词牌', '题名', '句数', '字数', '平', '仄', '仄声比例%', '声情', '变化值', '阈值', '原文']];
   lastHits.value.forEach((it) => {
     const r = it.row, m = it.info.metrics;
-    out.push([r[0], r[1], r[2], r[3], r[4], m.sent_n, m.han_len, m.ping, m.ze, m.ze_ratio, m.scene, m.change, m.threshold, r[5]]);
+    out.push([csvScope.value, r[0], r[1], r[2], r[3], r[4], m.sent_n, m.han_len, m.ping, m.ze, m.ze_ratio, m.scene, m.change, m.threshold, r[5]]);
   });
   if (out.length === 1) { UI.toast('没有可导出的结果'); return; }
   UI.download('词律探微_检索结果.csv', UI.csvText(out));
-  UI.toast(`已导出 ${out.length - 1} 行`);
+  UI.toast(`已导出 ${csvScope.value} ${out.length - 1} 篇`);
 }
 
 /* 分面 → 点击即筛 */
@@ -182,7 +216,13 @@ function applyFacet(pairs) {
 }
 function goPage(p) { run(p); window.scrollTo(0, 0); }
 
-const ratioBuckets = { '0–25%': [0, 25], '25–40%': [25, 40], '40–50%': [40, 50], '50–65%': [50, 65], '65–100%': [65, 100] };
+/* 比例分桶（键名/文案与 core/parse.js 的 facets 分桶、web/serve.py 的 RATIO_BUCKETS 完全一致）。
+   ⚠ 边界重叠（F5）：分面**计数**用半开区间（core/parse.js 的 `z<40` / serve.py 的 `>=lo AND <hi`），
+   而点击分面写入 minZe/maxZe 后，**命中判定**是闭区间 `minZe<=z<=maxZe`。
+   若上界直接写 40，则 ze_ratio=40.0 会同时命中 '25–40%'（[25,40]）与 '40–50%'（[40,50]），
+   与计数口径不一致。ze_ratio 恒为 1 位小数（core/metrics.js 银行家舍入），
+   故非末桶上界减 0.01 以表达开区间：40.0 只落 '40–50%'；末桶无上界，用 100 收口。 */
+const ratioBuckets = { '0–25%': [0, 24.99], '25–40%': [25, 39.99], '40–50%': [40, 49.99], '50–65%': [50, 64.99], '65–100%': [65, 100] };
 
 onMounted(() => {
   readPack();
@@ -217,7 +257,7 @@ onMounted(() => {
         </label>
         <button id="go" @click="run(1)">检索</button>
         <button id="reset" class="ghost" @click="resetAll">清空</button>
-        <button id="csv" class="ghost" @click="exportCsv">导出 CSV</button>
+        <button id="csv" class="ghost" @click="exportCsv">{{ csvLabel }}</button>
       </div>
     </div>
 

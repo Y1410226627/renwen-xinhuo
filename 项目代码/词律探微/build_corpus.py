@@ -16,6 +16,8 @@
         （不做手写倒排表，省掉「每次取 df/dl 都回查数据库」的 N+1 开销）。
   - `authors` / `cipai` / `cipai_dyn`：查询理解用的名字表；`meta` 存计数与指纹。
   - `--verify N`：随机抽 N 首**重新用引擎算一遍**并逐字段比对（入库不能只信自己）。
+  - **原子发布**：先构建到 `<db>.tmp`，构建 + 校验全部通过后才 `os.replace` 覆盖目标库；
+    任何一步失败都删除临时库、**原库保持不动**（避免「构建到一半的坏库」被当成成品）。
   - 全程确定性：同一语料两次建库 → 行数、全部字段、内容指纹一致。
 
 用法：
@@ -261,15 +263,36 @@ def main():
     eng = Engine(Pronouncer(args.overrides))
     if getattr(eng.p, 'n_overrides', None) == 0:
         print('⚠️ 标定表为空：入库指标会整体偏错，请先检查 %s' % args.overrides, file=sys.stderr)
-    n, nline = build(poems, eng, args.db, with_fts=not args.no_fts)
-    size = os.path.getsize(args.db) / 1048576.0
-    print('入库完成：poems %d 行 / lines %d 行 / %.1f MB -> %s' % (n, nline, size, args.db))
+    # T6：原子发布 —— 先构建到 db + '.tmp'，全部通过后再 os.replace 覆盖目标库。
+    #   失败时删除临时库、保留原库不动，避免半成品库被当成成品。
+    tmp_db = args.db + '.tmp'
+    for _p in (tmp_db, tmp_db + '-wal', tmp_db + '-shm'):     # 清掉上次失败可能残留的临时库
+        if os.path.exists(_p):
+            os.remove(_p)
+    try:
+        n, nline = build(poems, eng, tmp_db, with_fts=not args.no_fts)
+    except Exception as e:                                     # 构建异常：原库不受影响
+        for _p in (tmp_db, tmp_db + '-wal', tmp_db + '-shm'):
+            if os.path.exists(_p):
+                os.remove(_p)
+        print('❌ 建库失败（已删除临时库，原库保持不变）：%r' % e, file=sys.stderr)
+        return 2
+    size = os.path.getsize(tmp_db) / 1048576.0
+    print('构建完成（临时库）：poems %d 行 / lines %d 行 / %.1f MB -> %s' % (n, nline, size, tmp_db))
     if args.verify_hash:
-        print('内容指纹：%s' % fingerprint(args.db))
+        print('内容指纹：%s' % fingerprint(tmp_db))
     rc = 0
     if args.verify:
-        rc = verify(poems, eng, args.db, args.verify)
-    return rc
+        rc = verify(poems, eng, tmp_db, args.verify)
+    if rc != 0:                                                # 抽样复核不合格：不发布
+        for _p in (tmp_db, tmp_db + '-wal', tmp_db + '-shm'):
+            if os.path.exists(_p):
+                os.remove(_p)
+        print('❌ 抽样复核未通过（rc=%d），已删除临时库，原库保持不变' % rc, file=sys.stderr)
+        return rc
+    os.replace(tmp_db, args.db)                                # 原子替换（同目录，Windows 亦原子）
+    print('原子发布完成：%s -> %s' % (os.path.basename(tmp_db), args.db))
+    return 0
 
 
 if __name__ == '__main__':

@@ -59,8 +59,10 @@ DATA = os.path.join(ROOT, 'data')
 # Vue3+Vite 构建产物（D15 前端架构）。问答页在 web/dist/ask/；离线四视图在 data/vue/。
 DIST_ASK = os.path.join(HERE, 'dist', 'ask')
 DIST_VIEWS = os.path.join(DATA, 'vue')
+# ⚠ 2026-10-06 修（外部审查 P1-28/29）：并发模型重构（详见 get_conn 注释）。
+#   LOCK 不再包裹任何 LLM / SSE / 长计算，只作临界区兜底。
 LOCK = threading.Lock()
-CONN = None
+_TLS = threading.local()      # 线程本地连接（替代旧版共享单连接 CONN）
 LLM = None
 STAMP = time.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -125,11 +127,21 @@ def get_llm():
 
 
 def get_conn():
-    global CONN
-    if CONN is None:
-        CONN = sqlite3.connect(DB, check_same_thread=False)
-        CONN.row_factory = sqlite3.Row
-    return CONN
+    """**线程本地连接**（每线程一条）。
+
+    ⚠ 2026-10-06 修（外部审查 P1-28/29）：旧版是共享单连接 + check_same_thread=False，
+    必须靠一把全局 LOCK 才能避免「线程 A 与线程 B 同时用同一条连接」；而该 LOCK 又被用来
+    包住**含大模型调用的整段问答**（单次 1.4~5 秒）→ 所有请求被最慢的 LLM 串行化，
+    ThreadingHTTPServer 的高并发形同虚设。
+    现改为线程本地连接：问答链全程**只读**（ask.py 无任何写语句），读读天然可并发，
+    共享连接的竞态从根上消失；LOCK 退化为临界区兜底，不再包 LLM / SSE / 长计算。
+    """
+    c = getattr(_TLS, 'conn', None)
+    if c is None:
+        c = sqlite3.connect(DB, check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        _TLS.conn = c
+    return c
 
 
 def _num(v, cast=float):
@@ -144,10 +156,22 @@ def _tail_chars(s):
 
 
 def _pz_glob(pat):
-    """平仄模式 → SQLite GLOB 模式：平/仄 原样，其他字符当通配（GLOB 里 ? = 任一单字符）。"""
-    pat = (pat or '').strip()[:40]
+    """平仄模式 → SQLite GLOB 模式：平/仄 原样，`?`/`？` 为通配，**其余字符一律拒绝**。
+
+    ⚠ 2026-10-06 修（外部审查 P1-34）：旧版把「不是 平/仄 的字符」**静默当通配符**，
+    于是「平仄abc」被当成「平仄???」照常检索——用户打错却拿到一个看起来正常的答案；
+    超长还静默截断到 40 位。现改为严格白名单：非法字符 / 超长 → 抛 ValueError，
+    由路由层转成 400 INVALID_QUERY（与 Ask 链 validate_extras() 的白名单同一口径）。
+    """
+    pat = (pat or '').strip()
     if not pat:
         return None
+    if len(pat) > 40:
+        raise ValueError('声律模式过长（最多 40 位，当前 %d 位）' % len(pat))
+    bad = sorted({c for c in pat if c not in '平仄?？'})
+    if bad:
+        raise ValueError('声律模式含非法字符「%s」——只允许「平」「仄」「?」「？」'
+                         % ''.join(bad))
     return '*' + ''.join(c if c in '平仄' else '?' for c in pat) + '*'
 
 
@@ -182,20 +206,43 @@ def _tables_in_sync(conn):
 
 def build_where(p, conn=None):
     """结构化条件 → (WHERE 子句, 参数)。**条件之间是「且」**；句级条件走 lines 表。"""
-    where = ['p.dynasty = ?']
-    args = [p.get('dynasty') or '清']
+    # ⚠ 2026-10-06 修（外部审查 P1-32/33）：
+    #   · dynasty/author/cipai 现支持**多值**（空格/逗号/分号分隔 → OR 并集）。旧版是单值
+    #     `LIKE '%整串%'`，于是 nl2query 听出的多值（如「高旭和纳兰性德」）回填到表单后
+    #     要么被丢成空、要么整串失配。
+    #   · author/cipai 支持**三种匹配语义**（contains 默认 / exact / prefix）：与 Ask 链
+    #     QuerySpec 的结构化等值语义可显式对齐（nl2query 回填时带 Mode=exact）。
+    #   · 单值 + 默认 contains 时生成的 SQL 与旧版逐字等价（仅多一层括号，AND 连接下恒等）。
+    def _multi(key, default=None):
+        vals = [x for x in re.split(r'[\s,，;；]+', (p.get(key) or '').strip()) if x]
+        return vals or ([default] if default else [])
+
+    def _field(col, key, mode_key):
+        vals = _multi(key)
+        if not vals:
+            return
+        mode = (p.get(mode_key) or 'contains').strip()
+        if mode == 'exact':
+            where.append('(' + ' OR '.join('%s = ?' % col for _ in vals) + ')')
+            args.extend(vals)
+        elif mode == 'prefix':
+            where.append('(' + ' OR '.join('%s LIKE ?' % col for _ in vals) + ')')
+            args.extend(v + '%' for v in vals)
+        else:                                  # contains（默认；向后兼容旧调用）
+            where.append('(' + ' OR '.join('%s LIKE ?' % col for _ in vals) + ')')
+            args.extend('%' + v + '%' for v in vals)
+
+    _dyns = _multi('dynasty', '清')
+    where = ['(' + ' OR '.join('p.dynasty = ?' for _ in _dyns) + ')']
+    args = list(_dyns)
     q = (p.get('q') or '').strip()
     if q:
         where.append('(p.author LIKE ? OR p.cipai LIKE ? OR p.title LIKE ? OR p.raw LIKE ?)')
         args += ['%' + q + '%'] * 4
     # 实测（EXPLAIN QUERY PLAN）：`dynasty = '清'` 已让 SQLite 走 idx_poems_dyn，
     # 再把 LIKE 改写成 IN 子查询只是多一层、反而慢 25%（33ms vs 26ms）→ 保持 LIKE。
-    if (p.get('author') or '').strip():
-        where.append('p.author LIKE ?')
-        args.append('%' + p['author'].strip() + '%')
-    if (p.get('cipai') or '').strip():
-        where.append('p.cipai LIKE ?')
-        args.append('%' + p['cipai'].strip() + '%')
+    _field('p.author', 'author', 'authorMode')
+    _field('p.cipai', 'cipai', 'cipaiMode')
     chars = _tail_chars(p.get('tail'))
     if chars:
         where.append('EXISTS(SELECT 1 FROM lines l WHERE l.pid = p.pid AND l.tail IN (%s))'
@@ -313,8 +360,8 @@ def q_nl2query(conn, question, use_llm=True):
     落不到库上的字段与没听懂的片段一律如实带回（不静默丢）。
     """
     client = get_llm() if use_llm else None
-    with LOCK:
-        spec, note = ASK.understand(conn, question, llm=client, llm_parse=bool(use_llm))
+    # ⚠ 2026-10-06 修（外部审查 P1-29）：不再持全局锁调用大模型（含 LLM，1~5 秒）。
+    spec, note = ASK.understand(conn, question, llm=client, llm_parse=bool(use_llm))
     cond = {}
     if spec.tail_any:
         cond['tail'] = ' '.join(spec.tail_any)
@@ -327,10 +374,15 @@ def q_nl2query(conn, question, use_llm=True):
                      ('len_max', 'maxLen'), ('sent_min', 'minSent'), ('sent_max', 'maxSent')):
         if rng.get(src) is not None:
             cond[dst] = rng[src]
+    # ⚠ 2026-10-06 修（外部审查 P1-33）：旧版「多值一律置空」把「高旭和纳兰性德」这类
+    #   多值理解结果直接丢弃（只有恰好一个值才回填）。现按空格拼接保留**全部**值
+    #   （build_where 已支持多值 OR），并显式声明 exact 语义以对齐 Ask 链（P1-32）。
     if spec.author_any:
-        cond['author'] = spec.author_any[0] if len(spec.author_any) == 1 else ''
+        cond['author'] = ' '.join(spec.author_any)
+        cond['authorMode'] = 'exact'
     if spec.cipai_any:
-        cond['cipai'] = spec.cipai_any[0] if len(spec.cipai_any) == 1 else ''
+        cond['cipai'] = ' '.join(spec.cipai_any)
+        cond['cipaiMode'] = 'exact'
     if spec.keywords:
         cond['q'] = ' '.join(spec.keywords)
     if spec.tail_pz:
@@ -340,7 +392,8 @@ def q_nl2query(conn, question, use_llm=True):
         if rng.get(src) is not None:
             cond[dst] = rng[src]
     if spec.dynasty_any:
-        cond['dynasty'] = spec.dynasty_any[0] if len(spec.dynasty_any) == 1 else ''
+        # 同上（P1-33）：保留全部朝代值（build_where 的 dynasty 已支持多值 OR）。
+        cond['dynasty'] = ' '.join(spec.dynasty_any)
     return {'cond': cond, 'describe': spec.describe(), 'source': note.get('source'),
             'dropped': note.get('dropped') or [], 'notes': note.get('notes') or [],
             'unparsed': spec.unparsed or [], 'unsupported': spec.unsupported,
@@ -484,10 +537,11 @@ def _clean_ask_result(res, client, t0):
 def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None):
     t0 = time.time()
     client = get_llm() if (narrate or argument or parse) else None
-    with LOCK:
-        res = ASK.answer(get_conn(), q, topk=topk, llm=client,
-                         narrate=narrate, argument=argument, llm_parse=parse,
-                         llm_policy=policy, context=ctx)
+    # ⚠ 2026-10-06 修（外部审查 P1-29）：原先这里 `with LOCK:` 包住整个 ASK.answer（含 LLM，
+     #   单次 1.4~5 秒）→ 所有并发问答被串行化。改用线程本地连接后无需持锁。
+    res = ASK.answer(get_conn(), q, topk=topk, llm=client,
+                     narrate=narrate, argument=argument, llm_parse=parse,
+                     llm_policy=policy, context=ctx)
     return _clean_ask_result(res, client, t0)
 
 
@@ -499,13 +553,33 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
     （engine 事件：结论/证据/护栏，措辞还是模板版），大模型再边写边补「说明」。
     事件类型：status（进度）／engine（**引擎答案先到**）／delta（大模型增量）／
     final（完整 JSON，与 /api/ask 同构）／error。
+
+    ⚠ 2026-10-06 修（外部审查 P1-30）：旧版客户端断开后**后台线程仍会跑完整段 LLM**
+    （仅靠 wfile.write 抛 BrokenPipe 被动发现，无任何取消机制；队列还是无界的，连续操作会
+    不断堆积）。现版：①每次请求生成 request_id 供日志关联；②队列改**有界**（满则丢弃增量帧，
+    绝不阻塞 worker）；③生成器捕获 GeneratorExit / 写失败时置 cancel 事件，worker 在关键点
+    检查后尽快收尾（不再 emit、不再堆积）。
+    局限（如实声明）：llm.py 的底层 HTTP 请求不支持中途中断，因此**已在飞行中的单次模型调用
+    仍会跑完**——但不会再产生级联积压，线程会在该次调用返回后立刻结束。
     """
     import queue as _queue
     import threading as _threading
-    out = _queue.Queue()
+    import uuid as _uuid
+    rid = _uuid.uuid4().hex[:12]
+    out = _queue.Queue(maxsize=256)          # 有界：断开后不再无限堆积（见上）
+    cancelled = _threading.Event()
 
     def emit(kind, payload):
-        out.put((kind, payload))
+        if cancelled.is_set():
+            return
+        try:
+            out.put_nowait((kind, payload))
+        except _queue.Full:                  # 消费端已消失/积压：丢最旧一帧，保证新帧能进
+            try:
+                out.get_nowait()
+                out.put_nowait((kind, payload))
+            except Exception:
+                pass
 
     def work():
         t0 = time.time()
@@ -513,28 +587,37 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             client = get_llm() if (narrate or argument or parse) else None
             emit('status', {'text': '正在理解问句…',
                             'model': (client.name if client and client.available() else None)})
-            with LOCK:
-                res = ASK.answer(get_conn(), q, topk=topk, llm=client,
-                                 narrate=narrate, argument=argument, llm_parse=parse,
-                                 llm_policy=policy, context=ctx,
-                                 on_delta=lambda t: emit('delta', {'text': t}),
-                                 # 答案先到：确定性结论一算完即推 engine 事件（前端立即渲染），
-                                 # 大模型随后只补「说明」——用户不再干等模型整段写完。
-                                 on_engine=lambda d: emit('engine', _clean_ask_result(dict(d),
-                                                                                     client, t0)))
+            # ⚠ 2026-10-06 修（P1-29）：不再持全局锁调用 ASK.answer（含 LLM）。
+            res = ASK.answer(get_conn(), q, topk=topk, llm=client,
+                             narrate=narrate, argument=argument, llm_parse=parse,
+                             llm_policy=policy, context=ctx,
+                             on_delta=lambda t: emit('delta', {'text': t}),
+                             # 答案先到：确定性结论一算完即推 engine 事件（前端立即渲染），
+                             # 大模型随后只补「说明」——用户不再干等模型整段写完。
+                             on_engine=lambda d: emit('engine', _clean_ask_result(dict(d),
+                                                                                 client, t0)))
             emit('final', _clean_ask_result(res, client, t0))
         except Exception as exc:
+            sys.stderr.write('[sse][%s] worker 异常：%s: %s\n' % (rid, type(exc).__name__, exc))
             emit('error', {'error': '%s: %s' % (type(exc).__name__, exc)})
         finally:
-            emit('__end__', None)
+            try:
+                out.put_nowait(('__end__', None))
+            except _queue.Full:
+                pass
 
-    _threading.Thread(target=work, daemon=True).start()
-    yield _sse('status', {'text': '已收到问题，正在检索语料与核对数字…'})
-    while True:
-        kind, payload = out.get()
-        if kind == '__end__':
-            break
-        yield _sse(kind, payload)
+    _threading.Thread(target=work, daemon=True, name='ask-stream-%s' % rid).start()
+    yield _sse('status', {'text': '已收到问题，正在检索语料与核对数字…', 'request_id': rid})
+    try:
+        while True:
+            kind, payload = out.get()
+            if kind == '__end__':
+                break
+            yield _sse(kind, payload)
+    except GeneratorExit:                    # 客户端断开（浏览器关闭 / 切页）
+        cancelled.set()
+        sys.stderr.write('[sse][%s] 客户端断开，已请求后台任务收尾\n' % rid)
+        raise
     yield 'data: {"type":"done"}\n\n'
 
 
@@ -647,9 +730,21 @@ class H(BaseHTTPRequestHandler):
             # 问答页资源在 web/dist/ask/assets/；离线四视图资源在 data/vue/assets/。
             # 两处都找，都找不到才 404。
             if u.path.startswith('/assets/'):
+                # ⚠ 2026-10-06 修（外部审查 P0-1）：本分支此前**没有任何路径约束**——
+                #   `os.path.join(base, 'assets/../../xxx')` 会被 OS 解析掉 `..`，
+                #   从而把 assets 目录之外的源码/配置/数据库/模型配置当静态文件回给客户端
+                #   （Windows 下 `..\` 同样有效，且 urlparse 不做归一化）。
+                #   现统一用 realpath + commonpath 收口：解析后的真实路径必须仍在 base 之内。
                 rel = u.path.lstrip('/')
                 for base in (DIST_ASK, DIST_VIEWS):
-                    p = os.path.join(base, rel)
+                    b = os.path.realpath(base)
+                    p = os.path.realpath(os.path.join(b, rel))
+                    try:
+                        inside = (p == b) or (os.path.commonpath([b, p]) == b)
+                    except ValueError:          # 不同盘符（Windows）：必在 base 之外
+                        inside = False
+                    if not inside:
+                        continue                # 越界一律跳过（连 404 都不区分，避免探测反馈）
                     if os.path.isfile(p):
                         ct = ('text/javascript' if p.endswith('.js') else
                               'text/css' if p.endswith('.css') else 'application/octet-stream')
@@ -683,10 +778,17 @@ class H(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 return
             if u.path == '/api/search':
-                # ⚠ 2026-10-04 修（代码审查 P2-14）：本端点原先**不取锁**，却与所有其它端点
-                #   共享同一个 `check_same_thread=False` 连接——竞态设计不一致。统一取锁。
+                params = {k: g(k) for k in SEARCH_PARAMS}
+                # ⚠ 2026-10-06 修（外部审查 P1-34）：声律模式先做白名单校验，非法输入
+                #   返回 400 INVALID_QUERY（而不是被静默当成通配符照常检索）。
+                try:
+                    _pz_glob(params.get('pz'))
+                except ValueError as ve:
+                    return self._send({'error': str(ve), 'code': 'INVALID_QUERY'}, code=400)
+                # ⚠ 2026-10-04 修（代码审查 P2-14）：本端点原先**不取锁**；2026-10-06 起连接
+                #   已改为线程本地（P1-28/29），此锁仅为临界区兜底。
                 with LOCK:
-                    return self._send(q_search(get_conn(), {k: g(k) for k in SEARCH_PARAMS}))
+                    return self._send(q_search(get_conn(), params))
             if u.path == '/api/nl2query':
                 return self._send(q_nl2query(get_conn(), g('q'),
                                              use_llm=g('llm', '1') not in ('0', 'false', 'no')))
@@ -740,12 +842,24 @@ class H(BaseHTTPRequestHandler):
             return self._send({'error': 'not found: %s' % u.path}, code=404)
         except Exception as exc:                                   # 不让页面白屏
             import traceback
+            import uuid as _uuid
+            rid = _uuid.uuid4().hex[:12]
+            # ⚠ 2026-10-06 修（外部审查 P1-31）：正式部署不应把内部 traceback 回给客户端
+            #   （会泄漏本机路径 / 目录结构 / 内部模块名 / 数据库位置 / 配置细节）。
+            #   改为：完整堆栈只写服务端日志（按 rid 可查），客户端仅拿 request_id；
+            #   本地调试需要细节时设 LVC_DEBUG=1。
+            sys.stderr.write('[error][%s] %s: %s\n%s\n'
+                             % (rid, type(exc).__name__, exc, traceback.format_exc()))
             if getattr(self, '_sse_started', False):
                 # SSE 已发响应头：只能如实记日志，**不能再发第二个响应**（见上方注释）
-                sys.stderr.write('[sse] 连接中断或写失败：%s: %s\n' % (type(exc).__name__, exc))
+                sys.stderr.write('[sse][%s] 连接中断或写失败：%s\n' % (rid, type(exc).__name__))
                 return
-            return self._send({'error': '%s: %s' % (type(exc).__name__, exc),
-                               'trace': traceback.format_exc().splitlines()[-4:]}, code=500)
+            if os.environ.get('LVC_DEBUG'):
+                return self._send({'error': '%s: %s' % (type(exc).__name__, exc),
+                                   'trace': traceback.format_exc().splitlines()[-4:],
+                                   'request_id': rid}, code=500)
+            return self._send({'error': '内部错误（请把 request_id 提供给维护者以定位日志）',
+                               'request_id': rid}, code=500)
 
 
 def main():

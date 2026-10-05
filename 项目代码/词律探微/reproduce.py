@@ -122,8 +122,16 @@ def main():
                              ['node', 'frontend/tools/check-core.cjs'], tail=3))
             steps.append(run('组件冒烟（6 视图 SSR 渲染不报错）',
                              ['node', 'frontend/tools/ssr-smoke.mjs'], tail=3))
-            steps.append(run('类型检查（TypeScript / vue-tsc）',
-                             ['node', 'frontend/tools/check-types.mjs'], tail=4))
+            # ⚠ 2026-10-06：`--strict` 只在**类型依赖已装**时才加。否则一台没跑过
+            #   `npm install` 的答辩机会因「类型检查 SKIP」被判 FAIL——缺依赖是**环境问题**，
+            #   不是代码问题，一刀切 strict 与「一键复现」的目标冲突（外部审查 P1-53 的正确落法：
+            #   开发期 SKIP 便利 + 有依赖时严格，二者兼得）。
+            _tsbin = os.path.join(ROOT, 'frontend', 'node_modules', '.bin')
+            _has_ts = any(os.path.exists(os.path.join(_tsbin, n))
+                          for n in ('vue-tsc', 'vue-tsc.cmd', 'tsc', 'tsc.cmd'))
+            steps.append(run('类型检查（TypeScript / vue-tsc%s）' % ('，strict' if _has_ts else '，未装依赖则 SKIP'),
+                             ['node', 'frontend/tools/check-types.mjs'] + (['--strict'] if _has_ts else []),
+                             tail=4))
             steps.append(run('组件文档一致性（docs/组件API.md 与源码不漂移）',
                              ['node', 'frontend/tools/gen-docs.mjs', '--check'], tail=2))
             steps.append(run('前端↔引擎逐字段对照（node，全库 26,742 篇）',

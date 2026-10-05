@@ -6,9 +6,13 @@
  *     ② 没有则退回 `tsc`（只查 .ts/.d.ts/.mjs）；
  *     ③ 都没有则**跳过并打印 SKIP**（不判失败，避免因缺依赖卡住整条链）。
  *
+ * strict 模式（缺依赖时必须判失败，供 CI / 交付验收用）：
+ *   二选一即可——命令行 `--strict`，或环境变量 `LVC_STRICT_TYPES=1`。
+ *
  * 用法：
- *   node frontend/tools/check-types.mjs          # 有就查，没有就 SKIP
- *   node frontend/tools/check-types.mjs --strict # 缺依赖时判失败（CI 用）
+ *   node frontend/tools/check-types.mjs                    # 有就查，没有就 SKIP
+ *   node frontend/tools/check-types.mjs --strict           # 缺依赖时判失败（CI 用）
+ *   LVC_STRICT_TYPES=1 node frontend/tools/check-types.mjs  # 同上（环境变量开关）
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -17,7 +21,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND = path.resolve(HERE, '..');
-const STRICT = process.argv.includes('--strict');
+// strict：命令行 --strict 或环境变量 LVC_STRICT_TYPES=1 均生效（后者便于 CI/脚本统一开关）
+const STRICT = process.argv.includes('--strict') || process.env.LVC_STRICT_TYPES === '1';
 
 function bin(name) {
   const p = path.join(FRONTEND, 'node_modules', '.bin', name + (process.platform === 'win32' ? '.cmd' : ''));

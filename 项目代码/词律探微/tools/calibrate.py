@@ -6,6 +6,7 @@
 纪律：只用公开集 700 题；保密集不参与。
 
 用法：python tools/calibrate.py --corpus <语料根> --questions <公开集jsonl> --out <overrides.json>
+      （--corpus / --questions 缺省时：先读环境变量 LVC_CORPUS / LVC_QUESTIONS，再回退本机默认路径）
 """
 from __future__ import annotations
 import argparse
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'solve'))
 
 from pypinyin import pinyin, Style                     # noqa: E402
 from corpus import load_corpus, get_locator            # noqa: E402
-from prosody import r1, pct, han_only, SENT_SPLIT_RE    # noqa: E402
+from prosody import r1, pct, raw_pct, han_only, SENT_SPLIT_RE    # noqa: E402
 import eval as ev                                      # noqa: E402
 
 TONE_RE = re.compile(r'([1-5])\s*$')
@@ -93,10 +94,16 @@ def stats_ratio(allpz):
 
 
 def halves(pzs):
+    """前后段比例（T10：与 prosody.Engine.halves **完全同口径**）。
+
+    旧版用浮点 `100.0 * a.count('仄') / len(a)`，在 .x5 边界会与生产端（Decimal +
+    银行家舍入）分叉；现改为复用 `prosody.raw_pct`（Decimal 原始比例）+ `prosody.r1`，
+    「变化值＝原始比例相减后再保留一位」也与生产端一致。
+    """
     n = len(pzs); cut = n // 2
     a = ''.join(pzs[:cut]); b = ''.join(pzs[cut:])
-    raw_a = (100.0 * a.count('仄') / len(a)) if a else 0.0
-    raw_b = (100.0 * b.count('仄') / len(b)) if b else 0.0
+    raw_a = raw_pct(a.count('仄'), len(a))
+    raw_b = raw_pct(b.count('仄'), len(b))
     return r1(raw_a), r1(raw_b), r1(raw_b - raw_a)
 
 
@@ -116,8 +123,9 @@ def evaluate(p, tones, ov):
         if '甲' in mine and '乙' in mine:
             d = r1(abs(mine['甲']['仄声比例'] - mine['乙']['仄声比例']))
             mine['比例差'] = d
+            # T10：并列时与生产端 prosody.c1 完全一致——官方用词是「两篇」（非「持平」）。
             mine['较高'] = ('甲' if mine['甲']['仄声比例'] > mine['乙']['仄声比例']
-                            else ('乙' if mine['乙']['仄声比例'] > mine['甲']['仄声比例'] else '持平'))
+                            else ('乙' if mine['乙']['仄声比例'] > mine['甲']['仄声比例'] else '两篇'))
     elif p.cls in ('C2', 'C5'):
         for k in ('甲', '乙'):
             if k not in pzs:
@@ -127,7 +135,9 @@ def evaluate(p, tones, ov):
                        '转向': '后段上升' if chg > 0 else ('后段下降' if chg < 0 else '前后持平')}
         if p.cls == 'C2' and '甲' in mine and '乙' in mine:
             mine['变幅差'] = r1(abs(mine['甲']['绝对变幅'] - mine['乙']['绝对变幅']))
-            mine['较大'] = '甲' if mine['甲']['绝对变幅'] > mine['乙']['绝对变幅'] else '乙'
+            # T10：并列时与生产端 prosody.c2 一致——「两篇」
+            mine['较大'] = ('甲' if mine['甲']['绝对变幅'] > mine['乙']['绝对变幅']
+                            else ('乙' if mine['乙']['绝对变幅'] > mine['甲']['绝对变幅'] else '两篇'))
     elif p.cls == 'C3':
         for k in ('甲', '乙'):
             if k not in pzs:
@@ -141,7 +151,9 @@ def evaluate(p, tones, ov):
                        '平': seg.count('平'), '仄': seg.count('仄'), '比例': pct(seg.count('仄'), len(seg))}
         if '甲' in mine and '乙' in mine:
             mine['密度差'] = r1(abs(mine['甲']['比例'] - mine['乙']['比例']))
-            mine['较高'] = '甲' if mine['甲']['比例'] > mine['乙']['比例'] else '乙'
+            # T10：并列时与生产端 prosody.c3 一致——「两篇」
+            mine['较高'] = ('甲' if mine['甲']['比例'] > mine['乙']['比例']
+                            else ('乙' if mine['乙']['比例'] > mine['甲']['比例'] else '两篇'))
     elif p.cls == 'C4':
         for k in pzs:
             ra, rb, chg = halves(pzs[k])
@@ -176,7 +188,8 @@ def evaluate(p, tones, ov):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
+    # T11：语料 / 题面路径改为「环境变量优先 → 本机默认兜底」（不设变量时行为与原来一致）
+    ap.add_argument('--corpus', default=os.environ.get('LVC_CORPUS') or r'D:\桌面\人文薪火\数据\语料')
     ap.add_argument('--questions', default=None)
     ap.add_argument('--out', default=os.path.join(os.path.dirname(HERE), 'solve', 'data', 'candidate_overrides.json'),
                     help='候选表输出路径。★ 默认不碰交付表 pron_overrides.json：'
@@ -186,7 +199,8 @@ def main():
     ap.add_argument('--classes', default='C1,C2,C3,C4')
     args = ap.parse_args()
 
-    qfile = args.questions or os.path.join(
+    # T11：题面默认路径同样「环境变量优先 → 本机默认兜底」
+    qfile = args.questions or os.environ.get('LVC_QUESTIONS') or os.path.join(
         r'D:\桌面\人文薪火\数据\初赛数据', '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl')
     qs = [json.loads(l) for l in open(qfile, encoding='utf-8-sig') if l.strip()]
     poems = load_corpus(args.corpus)

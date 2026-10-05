@@ -1357,14 +1357,20 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
             _r = _official.solve(question)
             if _r.get('ok'):
                 _txt = _official.render(_r)
+                # ⚠ 2026-10-06 修（外部审查 P1-10）：官方题型原先直接声称 verify 通过、
+                #   以「未经问答链四道护栏」为理由放行。现改走**官方独立验证器**
+                #   （数值可回查／定位完整／无内部 error／含边界声明），结果如实回吐。
+                _okv, _pbv = _official.verify_result(_r, _txt)
                 _conf = '、'.join('%s[%s]' % (k, v) for k, v in (_r.get('paths') or {}).items())
                 return {'question': question, 'spec': '（官方题型 %s：由解题链定位并计算）' % _r['cls'],
                         'kind': '官方题型（%s）' % _r['cls'], 'blocks': [],
                         'answer': _txt + _verdict_line(
-                            True, [], '通过（官方题型：数值由 prosody 引擎确定性算出；'
-                                      '定位路径 %s；本题未经问答链四道护栏）' % (_conf or '—')),
-                        'verify': (True, ['（官方题型：走解题链，未经问答链四道护栏）']),
-                        'verify_kind': 'official', 'refused': False, 'problems': [],
+                            _okv, _pbv,
+                            '官方题型：数值由 prosody 引擎确定性算出，已过**官方独立验证器**'
+                            '（数值可回查／定位完整／边界声明），不走问答链证据护栏；'
+                            '定位路径 %s' % (_conf or '—')),
+                        'verify': (_okv, _pbv),
+                        'verify_kind': 'official', 'refused': False, 'problems': list(_pbv),
                         'total': None, 'narrator': 'solver',
                         'official': {'cls': _r['cls'], 'located': _r.get('located'),
                                      'ans': _r.get('ans'), 'errors': _r.get('errors') or []},

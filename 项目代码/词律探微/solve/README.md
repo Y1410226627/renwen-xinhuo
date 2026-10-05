@@ -17,15 +17,20 @@
 | --- | --- | --- |
 | 初赛公开集 | **公开集 700/700 = 100.0%** | `python solve/eval.py --pred answers_700.jsonl --gold <题面>` |
 | 第二套（保密，仅验收用） | 300/300 = 100.0% | 同上，换文件 |
-| 自检 | `python solve/selftest.py` → **221 项 0 失败** | 见 §20/§21（安全与说法层）与 §41（本轮新增） |
+| 自检 | `python solve/selftest.py` → **235 项 0 失败** | 见 §20/§21（安全与说法层）与 §43（本轮新增） |
 | 交付前体检 | `python solve/preflight.py` → 26/0/0 | 依赖、标定表、语料计数、答案契约、合规扫描 |
 | 库不变式 | `python tools/invariant_check.py` → 1,731,388 项 0 违反 | 从句级平仄串重算篇级指标 |
 | 问答用例 | `python tools/qa_eval.py` → **34/34** | 固定用例集 `tests/qa_cases.jsonl`（Q027–Q034 为 2026-10-01 深夜新增） |
 | 变异测试 | `python tools/eval_mutation.py` | 逐题逐字段制造变异，0 漏报 |
+| 前端逻辑层一致性 | `node frontend/tools/check-core.cjs` → **213,972 项 0 不符** | `core/` 与冻结基线（`_历史产物/_core_baseline/`）逐字节 |
+| 前端功能门禁 | `node web/test_ui.js` → **130 项 0 不符** | 检索表单／队列／页面／共享文件（`--selftest` 另验护栏自身 4/4） |
 | 前端↔引擎对照 | `node web/verify_views.js --n 3000` | 43,459 项 0 不符 |
-| 回归门禁 | `python tools/regress.py` → 十段 **29 项 0 失败** | 含「两遍逐字节一致」与期望哈希 |
-| 一键复现 | `python reproduce.py` → **23/23 步 PASS** | 产出 `复现报告.md` |
+| 逐篇渲染 | `node web/test_render.js` | 26,742 篇 / 522,242 项 0 不符（含深链自检） |
+| 服务端接口 | `python web/test_api.py` | 140 项 0 不符 |
+| 回归门禁 | `python tools/regress.py` → 每套 **28 项 0 失败** | 含「两遍逐字节一致」与期望哈希（公开 `BF863368…`／第二套 `ACEF8B15…`） |
+| 一键复现 | `python reproduce.py` → 全部步骤 PASS | 产出 `复现报告.md` |
 | 文档↔行为一致 | `python tools/doc_check.py` → 9/9 | 命令活性、数字承诺、文件承诺、口径承诺 |
+| 类型检查（可选） | `node frontend/tools/check-types.mjs` | vue-tsc/tsc 缺失时 SKIP；`--strict` 时缺依赖判失败 |
 | 大模型（可选「说法层」） | `python solve/llm.py --check` | 国产模型（智谱 GLM／DeepSeek／通义千问） |
 
 ## 二、快速开始
@@ -1498,4 +1503,47 @@ python tools/perf_query.py "清 临江仙 仄声比例高于45%"
 
 **新增门禁终值**：`selftest` **235 项 0 失败** ｜ `regress` 公开/第二套 **各 28 项 0 失败、哈希逐字节一致** ｜
 `qa_eval` 31/34（3 例失败为**既有口径分歧**，见 `DECISIONS.md` D14，与本轮无关）｜
-`web/test_api.js` 140/0 ｜ `web/test_ui.js` 171/0 ｜ `web/test_render.js` 522242/0。
+`web/test_api.js` 140/0 ｜ `web/test_ui.js` 130/0 ｜ `web/test_render.js` 522242/0。
+
+## 43. 2026-10-06：外部审查（65 项）的**核对 → 分类 → 修复**
+
+**来由**：外部模型对 `main` 分支做了一次逐文件审查，给出 65 条「缺陷＋优化＋参赛目标」清单。
+本轮的处理纪律是**先逐条核对真伪、再分类动手**（完整决策见 `DECISIONS.md` D16）。
+凡涉及 `solve/{corpus,pronounce,prosody}` 的改动，一律先跑 `tools/regress.py` 双集哈希确认逐字节不变。
+
+**核对结果（与审查相左的三处，务必保留）**：
+1. 「数字 Guard 跨证据污染」**不成立** —— 字段级白名单确按行内 `[E#]` 回溯；
+   审查混淆了「数字白名单」与「比例自洽池」（后者不分块，但只在白名单放行后才做二次验算）。
+2. 「Web 各端点未统一取锁」**部分不成立** —— 实测除 `/api/summarize` 内一处外，其余端点本就同锁。
+3. 「`_title_hint` 与 `rescue_title` 判据不一致」方向对、定位错（前者在 `ask.py`、后者在 `retrieve.py`）。
+
+**已修（按文件）**：
+
+| 文件 | 修了什么 |
+| --- | --- |
+| `solve/pronounce.py` | 补 `import sys`（无参构造曾必然 `NameError`）；标定表校验正则 `[1-5]`→`[1-4]`（与报错文案一致），pypinyin 解析仍认 5 归 0 |
+| `solve/solver.py` | 新增 `--strict-locate`（低置信不作答）与 `--fail-on-error`（有 error 即非 0 退出），**两者默认关** |
+| `solve/retrieve.py` | `has_line_cond` 补全 `pz_exact/tail_each/line_q`；`verify_spec_on_poem` 补 `title/pz_exact/tail_each` 复核；`_sql` 断言移到最终状态；题名分隔符统一 `[·・•]`；`rescue_title` 判据收窄；`raw_question`/`raw` 语义拆分 |
+| `solve/aggregate.py` | `top_groups` 的 `share` 补加权排序表达式（原退化为按篇数）；`share` 分子 SQL 补外层范围 |
+| `solve/guard.py` | 弯引号引文按行内 `[E#]` 绑定；补**中文数字**断言扫描（换算复用 `retrieve.cn_num`，扫描前剥离引文）；`change` 与 `abs(change)` 按行语义收窄 |
+| `solve/official.py` | 新增独立验证器 `verify_result()`（数值可回查／定位完整／无 error／含边界声明）；GEN 舍入统一 `prosody.r1()`；C4 渲染按实际参与篇目输出（**题库实测确有多篇含丙**） |
+| `solve/answer_reason.py` | 判据改为「`res['reason']` → 结构化字段 → 文案」三级，退化为兼容层 |
+| `web/serve.py` | `/assets/` 加 `realpath+commonpath` 约束；500 不回吐 traceback（改 request_id）；**共享连接 → 线程本地连接**、锁不再包 LLM/SSE；SSE 可取消（request_id + 事件 + 有界队列）；声律模式严格白名单（400 `INVALID_QUERY`）；`build_where` 支持多值与 contains/exact/prefix；`nl2query` 多值不再丢 |
+| `frontend/src/core/*.js` | 空篇 `Math.max([]) = -Infinity` → 0；5 个数值字段的 truthiness 判空；离线排序补 `pid` tie-break；平仄模式严格白名单 |
+| `frontend/src/views/*.vue` | 每页控件接上分页；比例分桶改半开边界（不再重叠）；CSV 导出标注范围；IndexView 死链修正；**排序进入检索条件**（原被误排除 → 排序下拉框恒无效） |
+| `tools/review_apply.py` | 第二套题实跑；**逐题零回归**（不再只比总分）；同字冲突检测（CONFLICT 即拒绝）；原子写（tmp+fsync+replace）；语料路径可用 `LVC_CORPUS` 覆盖 |
+| `build_corpus.py` | 原子发布（先写 `.tmp` → 校验 → `os.replace`），失败不毁旧库 |
+| `solve/preflight.py` | 「无空文本」改为全库扫描并报告 pid；路径可配 |
+| `tools/calibrate.py` | C1/C2/C3 的 tie 分支与生产对齐（`两篇`）；比例改用 `prosody.raw_pct/r1`；路径可配 |
+| `tools/sample_check.py` | 指标更名并注明「corpus→locator，不等价于自然语言查询鲁棒性」 |
+| `frontend/tools/check-types.mjs` | 新增 `LVC_STRICT_TYPES`（严格模式下缺依赖判失败） |
+| `.github/workflows/gates.yml` | **新增 CI**（跑可在无语料环境通过的子集；需 corpus.db 的门禁不在 CI 内） |
+
+**验证终值**：`selftest` **235/235** ｜ `regress` 公开 **`BF863368…`** / 第二套 **`ACEF8B15…`**
+（**哈希逐字节不变**）｜ `check-core` **213,972 项 0 不符** ｜ `test_ui` **130 项 0 不符**
+（`--selftest` 4/4）｜ `test_render` **26,742 篇 / 522,242 项 0 不符** ｜ `verify_views` **43,459 项 0 不符**
+｜ `doc_check` **9/9**。
+
+**明确未做（对应 `DECISIONS.md` D16 未做项 + D18）**：`parity` 独立复核（口径待核）、
+QuerySpec→AST 全量重构（架构级重写，赛前不冒险）、Web 校订闭环与图谱导航/关系扩展、
+情感语义第二层、古音词韵研究口径（产品功能与学术口径，均已在 D18 逐条定位）。

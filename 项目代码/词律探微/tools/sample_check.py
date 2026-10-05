@@ -6,10 +6,18 @@
 必须证明**题目之外**也不出洋相（异常、空结果、越界、定位失败）。
 
 判据：
-  * 随机抽样（固定种子，可复现）里 异常 0、空结果 0、指标无越界、自题自解定位失败 0
+  * 随机抽样（固定种子，可复现）里 异常 0、空结果 0、指标无越界、
+    「自题自解定位（corpus→locator 内部一致性）」失败 0
   * 抽样输出连跑两遍**逐字节一致**（确定性）
   * 覆盖度披露：词人数、含缺字占位符 □○■ 的篇、含 CJK 扩展 A 字的篇、长调（≥90 汉字）篇
   * `--manual` 导出前 20 首的**逐字平仄表**（CSV），供人工核查（评审可当场抽查）
+
+指标释义（重要，避免误读）：
+  本脚本第 115 行用「作者 + 词牌 + 正文前 8 字」**直接**调用 `locate_one`，验证的是
+  **corpus → locator** 这条内部链路的一致性（给定语料字段能否回查到自己），
+  据此命名的指标是「**自题自解定位（corpus→locator 内部一致性）**」。
+  它**不等价于**用户自然语言查询的鲁棒性——那条链是 **自然语言 → parser → locator**，
+  涉及分词/消歧/同名词牌等，本脚本不覆盖，不能据此宣称「用户随便问都能定位」。
 
 用法：
   python tools/sample_check.py --corpus <语料根> --out t2_抽样_2000首.jsonl --n 2000 \
@@ -112,11 +120,14 @@ def main():
                 nerr += 1
         if rec['C3阈值'] < 0 or rec['前段字'] <= 0 or rec['后段字'] <= 0:
             nerr += 1
+        # 注意：这是「自题自解定位」——直接用该篇自己的字段（作者/词牌/前 8 字）回查，
+        # 验证的是 corpus → locator 的内部一致性，**不等价于自然语言查询鲁棒性**。
         hit = locate_one(poems, p.author, p.cipai, p.han[:8], p.dynasty) is not None
         if not hit:
             nloc += 1
         rec.update({'pid': p.pid, '朝代': p.dynasty, '作者': p.author,
-                    '题名': p.title, '词牌': p.cipai, '自题自解可定位': hit})
+                    '题名': p.title, '词牌': p.cipai,
+                    '自题自解定位_corpus→locator内部一致性': hit})
         rows.append(rec)
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
@@ -128,7 +139,9 @@ def main():
     md5 = hashlib.md5(io.open(args.out, 'rb').read()).hexdigest()
 
     print('\n抽样 %d 首 -> %s' % (len(sample), args.out))
-    print('异常 %d；空结果 %d；自题自解定位失败 %d；md5=%s' % (nerr, nzero, nloc, md5))
+    print('异常 %d；空结果 %d；自题自解定位（corpus→locator 内部一致性）失败 %d；md5=%s'
+          % (nerr, nzero, nloc, md5))
+    print('　（注：该指标只证明「语料字段能回查到自己」，不等价于用户自然语言查询鲁棒性）')
     print('覆盖：词人 %d 位；含缺字占位符的篇 %d 首；含扩展 A 的篇 %d 首'
           % (len({r.get('作者') for r in rows}),
              sum(1 for p in sample if any(c in p.raw for c in '□○■')),

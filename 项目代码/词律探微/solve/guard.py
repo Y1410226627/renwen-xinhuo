@@ -23,10 +23,32 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import evidence                                              # noqa: E402
+import retrieve                                              # noqa: E402
 
 NUM_RE = re.compile(r'\d+(?:\.\d+)?')
 PCT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*%')
 EID_RE = re.compile(r'\[E(\d+)\]')
+# ⚠ 2026-10-06 修（外部审查 P1-23）：原 NUM_RE 只抓阿拉伯数字，「共五百篇」「一百零八处」
+#   这类**中文数字断言**完全绕过护栏①。这里补一个中文数字扫描（数值换算复用 retrieve.cn_num，
+#   与检索侧同一实现，避免两套口径）。为压掉误报：只收「长度≥2 且含单位字（十百千万亿）」
+#   或「长度≥3」的串，且扫描前**剥离引文**（语料词句里「二十四桥」之类极常见，不是系统断言）。
+CN_NUM_RE = re.compile(r'[零一二三四五六七八九十百千万亿两]{2,12}')
+
+
+def _cn_values(s):
+    """中文数字串 → 可能是数量断言的数值写法集合；不像数量断言时返回空集。"""
+    if len(s) < 2:
+        return set()
+    if len(s) == 2 and s[0] not in '十百千万亿' and s[1] not in '十百千万亿':
+        return set()                      # 「三五」「一一」这类不作数量断言
+    v = retrieve.cn_num(s)
+    if v is None:
+        return set()
+    f = float(v)
+    return {str(v), '%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f, '%.1f' % abs(f)}
+
+
+_QUOTE_SPAN_RE = re.compile(r'「[^」]*」|[“"][^”"]*[”"]')
 
 
 def _r1(x):
@@ -50,6 +72,26 @@ def check_numbers(answer_text, blocks, allow=()):
         except (TypeError, ValueError):
             pass
     per_block = {b['eid']: evidence.numbers_of(b) for b in blocks}
+    # ⚠ 2026-10-06 修（外部审查 P1-24）：「变化值」与「绝对变幅」语义不同，但
+    #   evidence.numbers_of 把 change 与其 abs 混进同一扁平集合——证据 change=-3.7 时，
+    #   答案写「变化 3.7」（未提「绝对/变幅」）也会被放行。这里按行语义收窄：
+    #   行长若不含表「幅」的词，则不允许使用 change 的**绝对值专属**写法。
+    _ABS_WORDS = ('绝对', '变幅', '幅度')
+    abs_only = {}
+    for b in blocks:
+        v = b.get('change')
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        base = {str(v), '%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f}
+        derived = {'%.1f' % abs(f), str(int(abs(f))) if abs(f) == int(abs(f)) else '%.1f' % abs(f)}
+        d = derived - base
+        if d:
+            abs_only[b['eid']] = d
+
     problems = []
     for raw_line in answer_text.splitlines():
         line = EID_RE.sub(' ', raw_line)          # [E#] 里的编号不是论断数字
@@ -59,6 +101,9 @@ def check_numbers(answer_text, blocks, allow=()):
             allow_line |= per_block.get(e, set())
         if not cited:
             allow_line |= all_allow
+        if not any(w in raw_line for w in _ABS_WORDS):
+            for e in (cited or set(abs_only)):
+                allow_line -= abs_only.get(e, set())
         for m in NUM_RE.findall(line):
             cands = {m}
             try:
@@ -70,6 +115,16 @@ def check_numbers(answer_text, blocks, allow=()):
             if not (cands & allow_line):
                 problems.append('数字无出处（%s）：%s ｜行：%s'
                                 % ('／'.join(sorted(cited)) or '无引用', m,
+                                   raw_line.strip()[:60]))
+        # 中文数字断言（P1-23）：先剥离引文（语料原文里的「二十四桥」不是系统断言）
+        scan = _QUOTE_SPAN_RE.sub(' ', line)
+        for cn in CN_NUM_RE.findall(scan):
+            vals = _cn_values(cn)
+            if not vals:
+                continue
+            if not (vals & allow_line):
+                problems.append('中文数字无出处（%s）：%s ｜行：%s'
+                                % ('／'.join(sorted(cited)) or '无引用', cn,
                                    raw_line.strip()[:60]))
     # 比例自洽：把证据块里所有 (平,仄,汉字数) 与实际写出的百分比交叉验算
     ok_pairs = set()
@@ -162,8 +217,27 @@ def check_citations(answer_text, blocks):
         problems.append('引文未逐字出现在被引证据块中（或不是整句）：「%s」' % quoted)
     for quoted in re.findall(r'[“"]([^”"]+)[”"]', answer_text):
         q = quoted.strip()
-        if q and not any(q in t for t in pool):
-            problems.append('双引号里的内容不是证据原文（不得凭空引用）：“%s”' % q)
+        if not q:
+            continue
+        # ⚠ 2026-10-06 修（外部审查 P1-22）：原版在**全部块**的文本池 `pool` 里找，于是
+        #   「“明月何时照我还” [E1]」只要该句恰好也出现在 E2 就会被放行——引文与引用号
+        #   **脱钩**，破坏了「引用必须落在被引块」的承诺（「」路径早已做到，弯引号没有）。
+        #   现改为与「」同一规则：先按**该行出现的 [E#]** 绑定，行内没有引用标记时才退回全部块。
+        hosts = set()
+        for ln, eids in line_cited:
+            if q in ln:
+                hosts |= eids
+        if hosts:
+            ok = any(q in t for b in blocks if b['eid'] in hosts
+                     for t in (evidence.texts_of(b) | {L.get('tail') or ''
+                                                       for L in (b.get('lines') or [])}))
+            if not ok:
+                ok = any(q in str(b.get(k) or '') for b in blocks if b['eid'] in hosts
+                         for k in ('title', 'cipai', 'author', 'dynasty', 'scene'))
+        else:
+            ok = any(q in t for t in pool)
+        if not ok:
+            problems.append('双引号里的内容不是**被引证据块**的原文（不得凭空引用）：“%s”' % q)
     return (not problems), problems
 
 

@@ -225,7 +225,11 @@ def solve(question, cls=None):
                         '最长句字数': lg_['最长句字数'], '平': r_['平'], '仄': r_['仄'],
                         '仄声比例': r_['仄声比例']}
         if '甲' in ans and '乙' in ans:
-            d_ = round(abs(ans['甲']['仄声比例'] - ans['乙']['仄声比例']), 1)
+            # ⚠ 2026-10-06 修（外部审查 P1-9）：原用 Python 内置 `round()`，与全局统一口径
+            #   `prosody.r1()`（Decimal + ROUND_HALF_EVEN，见 prosody 文档）是**两条数学路径**。
+            #   输入已是「一位小数的比例差」、两者实测同值，但口径分叉迟早咬人 → 统一到 r1。
+            from prosody import r1 as _r1
+            d_ = _r1(abs(ans['甲']['仄声比例'] - ans['乙']['仄声比例']))
             ans['比例差'] = d_
             ans['较高'] = ('甲' if ans['甲']['仄声比例'] > ans['乙']['仄声比例'] else
                           ('乙' if ans['乙']['仄声比例'] > ans['甲']['仄声比例'] else '两篇'))
@@ -274,11 +278,19 @@ def render(res):
                    res['ans']['密度差'], res['ans']['较高']))
     if cls == 'C4':
         order = res['ans']['排序']
-        return ('甲后段可引“%s”，仄声比例%.1f%%；乙后段可引“%s”，仄声比例%.1f%%。'
-                '排序为%s，最高与最低相差%.1f个百分点。'
+        # ⚠ 2026-10-06 修（外部审查 P1-11）：`solve()` 的 C4 允许甲/乙/**丙** 三篇
+        #   （`eng.c4({k: v.raw for k, v in located.items()})`），题库实测**确有多篇含丙**的题；
+        #   而旧 render 只取 res['ans']['甲']/['乙'] → 排序里出现「丙」但引文/比例不展示丙，
+        #   展示与计算不完整。现按实际参与篇目动态渲染（甲乙两篇时输出与旧版逐字相同）。
+        segs = []
+        for _tag in ('甲', '乙', '丙'):
+            _d = res['ans'].get(_tag)
+            if _d:
+                segs.append('%s后段可引“%s”，仄声比例%.1f%%'
+                            % (_tag, _d['后段引文'], _d['后段比例']))
+        return ('；'.join(segs) + '。排序为%s，最高与最低相差%.1f个百分点。'
                 '该排序只反映题定后段的声调数量，不能直接推断作者意图、跨体裁高下或文学价值。'
-                % (a['后段引文'], a['后段比例'], b['后段引文'], b['后段比例'],
-                   '＞'.join(order), res['ans']['比例差']))
+                % ('＞'.join(order), res['ans']['比例差']))
     if cls == 'C5':
         return ('甲前段景物线索：%s；后段主观感受线索：%s；仄声比例变化%s个百分点，节奏转向为%s。\n'
                 '乙前段景物线索：%s；后段主观感受线索：%s；仄声比例变化%s个百分点，节奏转向为%s。\n'
@@ -304,6 +316,63 @@ def render(res):
                 '若要按「前后段变幅、长句仄声密度、后段排序、景情互证」等口径比较，请指明按哪一项。')
         return txt
     return '（未实现的类别：%s）' % cls
+
+
+def verify_result(res, text):
+    """官方题型的**独立确定性验证器**（外部审查 P1-10）。
+
+    原先 official 分支直接给 `'verify': (True, [...])` 并注明「未经问答链四道护栏」——
+    这破坏了系统对外宣称的「所有回答都过数字/引用/边界验证」。官方题走确定性计算、
+    没有证据块，所以它需要**自己的一套**校验，而不是假装通过：
+      ① 数值可回查：渲染文本里的每个数字必须能在 ans 的字段值里逐字找到（防渲染口径漂移）；
+      ② 定位完整：题面里出现过的篇目都必须有 located 记录；
+      ③ 无内部 error；④ 输出须含边界声明（官方措辞统一带「不能…」限定）。
+    返回 (是否通过, 问题列表)。
+    """
+    problems = []
+    ans = res.get('ans') or {}
+    if not ans:
+        problems.append('ans 为空（未算出任何结果）')
+    if res.get('errors'):
+        problems.append('存在内部 error：%s' % '；'.join(res['errors'][:3]))
+    allow = set()
+
+    def _add(v):
+        if isinstance(v, bool) or v is None or not isinstance(v, (int, float)):
+            return
+        allow.add(str(v))
+        allow.add('%.1f' % v)
+        allow.add(str(int(v)) if float(v) == int(v) else '%.1f' % v)
+
+    def _walk(o):
+        if isinstance(o, dict):
+            for _v in o.values():
+                _walk(_v)
+        elif isinstance(o, (list, tuple)):
+            for _v in o:
+                _walk(_v)
+        else:
+            _add(o)
+
+    _walk(ans)
+    for m in re.findall(r'\d+(?:\.\d+)?', text or ''):
+        cands = {m}
+        try:
+            f = float(m)
+            cands |= {'%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f,
+                      '-%s' % m, '-%.1f' % f}
+        except ValueError:
+            pass
+        if not (cands & allow):
+            problems.append('渲染文本里的数字 %s 无法在 ans 字段里回查' % m)
+    if '不能' not in (text or ''):
+        problems.append('输出缺少边界声明（未见「不能」限定）')
+    _loc = res.get('located') or {}
+    _parts = res.get('parts') or {}
+    for tag in ('甲', '乙', '丙'):
+        if _parts.get(tag, {}).get('词牌') and tag not in _loc:
+            problems.append('%s 有题面但未被定位（located 缺该篇）' % tag)
+    return (not problems), problems
 
 
 def main():

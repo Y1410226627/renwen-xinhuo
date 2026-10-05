@@ -50,7 +50,8 @@ def warn(name, detail=''):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
+    # T11：语料路径「环境变量优先 → 本机默认兜底」（不设 LVC_CORPUS 时行为与原来完全一致）
+    ap.add_argument('--corpus', default=os.environ.get('LVC_CORPUS') or r'D:\桌面\人文薪火\数据\语料')
     ap.add_argument('--questions', default=None, help='题面 jsonl（写答案的那份）')
     ap.add_argument('--answers', default=None, help='对应的答案 jsonl（本程序产出）')
     ap.add_argument('--gold', default=None, help='标准答案 jsonl（可选，用于复算一致率）')
@@ -104,7 +105,27 @@ def main():
     ok('宋词数量合理（>15000，真实值 21053）', n_song > 15000, n_song)
     poems = load_corpus(args.corpus)
     ok('语料总载入 > 30000 首', len(poems) > 30000, len(poems))
-    ok('无空文本篇目', all(p.han for p in poems[:5000]))
+    # ⚠ 2026-10-06 修（代码审查 P1）：旧写法 `all(p.han for p in poems[:5000])` 只查前 5000 篇，
+    #   而恰恰前 5000 篇里没有一篇正文无汉字——门禁形同虚设。
+    #   口径判定依据（全库实测，58852 篇）：
+    #     · `p.han` = han_only(raw)，只留汉字；`p.raw` 是「正文/段落」。
+    #     · 全库正文无汉字共 **144 篇** = 143 篇 `raw` 为空 + 1 篇 `raw` 仅「……。」(cp:yuanqu#2745)。
+    #       这 143 篇元曲的正文被源数据误置于 **title/cipai** 字段（见 corpus.load_yuanqu：
+    #       raw=_join(paragraphs)，而该篇 paragraphs 缺失），正文并未真正丢失。
+    #     · prosody.longest() 已明确把这类「正文无汉字」篇目当**正常**（句序给空数组，不报异常）。
+    #   ⇒ 故「空文本」不能只因 han 为空就判红，也不能简单改成「raw 非空」（会把 143 篇元曲误报）。
+    #     真口径 = 正文 / 题名 / 词牌 **三处不能同时为空**（该篇至少有一处文字）；
+    #     并把「正文无汉字」的篇目作为**可枚举集合**显式列出，确保它不悄悄扩大。
+    def _has_text(p):
+        return bool((p.raw or '').strip() or (p.title or '').strip() or (p.cipai or '').strip())
+    _empty_all = [p.pid for p in poems if not _has_text(p)]
+    _no_han = [p.pid for p in poems if not p.han]
+    ok('全库无「三处全空」的空文本篇目（正文/题名/词牌至少一处有字）', not _empty_all, _empty_all[:20])
+    print('  正文无汉字篇目（题名兜底的源数据 quirk）：%d 篇%s'
+          % (len(_no_han), ('；pid（前 20）' + '，'.join(_no_han[:20])) if _no_han else ''))
+    ok('正文无汉字篇目是可枚举的小集合（< 1%；属已知源数据 quirk，非数据缺失）',
+       len(_no_han) < max(1, len(poems) // 100),
+       '%d / %d（上限约 %d）' % (len(_no_han), len(poems), len(poems) // 100))
     # ⚠ 2026-10-04 修（代码审查 P3-3）：`HAN_RE.search('')` 为 None，旧写法 `not None` 为真 →
     #   空字符串朝代会被判成「非中文朝代」。加 `p.dynasty` 非空判断后再查。
     _bad_dyn = sorted({p.dynasty for p in poems if p.dynasty and not HAN_RE.search(p.dynasty)})

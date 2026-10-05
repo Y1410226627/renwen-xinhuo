@@ -30,7 +30,7 @@ export const {
 
 export const {
   setData, setLive, isLive, analyze, info, splitSents, pzOf, tailOf, matchCond,
-  pzTest, searchOffline, detailHtml, listRow, facets, condText, highlight, pageSlice
+  pzTest, PZ_OK, searchOffline, detailHtml, listRow, facets, condText, highlight, pageSlice
 } = g.ParseApp;
 
 export const { COLS, stats: reviewStats, filter: reviewFilter, sortRows, rowHtml } = g.ReviewApp;

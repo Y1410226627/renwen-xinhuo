@@ -14,12 +14,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 
 try:
     from pypinyin import pinyin, Style
 except Exception as exc:  # pragma: no cover
     raise ImportError('需要 pypinyin：pip install pypinyin（%s）' % exc)
 
+# ⚠ 2026-10-06 修（外部审查 P1-5）：原先只有一个 `[1-5]` 正则同时用于「校验人工标定表」
+#   与「解析 pypinyin 输出」，于是配置层把 5 当合法值、运行层又 `t==5 → 0`，自相矛盾；
+#   且报错文案写「需 1-4」与正则允许 5 不符。现拆成两条**各自单一职责**的正则：
+#   · 标定表取音：只允许 1-4（5=轻声不是可标定的调类，与报错文案同一口径）；
+#   · pypinyin(TONE3) 输出：可能是 1-5（轻声标 5），5 在 tone() 内统一归 0。
+_OVERRIDE_TONE_RE = re.compile(r'([1-4])\s*$')
 _TONE_RE = re.compile(r'([1-5])\s*$')
 from corpus import HAN_CLASS as _KNOWN_CLASS       # noqa: E402
 # 汉字范围单一来源在 corpus.py：含 CJK 扩展 A（U+3400–U+4DBF，如「䕷」U+4577），
@@ -71,7 +78,7 @@ class Pronouncer:
                 # tone 优先（显式整数），否则退回 pinyin 字符串
                 v = v['tone'] if 'tone' in v else (v.get('pinyin') or '')
             v = str(v)
-            if not _TONE_RE.search(v):
+            if not _OVERRIDE_TONE_RE.search(v):
                 raise ValueError('标定表 %s 中「%s」的取音 %r 无合法声调（需 1-4）' % (label, k, v))
             if len(str(k)) != 1 or not _KNOWN_RE.match(str(k)):
                 # ⚠ 2026-10-04 修（代码审查 P3-15）：旧版只查"长度=1"，非汉字键（如 "A"）

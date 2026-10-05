@@ -152,10 +152,20 @@ def top_groups(conn, group_by, limit=5, metric='count', cat=None, where=None, ar
              'ze_ratio': _w_ze,
              'ping_ratio': '(100.0 - (%s))' % _w_ze,
              'han_len': 'CASE WHEN COUNT(*) > 0 THEN 1.0 * SUM(p.han_len) / COUNT(*) ELSE 0 END',
-             'sent_n': 'AVG(p.sent_n)'}.get(metric, 'n')
-    order += ' ASC' if extreme == 'min' else ' DESC'
-    sql += ' GROUP BY %s ORDER BY %s, g ASC LIMIT ?' % (col, order)
-    raw = conn.execute(sql, tuple(args) + (int(limit),)).fetchall()
+             'sent_n': 'AVG(p.sent_n)'}
+    # ⚠ 2026-10-06 修（外部审查 P0-19）：`share` 原先**不在 order 字典里**，于是
+    #   metric='share' 时落到默认 'n'（按篇数排序）——「哪个词人的后段下降作品占比最高」
+    #   被排成「哪个词人作品最多」，**排序与下方算出的 share 值不自洽**。
+    #   这里补上 share 的加权排序表达式（组内满足类别条件的篇数 ÷ 组内篇数 × 100）。
+    #   该表达式含一个占位符（类别值），参数按 [where 参数…, 类别值, limit] 顺序传入。
+    _w_share = ('CASE WHEN COUNT(*) > 0 THEN 100.0 * SUM(CASE WHEN %s = ? THEN 1 ELSE 0 END) '
+                '/ COUNT(*) ELSE 0 END' % CATS[cat[0]][0]) \
+        if (metric == 'share' and cat and cat[0] in CATS) else None
+    order_expr = _w_share if _w_share is not None else order.get(metric, 'n')
+    order_expr += ' ASC' if extreme == 'min' else ' DESC'
+    sql += ' GROUP BY %s ORDER BY %s, g ASC LIMIT ?' % (col, order_expr)
+    _params = tuple(args) + ((cat[1],) if _w_share is not None else ()) + (int(limit),)
+    raw = conn.execute(sql, _params).fetchall()
     # 占比的**分母必须是范围内全部命中篇数**，不是「前 N 组之和」——
     # 否则「占比 32.5%」会把只统计了前 5 组的错觉写进答案（我第一版就写错了，实测发现）。
     _ss = scope_stats(conn, group_by, where, args)
@@ -164,9 +174,16 @@ def top_groups(conn, group_by, limit=5, metric='count', cat=None, where=None, ar
     for g, n, han, ze, ping, avz, avh, avs in raw:
         nh = 0
         if metric == 'share' and cat and cat[0] in CATS:
-            nh = conn.execute(
-                'SELECT COUNT(*) FROM poems p WHERE %s = ? AND %s = ?' % (col, CATS[cat[0]][0]),
-                (g, cat[1])).fetchone()[0]
+            # ⚠ 2026-10-06 修（外部审查 P0-20）：原 SQL 只限「组名 + 类别」，**漏了外层研究范围
+            #   （where/args）**——于是分母 n 是当前范围、分子 nh 却是**全库**同组同类的篇数，
+            #   占比会系统性偏大（如「仅清词」时分子里混进了宋/元/曲的同名词人作品）。
+            _nh_sql = ('SELECT COUNT(*) FROM poems p WHERE %s = ? AND %s = ?'
+                       % (col, CATS[cat[0]][0]))
+            _nh_args = [g, cat[1]]
+            if where:
+                _nh_sql += ' AND (%s)' % where
+                _nh_args += list(args)
+            nh = conn.execute(_nh_sql, tuple(_nh_args)).fetchone()[0]
         share = prosody.pct(nh, n) if metric == 'share' else prosody.pct(n, total)
         # 指标值：**加权**口径（与排序同源）
         if metric == 'count':

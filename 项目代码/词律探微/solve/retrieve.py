@@ -197,6 +197,12 @@ class QuerySpec:
         self.order_label = None        # 指标的人话名（如「仄声比例」）
         self.order_src = None          # '规则' / '大模型'
         self.source = '规则'           # 解析来源：规则／大模型
+        # ⚠ 2026-10-06 修（外部审查 P2-17）：一个 `raw` 字段原先同时承担**两种语义**——
+        #   「用户原话」与「挖空算子后的解析工作文本」（parse_query 先 _mask_ops 再传入，
+        #   `_parse_query_inner` 把 mask 后的文本存进 raw），而 `search()` 又拿它做词面检索。
+        #   现拆开：`raw_question`=用户原话（审计/日志/调试用，永不被改写）；
+        #   `raw`=挖空算子后的**检索工作文本**（保持既有检索行为不变，仅把语义写清）。
+        self.raw_question = ''
         self.raw = ''
         # ⚠ 2026-10-02 新增：**句级算子**（旧版只有「∃ 存在」一种语义）
         self.line_q = None      # dict：{'op':∀|∄|≥k|=k|占比≥p|条数∈[a,b], 'pred':(kind,val), ...}
@@ -1238,7 +1244,10 @@ def _parse_core(conn, text, keep_names=False):
     #     ② 文中存在「·」紧跟其后的**连续汉字串**（题名部分，允许中间有顿号/空格分隔的多段）；
     #     ③ 该串长度 ≥2 且不含疑问框架词（否则是「…的作者的词」这类残片）。
     if spec.cipai_any and not spec.title_any:
-        m_t = re.search(r'·\s*([\u4e00-\u9fff\u3400-\u4dbf][\u4e00-\u9fff\u3400-\u4dbf\s、，,]{0,40}?)'
+        # ⚠ 2026-10-06 修（外部审查 P2-14）：原先只认「·」（U+00B7）一种分隔符，而本文件
+        #   其它位置（元数据块连写识别、official 的词牌切分）已经同时考虑「・」等变体——
+        #   于是「蝶恋花・清明…」走不完全相同的解析路径。这里统一为**同一分隔符类**。
+        m_t = re.search(r'[·・•]\s*([\u4e00-\u9fff\u3400-\u4dbf][\u4e00-\u9fff\u3400-\u4dbf\s、，,]{0,40}?)'
                         r'(?=[\s，,。？?！!、；;：:「」『』“”"]|$)', text)
         if m_t:
             cand = re.sub(r'[\s、，,]+', '', m_t.group(1))
@@ -1259,7 +1268,7 @@ def _parse_core(conn, text, keep_names=False):
 
     # 短语兜底：整串汉字、无分隔符、名字匹配后仍有剩余 ⇒ 这是正文片段而非结构化查询
     # （「风紧玉楼斜」里恰好含词牌「玉楼」）。但已有数值/声律/声情/朝代等结构化线索时不撤销。
-    has_sep = bool(re.search(r'[\s，,、；;：:·？?！!。.…「」『』“”\"]', text))
+    has_sep = bool(re.search(r'[\s，,、；;：:·・•？?！!。.…「」『』“”\"]', text))
     structured = bool(n_num or spec.dynasty_any or spec.pz or spec.scene
                       or spec.tail_any or spec.tail_pz)
     leftover = re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]{2,}', rest)
@@ -1611,10 +1620,6 @@ def _sql(spec):
             where.append('p.change > 0')
         else:
             where.append('ABS(p.change) < 1')
-    # 审查 C7：where/args 若错位，SQLite 有时会静默接受 → 这里按**占位符个数**自检。
-    # （注意：多值条件是「一条片段多个 ?」，所以必须数 ? 而不是数片段条数。）
-    assert sum(f.count('?') for f in where) == len(args), \
-        'where/args 不平行（少写 args.extend 会整段错位，审查 C7）'
     if spec.tail_pz:
         # 句脚平仄 = 该句平仄串的最后一个字（单一来源：pz 串由引擎生成）
         # 同上：IN 子查询代替逐篇 EXISTS（实测 2,860 ms → 265 ms）。
@@ -1623,6 +1628,11 @@ def _sql(spec):
         if not (_lqp1 and _lqp1[0] == 'tail_pz' and _lqp1[1] == spec.tail_pz):
             where.append('p.pid IN (SELECT l.pid FROM lines l WHERE substr(l.pz, -1, 1) = ?)')
             args.append(spec.tail_pz)
+    # 审查 C7 + ⚠ 2026-10-06 修（外部审查 P2-18）：自检必须覆盖**最终**的 where/args。
+    #   旧版把 assert 写在 tail_pz 追加**之前**，那一步（以及将来任何新增条件）都不在校验范围内，
+    #   名义上的「最终参数校验」实际只覆盖了中途状态。现移到 return 之前。
+    assert sum(f.count('?') for f in where) == len(args), \
+        'where/args 不平行（少写 args.extend 会整段错位，审查 C7）'
     return (' AND '.join(where) if where else '1=1'), args
 
 
@@ -1659,7 +1669,16 @@ def line_satisfies(pz, tail, spec):
 
 
 def has_line_cond(spec):
-    return bool(_vals(spec, 'tail') or spec.tail_pz or spec.pz)
+    """是否含**行级（句级）条件**——决定 verify / 证据展示要不要逐句复核。
+
+    ⚠ 2026-10-06 修（外部审查 P1-12）：旧判据只查 tail/tail_pz/pz，漏了
+    `pz_exact` / `tail_each` / `line_q`。后果：spec 只带高级句级算子（例如「每一句都
+    整句平仄串正好是『仄仄平平仄仄』」）时，本函数返回 False → `verify_spec_on_poem`
+    的**整段行级复核被跳过** → 这些算子**完全没有独立复核**（SQL 执行了、但没有兜底）。
+    `has_hard()` 早在 2026-10-03（Q0121 教训）就补全了这几项，此处属**未同步的补集**。
+    """
+    return bool(_vals(spec, 'tail') or spec.tail_pz or spec.pz
+                or spec.pz_exact or getattr(spec, 'tail_each', None) or spec.line_q)
 
 
 def count_hits(conn, spec):
@@ -1685,17 +1704,22 @@ def verify_spec_on_poem(conn, pid, spec):
     但这里会用另一条路径（Python 侧逐条比对）把它抓出来。返回违反项描述列表。
     """
     bad = []
-    r = conn.execute('SELECT dynasty,author,cipai,scene,han_len,sent_n,ze_ratio,change,threshold '
+    r = conn.execute('SELECT dynasty,author,cipai,title,scene,han_len,sent_n,ze_ratio,change,threshold '
                      'FROM poems WHERE pid=?', (pid,)).fetchone()
     if not r:
         return ['篇目不存在']
-    dyn, au, cp, sc, hl, sn, zr, ch, th = r
+    dyn, au, cp, ti, sc, hl, sn, zr, ch, th = r
     if _vals(spec, 'dynasty') and dyn not in _vals(spec, 'dynasty'):
         bad.append('朝代不符（%s∉%s）' % (dyn, '／'.join(_vals(spec, 'dynasty'))))
     if _vals(spec, 'author') and (au or '').strip() not in _vals(spec, 'author'):
         bad.append('词人不符（%s∉%s）' % (au, '／'.join(_vals(spec, 'author'))))
     if _vals(spec, 'cipai') and (cp or '').strip() not in _vals(spec, 'cipai'):
         bad.append('词牌不符（%s∉%s）' % (cp, '／'.join(_vals(spec, 'cipai'))))
+    # ⚠ 2026-10-06 修（外部审查 P1-13）：`title` 早已进入检索 SQL（`_sql` 用
+    #   `p.title LIKE %题名%` 子串匹配），但这里**从未复核**——「SQL 筛了、独立复核没查」，
+    #   破坏了「SQL + Python 双路复核」的设计。现按同一**子串**语义补上。
+    if _vals(spec, 'title') and not any((x or '') in (ti or '') for x in _vals(spec, 'title')):
+        bad.append('题名不符（%s 不含 %s）' % (ti, '／'.join(_vals(spec, 'title'))))
     if spec.scene and sc != spec.scene:
         bad.append('声情不符（%s≠%s）' % (sc, spec.scene))
     for key, val, op, lab in (('ze_min', zr, '>=', '仄声比例'), ('ze_max', zr, '<=', '仄声比例'),
@@ -1759,6 +1783,15 @@ def verify_spec_on_poem(conn, pid, spec):
                 bad.append('无句脚为%s的句子' % spec.tail_pz)
             if spec.pz and not any(pz and pz_re(spec.pz).search(pz) for pz, _tl in rows):
                 bad.append('无声律模式 %s 命中句' % spec.pz)
+            # ⚠ 2026-10-06 修（外部审查 P1-12）：高级句级条件原先**不在复核范围内**
+            #   （has_line_cond 漏判 → 整块被跳过）。这里补上 pz_exact 与 tail_each 的独立复核。
+            #   注：`parity`（句位奇偶）暂未纳入——其 SQL 侧的句位计数口径（idx 起算）需单独
+            #   核对，贸然复核可能引入误报；已在 DECISIONS.md 记为本轮未覆盖项。
+            if spec.pz_exact and not any((pz or '') == spec.pz_exact for pz, _tl in rows):
+                bad.append('无声律模式**全等** %s 的句子' % spec.pz_exact)
+            for _v in (spec.tail_each or []):
+                if not any((t or '') == _v for _pz, t in rows):
+                    bad.append('tail_each 要求每个句脚都出现，但缺「%s」' % _v)
     return bad
 
 
@@ -1769,6 +1802,29 @@ def _norm(d):
     return {k: v / mx for k, v in d.items()}
 
 
+# ⚠ 2026-10-06 新增（外部审查 P2-37/38/39）：候选上限**被触发**时必须显式记录，而不是
+#   静默截断——否则「本可排进 top-k 的作品」可能因截断永远进不了候选池，表现为
+#   「结果看起来正常、其实少了一部分」。记录 = 进程内列表 + stderr 警告；
+#   `search()` 每次开头清空，上层可经 `route_truncations()` 读取并如实披露。
+_ROUTE_TRUNCATED = []
+
+
+def _note_trunc(name, n, limit):
+    if n >= limit:
+        msg = '%s 候选达上限 %d（实际 %d），排序信号可能不完整' % (name, limit, n)
+        if msg not in _ROUTE_TRUNCATED:
+            _ROUTE_TRUNCATED.append(msg)
+            try:
+                sys.stderr.write('⚠ %s\n' % msg)
+            except Exception:
+                pass
+
+
+def route_truncations():
+    """本次检索是否发生过候选截断（供上层如实披露，而不是静默）。"""
+    return list(_ROUTE_TRUNCATED)
+
+
 def route_bigram(conn, text):
     """① 二字组路：FTS5(bigram) + BM25，**直接返回篇级分**（同篇取最高分行）。"""
     bs = bigrams(text)
@@ -1776,11 +1832,14 @@ def route_bigram(conn, text):
         return {}
     q = ' OR '.join('"%s"' % b for b in dict.fromkeys(bs))
     out = {}
-    for pid, score in conn.execute(
-            'SELECT l.pid, bm25(lines_bigram) FROM lines_bigram b JOIN lines l ON l.rowid=b.rowid '
-            # 审查 P15：旧 LIMIT 20000 会把宽条件（如朝代=清 26,742 篇）**静默截断**，
-# 且截断顺序由 bm25 决定（不确定）。全库 42 万句，这里放到 40 万即等于不截断。
-'WHERE b.big MATCH ? ORDER BY bm25(lines_bigram) LIMIT 400000', (q,)):
+    # ⚠ 2026-10-06（P2-37）：改 fetchall 以便检测「是否真的撞到上限」并显式记录（不静默）。
+    rows = conn.execute(
+        'SELECT l.pid, bm25(lines_bigram) FROM lines_bigram b JOIN lines l ON l.rowid=b.rowid '
+        # 审查 P15：旧 LIMIT 20000 会把宽条件（如朝代=清 26,742 篇）**静默截断**，
+        # 且截断顺序由 bm25 决定（不确定）。全库 42 万句，这里放到 40 万即等于不截断。
+        'WHERE b.big MATCH ? ORDER BY bm25(lines_bigram) LIMIT 400000', (q,)).fetchall()
+    _note_trunc('route_bigram', len(rows), 400000)
+    for pid, score in rows:
         v = 1.0 / (1.0 + abs(score))
         if v > out.get(pid, 0.0):
             out[pid] = v
@@ -1805,9 +1864,11 @@ def route_phrase(conn, keywords):
         try:
             rows = conn.execute(
                 'SELECT l.pid FROM lines_bigram b JOIN lines l ON l.rowid=b.rowid '
-                'WHERE b.big MATCH ? LIMIT 20000', (q,))
+                'WHERE b.big MATCH ? LIMIT 20000', (q,)).fetchall()
         except sqlite3.OperationalError:
             continue
+        # ⚠ 2026-10-06（P2-37）：撞上限时显式记录（不静默）。
+        _note_trunc('route_phrase(%s)' % kw, len(rows), 20000)
         for (pid,) in rows:
             out[pid] = out.get(pid, 0.0) + 1.0
     return out
@@ -1829,8 +1890,16 @@ def rescue_title(conn, spec):
     命中即把该词面移入 `title_any`（硬条件），并清出 keywords，随后检索按题名而不再
     按语义乱排。**只对「本来没有硬条件」的问句生效**（有词牌/词人/朝代等条件时不抢）。
     """
-    if has_hard(spec):                 # 已有硬条件：不动（避免与词牌·题名识别打架）
-        return False
+    # ⚠ 2026-10-06 修（外部审查 P2-15）：原判据是「有任何硬条件就不救题名」——于是
+    #   「清 清明同诸子集原白斋中」这类**朝代 + 裸题名**的问句被一刀切挡掉（朝代本身
+    #   不是「检索式」线索、与题名判定也不冲突），题名永远救不回来。
+    #   现收窄为：只在存在**与题名判定易打架**的形式条件时才不动——已有题名，或已有
+    #   词牌/词人/句级算子/声律模式等具体条件。单纯的朝代、数值范围、声情不阻止 rescue。
+    if _vals(spec, 'title'):
+        return False                   # 已有题名条件：不重复添加
+    if (_vals(spec, 'cipai') or _vals(spec, 'author') or spec.pz or spec.pz_exact
+            or getattr(spec, 'line_q', None) or _vals(spec, 'tail') or spec.tail_pz):
+        return False                   # 与题名判定易打架的形式条件：保持旧行为（不动）
     kws = [k for k in (getattr(spec, 'keywords', None) or []) if len(k) >= 2]
     if not kws:
         return False
@@ -1871,6 +1940,9 @@ def route_numeric(conn, where, args, limit=20000):
     rows = conn.execute(
         'SELECT p.pid, p.ze_ratio, p.han_len FROM poems p WHERE %s LIMIT %d'
         % (where, limit), args).fetchall()
+    # ⚠ 2026-10-06（P2-39）：撞上限时显式记录——数值路的候选池不完整会让融合排序
+    #   看不到本该靠前的篇目（答案是另一路给的，但展示质量受影响）。
+    _note_trunc('route_numeric', len(rows), limit)
     return {pid: (zr or 0) / 100.0 * 0.6 + min(nc or 0, 120) / 120.0 * 0.4
             for pid, zr, nc in rows}
 
@@ -1914,6 +1986,7 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
     否则长调天然占优）。
     """
     spec = parse_query(conn, query) if isinstance(query, str) else query
+    _ROUTE_TRUNCATED.clear()        # 本次检索的截断记录从零开始（外部审查 P2-37/38/39）
     if spec.unsupported:
         return []
     where, args = _sql(spec)
@@ -2168,8 +2241,15 @@ def _patch_parse(text, spec):
 
 
 def parse_query(conn, text):
-    """对外入口：**挖空算子短语** → 内部规则解析 → 句级算子 → 解析补丁 → 算子认账。"""
+    """对外入口：**挖空算子短语** → 内部规则解析 → 句级算子 → 解析补丁 → 算子认账。
+
+    ⚠ 语义拆分（外部审查 P2-17）：入参 `text` 是**用户原话**，这里先记进 `spec.raw_question`
+    （审计/日志用，永不被改写）；传给内部解析的是 `_mask_ops(text)`（挖空算子短语后的工作
+    文本），它被存为 `spec.raw` 并用于词面检索（`route_bigram`）——这是**既有设计**：算子短语
+    （「句脚是…」「每一句…」）本就不该参与词面匹配。两者现在各自有名、互不混淆。
+    """
     spec = _parse_query_inner(conn, _mask_ops(text))
+    spec.raw_question = text or ''
     parse_line_ops(text, spec)
     _patch_parse(text, spec)
     return _flag_ops(spec, text)

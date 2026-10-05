@@ -1,0 +1,72 @@
+# 词律探微 · 无语料门禁（CI）
+#
+# 设计原则：
+#   本仓库的**核心资产是语料库 `data/corpus.db`（约 160 MB，走 Git LFS 大文件），
+#   CI 环境不拉取它**，因此凡是「需要 corpus.db / 本地绝对路径语料」的门禁
+#   **不在本 CI 范围内**（例如 build_corpus.py 建库、preflight.py 语料体检、
+#   regress.py、invariant_check.py、web/verify_views.js 等）。
+#   这些门禁请在装有语料与 `D:\conda_envs\langchain-env` 的**本机**用
+#   `python reproduce.py` 跑（见 复现报告.md）。
+#
+#   本 CI 只跑**不依赖语料库**的子集，用来在 push / PR 时挡住
+#   「语法错误 / 自检回归 / 前端逻辑与文档漂移」这类低级问题。
+#   凡可能因「缺语料或缺可选依赖」而假红的步骤，一律加显式存在性判断或跳过提示，
+#   不允许把「没跑」伪装成「通过」。
+name: gates
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-gates:
+    name: Python 语法 / 自检（无语料）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装运行依赖
+        run: python -m pip install --upgrade pip && python -m pip install -r solve/requirements.txt
+      # `compileall` 等价于对全部 .py 逐个 `py_compile`，但会递归整个目录，更严格。
+      - name: 语法检查（python -m compileall + py_compile 全部 .py）
+        run: |
+          python -m compileall -q solve tools
+          python -m py_compile $(find . -name '*.py' -not -path './frontend/node_modules/*')
+      - name: 自检（programmatic asserts；语料节在缺语料时自动 SKIP）
+        env:
+          # 指向不存在的路径：显式让语料相关节走 SKIP（不依赖 runner 上的偶然目录）
+          CORPUS_ROOT: /nonexistent-no-corpus
+        run: python solve/selftest.py
+
+  frontend-gates:
+    name: 前端逻辑 / 冒烟 / 文档 / 类型（无语料）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装前端依赖
+        working-directory: frontend
+        run: npm ci
+      # check-core.cjs 需要仓库内的冻结基准（_历史产物/_core_baseline）与数据快照
+      # （data/web_poems.json、data/expect_search.json）。快照缺失时**显式跳过**，
+      # 而不是让整条链假红（这些快照不是语料库，但可能未随小仓库分发）。
+      - name: 逻辑层等价性（core 真源 vs 冻结基线，全库逐字节）
+        run: |
+          if [ -f data/web_poems.json ] && [ -f data/expect_search.json ]; then
+            node frontend/tools/check-core.cjs
+          else
+            echo "SKIP 逻辑层等价性：缺少 data/web_poems.json / data/expect_search.json（快照未随仓库分发）"
+          fi
+      - name: 组件冒烟（6 视图 SSR 渲染不报错）
+        run: node frontend/tools/ssr-smoke.mjs
+      - name: 组件文档一致性（docs/组件API.md 与源码不漂移）
+        run: node frontend/tools/gen-docs.mjs --check
+      # strict：node_modules 已在上面装好；缺 vue-tsc/tsc 时必须是失败而不是 SKIP。
+      - name: 类型检查（strict；缺依赖即失败）
+        run: node frontend/tools/check-types.mjs --strict
