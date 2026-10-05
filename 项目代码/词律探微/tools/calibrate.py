@@ -176,8 +176,7 @@ def evaluate(p, tones, ov):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--corpus', default=(os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料'))))
+    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
     ap.add_argument('--questions', default=None)
     ap.add_argument('--out', default=os.path.join(os.path.dirname(HERE), 'solve', 'data', 'candidate_overrides.json'),
                     help='候选表输出路径。★ 默认不碰交付表 pron_overrides.json：'
@@ -187,9 +186,8 @@ def main():
     ap.add_argument('--classes', default='C1,C2,C3,C4')
     args = ap.parse_args()
 
-    qfile = args.questions or (os.environ.get('LVC_QUESTIONS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '初赛数据',
-        '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl')))
+    qfile = args.questions or os.path.join(
+        r'D:\桌面\人文薪火\数据\初赛数据', '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl')
     qs = [json.loads(l) for l in open(qfile, encoding='utf-8-sig') if l.strip()]
     poems = load_corpus(args.corpus)
     loc = get_locator(poems)

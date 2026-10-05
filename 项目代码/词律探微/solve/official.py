@@ -20,9 +20,8 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 语料根目录：环境变量 LVC_CORPUS 优先；否则按本仓库布局（…/数据/语料）相对定位
-CORPUS = (os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料')))
+# 语料根目录：环境变量优先（换机/评审可覆盖），否则本机默认
+CORPUS = os.environ.get('LVC_CORPUS') or r'D:\桌面\人文薪火\数据\语料'
 
 # 类别关键词（取自官方题面的措辞；命中数最多者胜，平手按 C1→C5 优先）
 _CLS_HINTS = (

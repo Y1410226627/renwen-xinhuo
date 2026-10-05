@@ -15,9 +15,7 @@ import pronounce as _pronounce                        # noqa: E402
 from prosody import Engine, han_only, r1, pct, SENT_SPLIT_RE, _quote   # noqa: E402
 import prosody as _prosody                            # noqa: E402
 
-CORPUS = (os.environ.get('CORPUS_ROOT') or os.environ.get('LVC_CORPUS')
-          or os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          '..', '..', '..', '数据', '语料')))
+CORPUS = os.environ.get('CORPUS_ROOT', r'D:\桌面\人文薪火\数据\语料')
 FAIL = []
 N = 0
 

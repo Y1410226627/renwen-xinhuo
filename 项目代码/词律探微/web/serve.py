@@ -56,6 +56,9 @@ from urllib.parse import urlparse, parse_qs                          # noqa: E40
 
 DB = os.path.join(ROOT, 'data', 'corpus.db')
 DATA = os.path.join(ROOT, 'data')
+# Vue3+Vite 构建产物（D15 前端架构）。问答页在 web/dist/ask/；离线四视图在 data/vue/。
+DIST_ASK = os.path.join(HERE, 'dist', 'ask')
+DIST_VIEWS = os.path.join(DATA, 'vue')
 LOCK = threading.Lock()
 CONN = None
 LLM = None
@@ -452,6 +455,13 @@ def _clean_ask_result(res, client, t0):
     """把问答结果整理成前端 JSON（**q_ask 与流式端点共用**，避免两处走样）。"""
     res['blocks'] = [{k: v for k, v in b.items() if k != 'raw'} for b in res['blocks']]
     res['verify'] = {'ok': res['verify'][0], 'problems': res['verify'][1]}
+    # ⚠ 2026-10-05 新增（朋友对照）：把「为什么是这个结论/为什么答不出」**结构化成八态**，
+    #   附在结果里（纯附加字段，不改既有答句、进不了 solver → 零回归安全）。
+    try:
+        import answer_reason as _AR
+        res['reason'] = _AR.classify(res)
+    except Exception:
+        res['reason'] = None
     if res.get('spec') and hasattr(res['spec'], 'get'):
         res['spec'] = {k: v for k, v in res['spec'].items()
                        if isinstance(v, (str, int, float, list, type(None)))}
@@ -575,43 +585,34 @@ def q_rand(dyn=''):
     return q_parse(row[0])
 
 
-PAGE_ASK = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>声情问答 · 词律探微</title></head><body>
-<header class="top"><div class="in"><div class="brand">词律探微
-  <small>清代词律声情研究助手 · 本地离线 · 答案可溯源</small></div>
-  <nav class="tabs">
-    <a class="on" href="/">问答</a>
-    <a href="/browse.html">多条件检索</a>
-    <a href="/parse.html">逐字解析</a>
-    <a href="/graph.html">知识图谱</a>
-    <a href="/review.html">校订队列</a>
-  </nav><button id="theme" class="ghost">☾ 夜间</button></div></header>
-<main>
-  <div class="card"><h1>问我一句</h1>
-    <p class="dim">可以这样问（点一下就填进输入框）：</p>
-    <div id="chips"></div>
-    <p class="dim">回答里的每一处数字都带证据块与出处（篇号 + 句序），可疑之处会明说，
-      语料覆盖不到的问题会<b>拒答</b>而不是编。</p></div>
-  <div id="log"></div>
-  <div class="bar"><input id="q" style="width:min(560px,60%)" placeholder="例：清 临江仙 仄声比例高于45%">
-    <button id="go">提问</button>
-    <label class="dim" style="margin-left:8px"><input type="checkbox" id="useParse" checked>
-      用大模型理解问句</label>
-    <label class="dim" style="margin-left:8px"><input type="checkbox" id="useLlm">
-      让大模型写说明</label>
-    <label class="dim" style="margin-left:6px"><input type="checkbox" id="useArg">
-      论证辅助草稿</label>
-    <span id="llmTag" class="dim" style="margin-left:8px"></span></div>
-</main>
-<footer class="foot">页面启动时间：@@STAMP@@　·　数据：data/corpus.db　·　
-数字全部由本地引擎算出（逐字注音 → 平仄 → 比例 → 声情）；
-勾选「让大模型写说明」时，大模型只把同一批事实写成通顺的话，数字仍由引擎给，
-整段还会再过一道护栏与内容安全校验，不过就丢弃并在页面上注明已回退。</footer>
-<script src="/ui.js"></script><script src="/app_ask.js"></script>
-<script>AskApp.mount({api:''});UI.mountTheme();</script>
-</body></html>
-"""
+_ASK_HTML_CACHE = {'mtime': None, 'text': None}
+
+
+def page_ask_html():
+    """问答页 HTML（Vue 构建产物）。
+
+    ⚠ 2026-10-05（D15）：问答页已由 Vue3+Vite 重建，产物在 `web/dist/ask/ask.html`。
+    本函数负责读取产物并**就地替换生成时间戳探针**（`__STAMP__` → 真实时间），
+    保持与离线视图一致的「页面生成时间」约定。产物缺失时给出明确的构建提示，
+    而不是白屏——评审机上跑起来「能看到一句话」比「什么都没有」重要。
+    """
+    idx = os.path.join(DIST_ASK, 'ask.html')
+    try:
+        mt = os.path.getmtime(idx)
+    except OSError:
+        return ('<!doctype html><meta charset="utf-8"><title>词律探微</title>'
+                '<body style="font:15px/1.8 system-ui;padding:40px;max-width:760px;margin:auto">'
+                '<h1>问答页尚未构建</h1>'
+                '<p>请先构建前端：</p>'
+                '<pre>cd frontend\nnpm install\nnpm run build</pre>'
+                '<p>或直接运行 <code>python web/build_views.py</code> 生成离线视图。</p>'
+                '</body>')
+    if _ASK_HTML_CACHE['mtime'] != mt:
+        with open(idx, 'r', encoding='utf-8') as f:
+            _ASK_HTML_CACHE['text'] = f.read()
+        _ASK_HTML_CACHE['mtime'] = mt
+    # 占位符用 @@STAMP@@（**不要**用 __STAMP__：那会连 JS 变量名一起替换掉，见 2026-10-05 实测）。
+    return _ASK_HTML_CACHE['text'].replace('@@STAMP@@', STAMP)
 
 
 class H(BaseHTTPRequestHandler):
@@ -640,8 +641,21 @@ class H(BaseHTTPRequestHandler):
         qs = parse_qs(u.query)
         g = lambda k, d='': (qs.get(k, [d])[0] if qs.get(k) else d)
         try:
-            if u.path in ('/', '/index_ask.html'):
-                return self._send(PAGE_ASK.replace('@@STAMP@@', STAMP), 'text/html; charset=utf-8')
+            if u.path in ('/', '/index_ask.html', '/ask.html'):
+                return self._send(page_ask_html(), 'text/html; charset=utf-8')
+            # Vue 构建产物的静态资源（JS/CSS/字体），相对 ./assets/ 引用。
+            # 问答页资源在 web/dist/ask/assets/；离线四视图资源在 data/vue/assets/。
+            # 两处都找，都找不到才 404。
+            if u.path.startswith('/assets/'):
+                rel = u.path.lstrip('/')
+                for base in (DIST_ASK, DIST_VIEWS):
+                    p = os.path.join(base, rel)
+                    if os.path.isfile(p):
+                        ct = ('text/javascript' if p.endswith('.js') else
+                              'text/css' if p.endswith('.css') else 'application/octet-stream')
+                        with open(p, 'rb') as f:
+                            return self._send(f.read(), ct + '; charset=utf-8')
+                return self._send({'error': 'not found: %s' % u.path}, code=404)
             if u.path == '/api/ask':
                 b = lambda k: g(k).lower() in ('1', 'true', 'yes', 'on')
                 topk = min(10, max(1, _num(g('topk'), int) or 3))
@@ -695,15 +709,32 @@ class H(BaseHTTPRequestHandler):
                 return self._send(q_rand(g('dyn')))
             if u.path == '/api/examples':
                 return self._send(EXAMPLES)
-            # 静态视图：从这个服务打开（不必双击文件）
-            for name in ('parse.html', 'browse.html', 'graph.html', 'review.html', 'index.html',
-                         'web_poems.json', 'metrics.js', 'ui.js', 'app_parse.js', 'app_ask.js',
+            # 静态视图：优先提供 Vue 构建产物（data/vue/），回退旧版手写视图（data/*.html）。
+            # 两种产物文件同名，因此「构建了就自动用新版」，评审机没跑构建也不至于 404。
+            for name in ('parse.html', 'browse.html', 'graph.html', 'review.html', 'index.html'):
+                if u.path == '/' + name:
+                    for base in (DIST_VIEWS, DATA):
+                        p = os.path.join(base, name)
+                        if os.path.exists(p):
+                            with open(p, 'rb') as f:
+                                body = f.read()
+                            return self._send(body, 'text/html; charset=utf-8')
+            # 离线视图的数据脚本（pack.js / rev.js / stamp.js）与数据文件（graph.json）。
+            # 路径白名单，防目录穿越。（/assets/ 已在上面处理。）
+            if u.path in ('/pack.js', '/rev.js', '/stamp.js', '/graph.json', '/review_rows.json'):
+                rel = u.path.lstrip('/')
+                p = os.path.join(DIST_VIEWS, rel)
+                if os.path.exists(p):
+                    ct = 'application/json' if rel.endswith('.json') else 'text/javascript'
+                    with open(p, 'rb') as f:
+                        return self._send(f.read(), ct + '; charset=utf-8')
+            # 数据与共享脚本（离线视图用；Vue 产物不依赖它们，但旧视图与门禁需要）
+            for name in ('web_poems.json', 'metrics.js', 'ui.js', 'app_parse.js', 'app_ask.js',
                          'app_review.js', 'db_metrics.json', 'graph.json', 'expect_search.json'):
                 if u.path == '/' + name:
                     p = os.path.join(DATA, name)
                     if os.path.exists(p):
-                        ct = ('text/html' if name.endswith('.html') else
-                              'application/json' if name.endswith('.json') else 'text/javascript')
+                        ct = ('application/json' if name.endswith('.json') else 'text/javascript')
                         with open(p, 'rb') as f:
                             return self._send(f.read(), ct + '; charset=utf-8')
             return self._send({'error': 'not found: %s' % u.path}, code=404)

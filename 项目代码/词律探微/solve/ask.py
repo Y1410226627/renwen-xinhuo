@@ -116,6 +116,41 @@ def _clean_frag(s):
     return re.sub(r'[「」『』“”]', '', str(s)).strip()
 
 
+def _title_hint(conn, spec):
+    """命中 0 篇时的**只读兜底提示**：这些关键词其实是不是**题名**？
+
+    ⚠ 2026-10-05 新增（朋友实测驱动）。由来：「蝶恋花·清明同诸子集原白斋中」被当成
+    「词面」去正文里搜 → 0 命中，而它其实是**题名**（库里 title 恰好 1 篇）。
+    这里只做**提示**、不改检索结论——把「为什么是 0」说清楚：
+      · 关键词在 title 命中 → 明说「这是题名（词题），不是正文」，并给正确写法；
+      · 都没命中 → 返回空串（保持原样，不干扰既有文案）。
+    文案纪律：**不含阿拉伯数字、不含引号**（`「」` 只用于引用语料原文），
+    以免污染护栏校验；命中篇数一律用汉字数词表述。
+    """
+    kws = [k for k in (getattr(spec, 'keywords', None) or []) if len(k) >= 2]
+    if not kws:
+        return ''
+    hit_titles = []
+    for kw in kws[:6]:
+        try:
+            row = conn.execute(
+                'SELECT title FROM poems WHERE title LIKE ? LIMIT 1',
+                ('%' + kw + '%',)).fetchone()
+        except Exception:
+            row = None
+        if row and row[0]:
+            hit_titles.append((kw, row[0]))
+    if not hit_titles:
+        return ''
+    kw, ttl = hit_titles[0]
+    more = ('；另有「%s」等同样命中题名' % hit_titles[1][0]
+            if len(hit_titles) > 1 else '')
+    return ('\n　　　⚠ 提示：检索词「%s」在**题名**中命中（如《%s》%s），'
+            '但**不在正文中**——应按**题名（词题）**检索，而不是当作词原文。'
+            '若已知词牌，可用「词牌·题名」的写法（如「…·%s」）让系统直接定位题名。'
+            % (kw, ttl, more, kw))
+
+
 # 「未解析的方向/数量词」词表：规则路没把它们变成条件时，说明规则路漏听了，
 # 这时才值得再花 1.4 秒让大模型听一遍（案例：「清或宋的临江仙里仄声超过一半的有哪些」）。
 DIR_WORDS = ('超过', '高于', '大于', '多于', '高出', '低于', '小于', '少于', '不足',
@@ -864,9 +899,19 @@ def _answer_output(conn, question, spec, pnote, kind, op, extra, topk=3):
                                 refused=True, narrator='template')
         _n_all = conn.execute('SELECT COUNT(*) FROM poems p WHERE %s' % w, a).fetchone()[0]
         if _n_all == 0:
+            # ⚠ 2026-10-05 新增（朋友实测驱动）：**"0 篇"常常不是"没有"，而是"搜错了字段"**。
+            #   实测：「清明同诸子集原白斋中」在正文（raw）里 0 命中，但它其实是**题名**，
+            #   在 title 里恰好唯一命中 1 篇（清·陈维崧）。旧版只说「共命中 0 篇」——
+            #   用户会以为语料里没有这首词，其实是他把题名当正文问了。
+            #   这里做**只读的兜底提示**：把词面关键词拿去 title 里探一次，
+            #   探到就明说「这是题名，不是正文」，并给出题名检索的写法。
+            #   —— 不改检索结果（0 仍是 0），只是把「为什么 0」说清楚，符合
+            #      「无据即认账、但认账要认得准确」的既有纪律。
+            _hint = _title_hint(conn, spec)
             t = (head + '\n【结论】在条件〔%s〕下共命中 0 篇：本语料中没有作品同时满足上述全部条件。'
-                         '\n　　　（口径：按全部条件逐篇比对后计数；0 是确切结果，不是未检索。）'
-                         '\n【推断边界｜%s问句】%s' % (spec.describe(), kind, BOUNDARIES[kind]))
+                         '\n　　　（口径：按全部条件逐篇比对后计数；0 是确切结果，不是未检索。）%s'
+                         '\n【推断边界｜%s问句】%s'
+                 % (spec.describe(), _hint, kind, BOUNDARIES[kind]))
             _allow = _nums(t) + re.findall(r'\d+(?:\.\d+)?', spec.describe()) + [0]
             _ok, _pb = guard.verify(t, [], boundary_kind=kind, allow=_allow)
             return _wrap_output(question, spec, pnote, kind, t, _ok, _pb,
@@ -1346,6 +1391,17 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #   负值更会被当成"全部"（563 篇）。这里统一夹到 [1, 200]。
     spec, pnote = understand(conn, question, llm=llm, llm_parse=llm_parse,
                              llm_policy=llm_policy, context=context)
+    # ⭐ **「题名当词原文」兜底**（2026-10-05，朋友实测驱动）：
+    #   裸题名（不带词牌，如「清明同诸子集原白斋中」「寄怀阿嫂」）解析后只剩「词面=…」，
+    #   无硬条件 → 走语义融合排序 → 端上来的却是元曲里偶含「阿嫂」二字的《单刀会》，
+    #   答非所问（朋友截图那一幕）。这里只读探测：词面在 **title** 命中、却在**正文**里 0 命中，
+    #   就把词面提升为**题名条件**，改按题名检索。**只在本来没有硬条件时生效**，不动既有路径。
+    _rescued = retrieve.rescue_title(conn, spec)
+    if _rescued:
+        pnote = dict(pnote)
+        pnote['notes'] = list(pnote.get('notes') or []) + [
+            '识别为**题名（词题）**而非词原文：词面在题名中命中、但不在正文出现，'
+            '已改按题名检索（避免拿语义相近的篇凑数）']
     # ⭐ **意图覆盖自检**：问句里出现「哪个词人/词牌/朝代…最多/最少」这类**分组极值意图**，
     #    而最终既没有分组统计、也没有排序/配对意图 → **如实认账**，绝不拿检索结果冒充答案。
     #    这一条是 2026-10-01 主人运行记录里那个 bug 的「防复发闸」：

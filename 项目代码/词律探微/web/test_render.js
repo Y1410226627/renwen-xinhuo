@@ -42,12 +42,13 @@ const BUGGY = "L1.pz.split('仄').length-1 + '/' + L1.pz.split('平').length-1";
 
 function bootWith(source) {
   const ctx = V.makeCtx();
-  V.load(ctx, path.join(V.web, 'metrics.js'));
-  V.load(ctx, path.join(V.web, 'ui.js'));
+  V.load(ctx, path.join(V.core, 'metrics.js'));
+  V.load(ctx, path.join(V.core, 'ui.js'));
   if (source) {
-    require('vm').runInContext(source, ctx.sandbox, { filename: 'app_parse(injected).js' });
+    require('vm').runInContext(source, ctx.sandbox, { filename: 'parse(injected).js' });
   } else {
-    V.load(ctx, path.join(V.web, 'app_parse.js'));
+    /* ⚠ D15：逻辑层真源在 frontend/src/core/parse.js（web/app_parse.js 只是薄转发）。 */
+    V.load(ctx, path.join(V.core, 'parse.js'));
   }
   const pack = JSON.parse(fs.readFileSync(path.join(V.data, 'web_poems.json'), 'utf8'));
   ctx.sandbox.ParseApp.setData(pack);
@@ -122,7 +123,8 @@ function main() {
     process.exit(1);
   }
   if (SELFTEST) {
-    const src0 = fs.readFileSync(path.join(V.web, 'app_parse.js'), 'utf8');
+    /* ⚠ D15：源码文本从真源读（web/app_parse.js 已成薄转发，自身不含实现）。 */
+    const src0 = fs.readFileSync(path.join(V.core, 'parse.js'), 'utf8');
     if (src0.indexOf(FIXED) < 0) {
       console.log('✗ FAIL（自我验证）：源码里找不到现在的写法，无法注入旧 bug —— 注入失败也算 FAIL，');
       console.log('   否则「这道门禁能报错」本身没被验证过。');
@@ -148,10 +150,31 @@ function main() {
 
   /* 深链自检：?pid= 必须能定位到那一篇 */
   let dlOk = false;
+  let PAGE_DIR = null;
   try {
     const rows = JSON.parse(fs.readFileSync(packFile, 'utf8')).rows;
-    const page = fs.readFileSync(path.join(V.data, 'parse.html'), 'utf8');
+    /* D15 后页面是 Vue 构建产物：HTML 只是壳，深链逻辑（q0.pid）打进 assets/*.js。
+       所以检查范围 = parse.html + 同目录 assets/ 下它引用的 JS。 */
+    let page = null;
+    for (const d of [V.vue, V.data]) {
+      if (!d) { continue; }
+      try { page = fs.readFileSync(path.join(d, 'parse.html'), 'utf8'); PAGE_DIR = d; break; } catch { /* 试下一个 */ }
+    }
+    if (!page) { throw new Error('parse.html 在 data/vue/ 与 data/ 均未找到'); }
+    /* 深链标记（按实现演进）：
+       · 旧内嵌脚本：'?pid=' 或 'q0.pid' 字面量就在 html 里；
+       · D15 Vue 打包：逻辑在 assets/*.js，变量名被压缩，`if (q0.pid) showDetail(q0.pid)`
+         存留为 `.pid&&…(` 形态 —— 用正则 /\.pid\s*&&/ 识别。 */
     dlOk = page.indexOf('?pid=') >= 0 || page.indexOf('q0.pid') >= 0;
+    if (!dlOk && PAGE_DIR) {
+      const adir = path.join(PAGE_DIR, 'assets');
+      let names = [];
+      try { names = fs.readdirSync(adir).filter((f) => f.endsWith('.js')); } catch { /* 无 assets */ }
+      for (const f of names) {
+        const s = fs.readFileSync(path.join(adir, f), 'utf8');
+        if (s.indexOf('?pid=') >= 0 || s.indexOf('q0.pid') >= 0 || /\.pid\s*&&/.test(s)) { dlOk = true; break; }
+      }
+    }
     console.log('深链自检：页面支持 ?pid= 直接定位 → ' + (dlOk ? '是' : '否（FAIL）'));
   } catch (e) { console.log('深链自检异常：' + e.message); }
   console.log((r.bad === 0 && dlOk)

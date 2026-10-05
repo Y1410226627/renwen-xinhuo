@@ -3,10 +3,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 title CiLv TanWei - Local QA App
 
-@echo off & setlocal
-rem 解释器：优先用 PATH 上的 python（可用 LVC_PYTHON 覆盖）
-set PY=%LVC_PYTHON%
-if not defined PY set PY=python
+set PY=D:\conda_envs\langchain-env\python.exe
 if not exist "%PY%" set PY=python
 
 echo Starting local QA web app (browser will open automatically)...

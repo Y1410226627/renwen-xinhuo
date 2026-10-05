@@ -37,10 +37,7 @@ def run(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--corpus', default=(os.environ.get('CORPUS_ROOT') or os.environ.get('LVC_CORPUS')
-                                        or os.path.abspath(os.path.join(
-                                            os.path.dirname(os.path.abspath(__file__)),
-                                            '..', '..', '..', '数据', '语料'))))
+    ap.add_argument('--corpus', default=os.environ.get('CORPUS_ROOT', r'D:\桌面\人文薪火\数据\语料'))
     ap.add_argument('--question', default=os.environ.get('QUESTION_FILE', ''))
     args = ap.parse_args()
     q = args.question

@@ -28,11 +28,14 @@
 ├─ 项目代码\词律探微\
 │  ├─ solve\                        ← 引擎（检索、解析、护栏、聚合、配对、解题链、官方题型、自检）
 │  │  └─ data\                      ← 标定表 pron_overrides.json、冻结指纹 golden_sha.json、大模型配置模板
-│  ├─ web\                          ← 本地网页服务（只用 Python 标准库）+ 三个离线视图 + 前端 JS
+│  ├─ frontend\                     ← 前端源码（Vue3 + Vite 组件化；逻辑真源 src/core/，见 DECISIONS.md D15）
+│  ├─ web\                          ← 本地网页服务（只用 Python 标准库）+ 数据生成 + node 门禁
 │  ├─ tools\                        ← 核验工具（回归门禁、逐题复核、审计、网页端核验等）
-│  ├─ data\                         ← corpus.db（语料库，已建好）+ 视图 html/js/json
+│  ├─ data\                         ← corpus.db（语料库，已建好）
+│  │  └─ vue\                       ← 离线视图（Vue 构建产物 + 数据包，双击 index.html 即可看）
 │  ├─ build_corpus.py               ← 从原始语料建库（换语料时才需要跑）
-│  ├─ reproduce.py                  ← 一键复现脚本（答题 → 评测 → 不变式 → 自检 → 回归）
+│  ├─ reproduce.py                  ← 一键复现脚本（答题 → 评测 → 不变式 → 自检 → 回归 → 前端门禁）
+│  ├─ DECISIONS.md / 使用说明.md     ← 技术决策表 / 评委与接手者上手指南
 │  └─ 启动问答网页.bat               ← Windows 一键启动
 └─ 数据\
    ├─ 语料\                         ← 三源：poetry-source 清词 + chinese-poetry 宋词/元曲
@@ -65,6 +68,9 @@ python web/serve.py --port 8000          # 本机访问 127.0.0.1:8000；局域�
 | 问答页 | `http://127.0.0.1:8000/` | 提问、看结论+证据块+护栏结论 |
 | 多条件检索 | `/browse.html` | 勾选条件组合检索 |
 | 逐字解析 | `/parse.html` | 任意一篇的逐字平仄 |
+
+**离线视图（不需要起服务）**：双击 `项目代码/词律探微/data/vue/index.html` 即可打开
+总览 / 逐字解析 / 多条件检索 / 知识图谱 / 校订队列 五个离线页面（数据包已内嵌，file:// 直开）。
 
 命令行提问（不启网页也可以）：
 
@@ -105,6 +111,11 @@ python build_corpus.py --corpus "../../数据/语料" --db data/corpus.db     # 
 | 一键复现（答题→评测→不变式→自检→护栏→回归） | `python reproduce.py` |
 
 > `tools/` 里还有逐题复核、答卷审查、双来源一致性、性能探测等门禁脚本，用法见各自的 `--help`。
+>
+> 改过**前端**再跑这组（详见 `项目代码/词律探微/使用说明.md`）：
+> `node frontend/tools/check-core.cjs`（逻辑层等价性）→ `node frontend/tools/check-types.mjs`（TypeScript 类型检查）
+> → `node frontend/tools/gen-docs.mjs --check`（组件文档不漂移）→ `node web/test_render.js` / `test_ui.js`（渲染/功能门禁）。
+> 构建用 `node frontend/tools/build-all.mjs`（先 Vite 后 Python，顺序不能反）。
 
 ## 七、未随仓库发布的内容（需要请自备）
 

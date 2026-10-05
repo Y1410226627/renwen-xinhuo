@@ -128,8 +128,7 @@ def locate_one_traced_safe(poems, spec):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--question', required=True)
-    ap.add_argument('--corpus', default=(os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料'))))
+    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
     ap.add_argument('--output', required=True)
     ap.add_argument('--overrides', default=default_overrides_path())
     ap.add_argument('--limit', type=int, default=0)

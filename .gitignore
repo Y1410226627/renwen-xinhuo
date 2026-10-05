@@ -16,3 +16,10 @@ llm_local.json
 
 # Stray nested git repo at repo root (accidental, not part of the project)
 /词律探微/
+# Node / frontend build deps (never commit; rebuild with npm install)
+node_modules/
+
+# Scratch files
+_*.log
+_*.out
+_*.err

@@ -51,11 +51,9 @@ def build_problems(corpus, qfile, classes):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--corpus', default=(os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料'))))
-    ap.add_argument('--questions', default=(os.environ.get('LVC_QUESTIONS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '初赛数据',
-        '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl'))))
+    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
+    ap.add_argument('--questions', default=os.path.join(
+        r'D:\桌面\人文薪火\数据\初赛数据', '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl'))
     ap.add_argument('--overrides', default=os.path.join(os.path.dirname(HERE), 'solve', 'data', 'pron_overrides.json'))
     ap.add_argument('--classes', default='C1,C2,C3,C4,C5')
     ap.add_argument('--iters', type=int, default=20000)

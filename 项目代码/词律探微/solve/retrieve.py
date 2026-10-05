@@ -120,6 +120,13 @@ FRAME_WORDS = (
     '仄声', '平声', '字数', '句数', '篇幅', '占比', '比例', '声律', '模式', '阈值',
     '变化值', '变幅', '声情', '词作', '作品数', '平均值', '总字数',
 )
+# 「提问/指标虚词」：整段里**只要含**它们，就不是「要检索的题名」（用于题名识别的守卫）。
+# 与 FRAME_WORDS 略有不同：这些词常出现在**问句尾部**（「…的平仄」「…的作者是谁」），
+# 单独成串时更该被当成「问什么」而非「检索什么」。
+_Q_FRAME = ('平仄', '声律', '声调', '韵脚', '押韵', '声情', '风格', '特点', '作者', '词人',
+            '朝代', '词牌', '字数', '句数', '占比', '比例', '意思', '含义', '意涵', '写作',
+            '是谁', '什么', '哪些', '多少', '怎么看', '怎么', '如何', '为何', '为什么')
+
 STOPWORDS = FRAME_WORDS + ('什么', '为什么', '为何', '怎么', '如何', '是否', '请问', '想问', '一下',
              '想表达', '表达', '意图', '意思', '含义', '写作目的', '目的', '有什么',
              '有哪些', '哪些', '哪首', '哪篇', '哪一句', '多少', '以及', '关于', '方面',
@@ -158,6 +165,12 @@ class QuerySpec:
         self.dynasty_any = []
         self.author_any = []
         self.cipai_any = []
+        # ⚠ 2026-10-05 新增：**题名（词题）**——「蝶恋花·清明同诸子集原白斋中」里的
+        #   「清明同诸子集原白斋中」是**题名**，不是正文（词面）。朋友实测抓到：旧版把它
+        #   当词面去 `raw` 里搜 → 该串在正文里 0 命中 → 融合分堆出 1069 篇不相关的词，
+        #   而正确答案（题名唯一命中的那 1 篇）根本没露面。官方口径亦承认题名独立于正文
+        #   （题库统一注明「不计标点、空白和**题名**」）。这一族条件必须走 `title` 列。
+        self.title_any = []
         self.tail_any = []             # 句脚字（可多个，取并集）
         self.tail_pz = None            # 句脚字的平仄（平/仄）
         self.pz = None                 # 声律模式（平仄串，? = 任意）
@@ -165,6 +178,7 @@ class QuerySpec:
         self.dynasty = None            # 单值快捷字段（由列表派生）
         self.author = None
         self.cipai = None
+        self.title = None              # 题名（词题）——「词牌·题名」里的题名部分
         self.tail = None
         self.keywords = []
         self.rng = {}                  # 数值条件：ze_min/ze_max/len_min/len_max/sent_min/sent_max/change_min/change_max/thr_min/thr_max
@@ -201,6 +215,7 @@ class QuerySpec:
         dyn = _vals(self, 'dynasty')
         au = _vals(self, 'author')
         cp = _vals(self, 'cipai')
+        ti = _vals(self, 'title')
         tl = _vals(self, 'tail')
         if dyn:
             p.append('朝代=%s' % ' 或 '.join(dyn))
@@ -208,6 +223,8 @@ class QuerySpec:
             p.append('词人=%s' % ' 或 '.join(au))
         if cp:
             p.append('词牌=%s' % ' 或 '.join(cp))
+        if ti:
+            p.append('题名=%s' % ' 或 '.join(ti))
         if self.pz:
             p.append('声律模式=%s' % self.pz)
         if self.scene:
@@ -619,7 +636,7 @@ def _vals(spec, attr):
 
 def _finalize(spec):
     """收尾：单值快捷字段由列表派生；连接词绝不留在词面条件里。"""
-    for attr in ('dynasty', 'author', 'cipai', 'tail'):
+    for attr in ('dynasty', 'author', 'cipai', 'title', 'tail'):
         lst = _vals(spec, attr)
         setattr(spec, attr, lst[0] if len(lst) == 1 else None)
     # ⚠ 2026-10-04 修（代码审查 P1-7）：词面残片**去重 + 限长**——旧写法把未识别片段原样全收，
@@ -1210,6 +1227,29 @@ def _parse_core(conn, text, keep_names=False):
             rest = rest.replace(c, ' ')
             break
 
+    # ⚠ 2026-10-05 新增：**题名（词题）识别**——「词牌·题名」是词集里最规范的题名写法。
+    #   由来（朋友实测驱动）：「蝶恋花·清明同诸子集原白斋中 的作者是谁」被旧版解析成
+    #   「词牌=蝶恋花；词面=清明同诸子集原白斋中」——把**题名当成了词原文**，去 `raw` 里搜，
+    #   而该串在正文里 0 命中 → 融合分堆出 1069 篇毫不相干的词，唯独正确答案（题名唯一命中
+    #   的那 1 篇，清·陈维崧）没露面。官方口径同样把题名独立于正文（题库统一注明
+    #   「不计标点、空白和**题名**」）。
+    #   判据要**窄**，避免误伤正文里的间隔号（如《蝶恋花·「感春」次任公韵》是标题自带引号）：
+    #     ① 词牌已被识别（spec.cipai_any 非空）；
+    #     ② 文中存在「·」紧跟其后的**连续汉字串**（题名部分，允许中间有顿号/空格分隔的多段）；
+    #     ③ 该串长度 ≥2 且不含疑问框架词（否则是「…的作者的词」这类残片）。
+    if spec.cipai_any and not spec.title_any:
+        m_t = re.search(r'·\s*([\u4e00-\u9fff\u3400-\u4dbf][\u4e00-\u9fff\u3400-\u4dbf\s、，,]{0,40}?)'
+                        r'(?=[\s，,。？?！!、；;：:「」『』“”"]|$)', text)
+        if m_t:
+            cand = re.sub(r'[\s、，,]+', '', m_t.group(1))
+            # ⚠ 2026-10-05 修：「的平仄」这类**框架残片**不能当题名。判据用**更宽的**框架词集
+            #   （FRAME_WORDS ∪ 提问/指标虚词），否则「蝶恋花·的平仄」会把「的平仄」当题名 →
+            #   「词牌=蝶恋花；题名=的平仄」0 命中（实测），而用户只是想问「蝶恋花的平仄」。
+            _FRAME_ALL = tuple(FRAME_WORDS) + tuple(STOPWORDS) + tuple(_Q_FRAME)
+            if len(cand) >= 2 and not any(w in cand for w in _FRAME_ALL):
+                spec.title_any.append(cand)
+                rest = rest.replace(m_t.group(1).strip(), ' ')
+
     # 词人（最长匹配优先）
     for a in _names_longest_first(conn, 'authors', 'author'):
         if a in rest:
@@ -1526,6 +1566,13 @@ def _sql(spec):
 
     for attr, col in (('dynasty', 'p.dynasty'), ('author', 'p.author'), ('cipai', 'p.cipai')):
         one(col, _vals(spec, attr))
+    # ⚠ 2026-10-05 新增：**题名检索**。题名是完整标题（如「蝶恋花·清明同诸子集原白斋中」），
+    #   用户给出的往往只是「题名部分」（词题），故用**子串**匹配 `LIKE %题名%` 而不是等值。
+    #   多值时取并集（与其它字段一致）。走 OR 而不是 IN：每项各自的 LIKE 无法折成 IN。
+    _ti = _vals(spec, 'title')
+    if _ti:
+        where.append('(' + ' OR '.join('p.title LIKE ?' for _ in _ti) + ')')
+        args.extend('%' + t + '%' for t in _ti)
     if spec.scene:
         where.append('p.scene = ?'); args.append(spec.scene)
     _chg = 'ABS(p.change)' if getattr(spec, 'change_abs', False) else 'p.change'
@@ -1766,6 +1813,59 @@ def route_phrase(conn, keywords):
     return out
 
 
+def rescue_title(conn, spec):
+    """**「题名当词原文」兜底**：词面（keywords）其实是**题名**时，把它提升为题名条件。
+
+    ⚠ 2026-10-05 新增（朋友实测驱动）。由来：
+      · 问句「蝶恋花·清明同诸子集原白斋中 的作者是谁」→ 已由 parse_query 的
+        「词牌·题名」识别接住（题名=清明…），命中 1 篇；
+      · 但**裸题名**（不带词牌，如「清明同诸子集原白斋中」「寄怀阿嫂」）解析后
+        只剩「词面=…」→ 无硬条件 → 走**语义融合排序**，端上来的却是元曲里
+        偶含「阿嫂」二字的《单刀会》——答非所问（朋友截图里那一幕）。
+    判据（两条同时成立才提升，宁缺勿滥）：
+      ① 词面里**至少一个 2+ 字串**在 title 里命中（子串）；
+      ② 这些词面在**正文（lines 的整句）**里**命中为 0**——
+         说明它们不是「词里的句子」，而更可能是**题名**。
+    命中即把该词面移入 `title_any`（硬条件），并清出 keywords，随后检索按题名而不再
+    按语义乱排。**只对「本来没有硬条件」的问句生效**（有词牌/词人/朝代等条件时不抢）。
+    """
+    if has_hard(spec):                 # 已有硬条件：不动（避免与词牌·题名识别打架）
+        return False
+    kws = [k for k in (getattr(spec, 'keywords', None) or []) if len(k) >= 2]
+    if not kws:
+        return False
+    t_hits = []
+    for kw in kws[:6]:
+        try:
+            row = conn.execute('SELECT COUNT(*) FROM poems WHERE title LIKE ?',
+                               ('%' + kw + '%',)).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row and row[0] > 0:
+            t_hits.append(kw)
+    if not t_hits:
+        return False
+    # ② 这些词面在**正文**里命中为 0（题名不在正文里出现，正是「被当词原文」的症状）
+    for kw in t_hits:
+        bs = bigrams(kw)
+        if not bs:
+            continue
+        q = '"%s"' % (' '.join(bs) if len(bs) > 1 else bs[0])
+        try:
+            n = conn.execute(
+                'SELECT COUNT(*) FROM lines_bigram b JOIN lines l ON l.rowid=b.rowid '
+                'WHERE b.big MATCH ?', (q,)).fetchone()[0]
+        except sqlite3.OperationalError:
+            n = 0
+        if n > 0:                      # 这个串在正文里确有其句 → 不是题名，不提升
+            return False
+    kept = [k for k in kws if k not in t_hits]
+    spec.title_any = list(spec.title_any or []) + t_hits
+    spec.keywords = kept
+    _finalize(spec)                    # 派生单值 title（与「词牌·题名」识别同源）
+    return True
+
+
 def route_numeric(conn, where, args, limit=20000):
     """④ 数值路：符合硬条件者按「仄声占比 + 篇幅」给排序信号（不代表优劣）。"""
     rows = conn.execute(
@@ -1802,6 +1902,7 @@ def has_hard(spec):
     （实测 Q0121：真值 2 篇，却展示 3 篇、还声称「全库仅此 2 篇」）。
     """
     return bool(_vals(spec, 'dynasty') or _vals(spec, 'author') or _vals(spec, 'cipai')
+                or _vals(spec, 'title')
                 or spec.scene or spec.pz or spec.pz_exact or _vals(spec, 'tail')
                 or spec.tail_pz or spec.tail_each or spec.line_q or spec.consist or spec.rng)
 

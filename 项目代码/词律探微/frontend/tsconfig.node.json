@@ -1,0 +1,23 @@
+/* tsconfig.node.json —— 构建工具侧（Vite 配置 + tools/*.mjs、*.cjs）的类型检查配置。 */
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noImplicitAny": false
+  },
+  "include": ["vite.config.js", "tools/**/*.mjs", "tools/**/*.cjs"],
+  "exclude": ["node_modules"]
+}

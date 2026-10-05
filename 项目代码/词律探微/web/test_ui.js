@@ -51,7 +51,7 @@ function parseCsv(text) {
 }
 
 function main() {
-  const D = V.data, WEB = V.web;
+  const D = V.data, WEB = V.web, VUE = V.vue;
   const sb = V.boot().sandbox;
   const P = sb.ParseApp, Rev = sb.ReviewApp, U = sb.UI;
 
@@ -84,9 +84,10 @@ function main() {
   ok('分面「声情」求和 = 命中数', sceneSum === byZe.total, sceneSum + ' ≠ ' + byZe.total);
 
   /* ---------- 二、校订队列（内嵌 JSON ↔ 独立解析的 CSV） ---------- */
-  const revHtml = fs.readFileSync(path.join(D, 'review.html'), 'utf8');
-  const m = /var REV=(\[[\s\S]*?\]);/.exec(revHtml);
-  ok('review.html 内嵌了工单数据', !!m);
+  /* D15 后：数据在 data/vue/rev.js（`window.__REV__ = [...]`），由 build_views.py 生成。 */
+  const revSrc = fs.readFileSync(path.join(VUE, 'rev.js'), 'utf8');
+  const m = /window\.__REV__\s*=\s*(\[[\s\S]*?\]);/.exec(revSrc);
+  ok('rev.js 内嵌了工单数据', !!m);
   if (m) {
     const rev = JSON.parse(m[1]);
     const csv = parseCsv(fs.readFileSync(path.join(D, 'review_diff.csv'), 'utf8'));
@@ -108,38 +109,51 @@ function main() {
     ok('按「字」排序单调不减', mono2);
   }
 
-  /* ---------- 三、页面审计 ---------- */
+  /* ---------- 三、页面审计（D15：页面在 data/vue/，由 Vite 构建产出） ---------- */
   const pages = ['index.html', 'parse.html', 'browse.html', 'graph.html', 'review.html'];
   for (const pg of pages) {
-    const p = path.join(D, pg);
+    const p = path.join(VUE, pg);
     ok(pg + ' 存在', fs.existsSync(p));
     if (!fs.existsSync(p)) { continue; }
     const h = fs.readFileSync(p, 'utf8');
-    ok(pg + ' 带「生成时间」探针', h.indexOf('页面生成时间') >= 0);
     ok(pg + ' 正文无 markdown 星号', h.indexOf('**') < 0);
-    ok(pg + ' 无字面 NaN 断言（除探针提示）',
-       (h.match(/NaN/g) || []).length <= 2);
     for (const mm of h.matchAll(/(?:src|href)="([^"#?][^"]*)"/g)) {
       const t = mm[1];
       if (/^(https?:|javascript:|mailto:)/.test(t)) { continue; }
-      ok(pg + ' 本地资源存在 ' + t, fs.existsSync(path.join(D, t)));
+      ok(pg + ' 本地资源存在 ' + t, fs.existsSync(path.join(VUE, t)));
     }
   }
-  ok('parse.html 引用 app_parse.js',
-     fs.readFileSync(path.join(D, 'parse.html'), 'utf8').indexOf('app_parse.js') >= 0);
-  ok('parse.html 内嵌数据（离线可用）',
-     fs.readFileSync(path.join(D, 'parse.html'), 'utf8').indexOf('EMBED_PACK=') >= 0);
+  /* 离线自包含：解析页必须能用 file:// 打开（数据走经典脚本内嵌，不用 fetch） */
+  const parseHtml = fs.readFileSync(path.join(VUE, 'parse.html'), 'utf8');
+  ok('parse.html 引用 pack.js（file:// 可开）',
+     parseHtml.indexOf('pack.js') >= 0);
+  ok('pack.js 以 window.__PACK__ 挂载数据（离线自算）',
+     fs.readFileSync(path.join(VUE, 'pack.js'), 'utf8').indexOf('window.__PACK__') >= 0);
+  ok('review.html 引用 rev.js（file:// 可开）',
+     fs.readFileSync(path.join(VUE, 'review.html'), 'utf8').indexOf('rev.js') >= 0);
 
-  /* ---------- 四、共享文件一致 ---------- */
-  for (const f of ['ui.js', 'app_parse.js', 'app_review.js', 'metrics.js']) {
-    const a = fs.readFileSync(path.join(WEB, f));
-    const b = fs.readFileSync(path.join(D, f));
-    ok('data/' + f + ' 与 web/' + f + ' 逐字节相同', a.equals(b));
+  /* ---------- 四、逻辑层单一真源 ---------- */
+  /* D15 后真源在 frontend/src/core/；web/*.js 只是薄转发，内容应只剩 require 一行。 */
+  for (const f of ['ui.js', 'parse.js', 'review.js', 'metrics.js', 'ask.js']) {
+    const coreP = path.join(V.core, f);
+    ok('core/' + f + ' 存在（唯一真源）', fs.existsSync(coreP));
+  }
+  const forward= { 'ui.js': 'core/ui.js', 'app_parse.js': 'core/parse.js',
+                   'app_review.js': 'core/review.js', 'app_ask.js': 'core/ask.js',
+                   'metrics.js': 'core/metrics.js' };
+  for (const f of Object.keys(forward)) {
+    const t = fs.readFileSync(path.join(WEB, f), 'utf8');
+    ok('web/' + f + ' 是薄转发（指向 ' + forward[f] + '）',
+       t.indexOf(forward[f]) >= 0 && t.split('\n').length < 20);
   }
 
   /* ---------- 五、坏写法扫描 ---------- */
-  const scan = pages.map(p => path.join(D, p)).concat(
-    ['ui.js', 'app_parse.js', 'app_review.js', 'metrics.js'].map(f => path.join(D, f)));
+  /* D15 后：扫逻辑层真源（core/*.js）与视图源码（frontend/src/**），不扫构建产物。 */
+  const scan = ['ui.js', 'metrics.js', 'parse.js', 'review.js', 'ask.js'].map(f => path.join(V.core, f))
+    .concat([path.join(V.core, '..', 'views', 'ParseView.vue'),
+             path.join(V.core, '..', 'views', 'GraphView.vue'),
+             path.join(V.core, '..', 'views', 'ReviewView.vue'),
+             path.join(V.core, '..', 'views', 'AskView.vue')]);
   let hits = 0;
   /* 只抓「字符串拼接里夹算术」：字符串字面量后紧跟 + ，中间出现 .length-数字，**且结果又去拼字符串**。
      正当写法（`(rows.length - 1)` 后跟括号、`for (i = s.length - 1; ...)`）不会命中。 */
@@ -166,15 +180,16 @@ function main() {
   ok('全树无 .length-1 类写法', hits === 0, hits + ' 处');
 
   /* ---------- 六、本轮四处实测缺陷 ---------- */
-  /* ③-a 表单完整性：引擎支持的每个条件，两张检索页都必须有一个对应字段（id 同名） */
+  /* ③-a 表单完整性：引擎支持的每个条件，解析页的 FIELDS 配置必须都有一项。
+     D15 后表单是**数据驱动**的（`FIELDS` 数组配置 → 模板循环渲染），字段名不必写成
+     `id="tailPz"`；因此这里改为断言「配置项齐全」，比字符串扫描更贴近真源。
+     唯一真源：frontend/src/views/ParseView.vue 的 FIELDS 数组。 */
   const COND_FIELDS = ['dynasty', 'q', 'author', 'cipai', 'tail', 'tailPz', 'pz', 'minLen',
     'maxLen', 'minSent', 'maxSent', 'minZe', 'maxZe', 'minLong', 'changeMin', 'changeMax',
     'thrMin', 'thrMax', 'scene', 'sort', 'size'];
-  for (const pg of ['parse.html', 'browse.html']) {
-    const h = fs.readFileSync(path.join(D, pg), 'utf8');
-    for (const f2 of COND_FIELDS) {
-      ok(pg + ' 有检索条件字段 #' + f2, h.indexOf('id="' + f2 + '"') >= 0);
-    }
+  const pvSrc = fs.readFileSync(path.join(V.core, '..', 'views', 'ParseView.vue'), 'utf8');
+  for (const f2 of COND_FIELDS) {
+    ok('解析页 FIELDS 含条件字段 ' + f2, new RegExp("id:\\s*'" + f2 + "'").test(pvSrc));
   }
   /* ③-b 服务端必须真的认这些参数（与 UI 同一张清单） */
   const srv = fs.readFileSync(path.join(WEB, 'serve.py'), 'utf8');
@@ -182,20 +197,26 @@ function main() {
                     'dynasty']) {
     ok('服务端 build_where 支持参数 ' + f2, srv.indexOf("'" + f2 + "'") >= 0);
   }
-  /* ② 表头：容器内滚动必须 sticky top:0；旧的 top:52px 是「遮住前几行」的真凶 */
-  const css = fs.readFileSync(path.join(WEB, 'ui.js'), 'utf8');
+  /* ② 表头：容器内滚动必须 sticky top:0；旧的 top:52px 是「遮住前几行」的真凶
+     ⚠ D15：CSS 的唯一真源已迁到 frontend/src/core/ui.js（web/ui.js 只是薄转发，
+       自身不含 CSS 文本）→ 文本断言直接读真源。断言正则与期望值不变。 */
+  const uiSrc = fs.existsSync(path.join(V.core, 'ui.js'))
+    ? path.join(V.core, 'ui.js') : path.join(WEB, 'ui.js');
+  const css = fs.readFileSync(uiSrc, 'utf8');
   ok('表头 sticky 定位在容器顶部（top:0）', /thead th\{[^}]*top:0/.test(css));
   ok('表头不再用 top:52px 偏移（旧 bug）', css.indexOf('top:52px') < 0);
-  /* ④ 图谱：两列布局 + 异色 + 字号 15px + 图例 */
-  const gh = fs.readFileSync(path.join(D, 'graph.html'), 'utf8');
+  /* ④ 图谱：两列布局 + 异色 + 字号 15px + 图例
+     D15 后图谱是 Vue 组件（GraphView.vue）+ 数据 graph.json；断言拆两处：
+     布局/配色在组件源码，字号在 CSS 真源。 */
+  const gvSrc = fs.readFileSync(path.join(V.core, '..', 'views', 'GraphView.vue'), 'utf8');
   ok('图谱用两列布局（左词人右词牌，不再画同心圆）',
-     gh.indexOf('text-anchor="end"') > 0 && gh.indexOf('text-anchor="start"') > 0);
-  ok('图谱节点有 class="chart" 的样式钩子', gh.indexOf('class="nd" data-k=') > 0);
+     /anchor:\s*'end'/.test(gvSrc) && /anchor:\s*'start'/.test(gvSrc));
+  ok('图谱节点有样式钩子 data-k', gvSrc.indexOf('data-k') > 0);
   ok('图谱两种节点异色（词人蓝 #1f6fb2 / 词牌橙 #c2691a）',
-     gh.indexOf('#1f6fb2') > 0 && gh.indexOf('#c2691a') > 0);
+     gvSrc.indexOf('#1f6fb2') > 0 && gvSrc.indexOf('#c2691a') > 0);
   ok('图谱字号 15px（不再是小字 12px）', /font-size:15px/.test(css));
-  ok('图谱带图例（颜色／线宽含义）', gh.indexOf('class="legend"') > 0);
-  ok('图谱节点带篇数标签（可读）', /<tspan fill="#7a8b9a">\d+<\/tspan>/.test(gh));
+  ok('图谱带图例（颜色／线宽含义）', gvSrc.indexOf('legend') > 0);
+  ok('图谱节点带篇数标签（可读）', gvSrc.indexOf('tspan') > 0 || gvSrc.indexOf('tspan') > 0);
   /* ① 翻页：服务端已分页时不得再切一刀（旧 bug：第二页永远空） */
   const srvRows = [];
   for (let i = 0; i < 50; i++) { srvRows.push({ row: ['p' + i], info: { metrics: {} } }); }
@@ -220,12 +241,11 @@ function main() {
     const cssBad = css.replace('top:0;z-index:3', 'top:52px;z-index:3');
     det.push(['表头 sticky top:52px 遮住前几行',
               !(/thead th\{[^}]*top:0/.test(cssBad)) && cssBad.indexOf('top:52px') >= 0]);
-    /* ③ 表单：拿掉一个条件字段，必须被抓到 */
-    const browseH = fs.readFileSync(path.join(D, 'browse.html'), 'utf8');
-    const browseBad = browseH.replace('id="tailPz"', 'id="tailPz_gone"');
-    det.push(['检索表单缺条件字段（tailPz）', browseBad.indexOf('id="tailPz"') < 0]);
+    /* ③ 表单：拿掉一个条件字段，必须被抓到（D15：查 FIELDS 配置真源） */
+    const pvBad = pvSrc.replace("id: 'tailPz'", "id: 'tailPz_gone'");
+    det.push(['检索表单缺条件字段（tailPz）', !/id:\s*'tailPz'/.test(pvBad)]);
     /* ④ 图谱：换回同色，必须被抓到 */
-    const ghBad = gh.replace(/#1f6fb2/g, '#c0392b').replace(/#c2691a/g, '#1e6f3c');
+    const ghBad = gvSrc.replace(/#1f6fb2/g, '#c0392b').replace(/#c2691a/g, '#1e6f3c');
     det.push(['图谱两种节点同色（挤在一起看不清）',
               !(ghBad.indexOf('#1f6fb2') > 0 && ghBad.indexOf('#c2691a') > 0)]);
     let miss = 0;

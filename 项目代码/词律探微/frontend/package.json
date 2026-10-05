@@ -1,0 +1,32 @@
+{
+  "name": "cilv-tanwei-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "词律探微 · 前端（Vue3 + Vite）。逻辑层真源在 src/core/，与 node 门禁共用同一份实现（见 ../DECISIONS.md D15）。",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:views": "vite build --mode views",
+    "build:all": "node tools/build-all.mjs",
+    "preview": "vite preview",
+    "check-core": "node tools/check-core.cjs",
+    "typecheck": "node tools/check-types.mjs",
+    "docs": "node tools/gen-docs.mjs",
+    "docs:check": "node tools/gen-docs.mjs --check"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.64.0"
+  }
+}

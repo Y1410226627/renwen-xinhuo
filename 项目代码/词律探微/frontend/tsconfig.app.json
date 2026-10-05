@@ -1,0 +1,41 @@
+/* tsconfig.app.json —— 应用侧（Vue 组件 + 入口脚本）的类型检查配置。
+ *
+ * 设计：**宽松放行 .js，强类型只约束我们显式写类型的部分**。
+ *   · core/*.js 是 UMD 经典脚本（门禁直载，不能改 TS），用 src/types/core.d.ts 提供声明；
+ *   · allowJs + checkJs:false → 不强行检查既有 .js，避免把「无类型」当成错误；
+ *   · Vue 组件里的 <script setup> 走 vue-tsc 检查（若装了 vue-tsc）。
+ */
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": [],
+
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noImplicitAny": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.mjs",
+    "src/**/*.vue"
+  ],
+  "exclude": ["node_modules", "../data", "../web"]
+}

@@ -96,22 +96,19 @@ def recompute(tag, questions, gold, out, overrides):
     return hit, total, txt
 
 
-CORPUS_DEFAULT = (os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料')))
+CORPUS_DEFAULT = r'D:\桌面\人文薪火\数据\语料'
 
 
 def main():
     ap = argparse.ArgumentParser(description='校订回流（生成候选覆写表 → 复算 → 决定采纳）')
     ap.add_argument('--decisions', required=True)
-    ap.add_argument('--questions', default=(os.environ.get('LVC_QUESTIONS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '初赛数据',
-        '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl'))))
+    ap.add_argument('--questions', default=r'D:\桌面\人文薪火\数据\初赛数据'
+                                          r'\薪火人文-清词-1000题库-V5版本\公开测试集_700题.jsonl')
     ap.add_argument('--questions2', default='',
                     help='第二套题面（**不预置路径**：按「不得默认读取保密数据」的纪律，'
                          '需要时由使用者显式传入）')
-    ap.add_argument('--gold', default=(os.environ.get('LVC_QUESTIONS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '初赛数据',
-        '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl'))))
+    ap.add_argument('--gold', default=r'D:\桌面\人文薪火\数据\初赛数据'
+                                     r'\薪火人文-清词-1000题库-V5版本\公开测试集_700题.jsonl')
     ap.add_argument('--gold2', default='',
                     help='第二套答案（同为不预置；终检时由使用者显式传入）')
     ap.add_argument('--dry-run', action='store_true')

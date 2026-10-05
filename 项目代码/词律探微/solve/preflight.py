@@ -50,8 +50,7 @@ def warn(name, detail=''):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--corpus', default=(os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料'))))
+    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
     ap.add_argument('--questions', default=None, help='题面 jsonl（写答案的那份）')
     ap.add_argument('--answers', default=None, help='对应的答案 jsonl（本程序产出）')
     ap.add_argument('--gold', default=None, help='标准答案 jsonl（可选，用于复算一致率）')

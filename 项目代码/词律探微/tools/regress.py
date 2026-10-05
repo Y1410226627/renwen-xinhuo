@@ -67,8 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--questions', required=True)
     ap.add_argument('--gold', default=None, help='含标准答案的题面 jsonl（复算用）')
-    ap.add_argument('--corpus', default=(os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料'))))
+    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
     ap.add_argument('--expect', default=None, help='期望的答案文件 SHA256（大写小写均可）')
     ap.add_argument('--tag', default='未命名')
     ap.add_argument('--sample', type=int, default=300, help='全库随机抽样篇数（默认 300）')

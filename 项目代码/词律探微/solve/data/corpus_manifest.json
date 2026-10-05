@@ -1,0 +1,262 @@
+{
+ "root": "D:\\桌面\\人文薪火\\数据\\语料",
+ "files": 51,
+ "entries_total": 58852,
+ "items": [
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0000.base.json",
+   "sha256": "B89F7AA0A2B47328F55797135FECD6BD1766BA2E1D0E592672389B94AA3DE0BA",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0001.base.json",
+   "sha256": "166CCC10FF2A35680C4BAEABD43ED7607AEDB59973DB730B0172EBACB6F825DA",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0002.base.json",
+   "sha256": "C41BD92AE451092E9155DFEF1E0B38BBBFC6A4E1063CC8AEDD5EC8FA0E97F015",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0003.base.json",
+   "sha256": "20F60133BE3057ECE85E10011A242A63731BD80BFB596D086EF4251FF28EDDBE",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0004.base.json",
+   "sha256": "1F30C6B16B97511E40765845A0CCE8DFDBC2C4CED024D0CB946FBA90979650C9",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0005.base.json",
+   "sha256": "F7593F084A2BA9EF9D1E5C4890FC6A45C4FC50736F97F62CCF690EF1D693630B",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0006.base.json",
+   "sha256": "6698F0B0FA180541539785124AA8F69FF604ABE7367AB9A36EE21DCD2157F83C",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0007.base.json",
+   "sha256": "0D075837DF676189C6FB8D6163670CFA4FFB9DB5868F7DDEEF7B13BB470EF5BF",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0008.base.json",
+   "sha256": "0D7B02D405764E13B1F14E7BC444BCA04634B5278C68DA1383BFB8CF97CEB5EE",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0009.base.json",
+   "sha256": "DC81130EEEAF12BC5391BC8977F5E8B983DB705D78E1D31FFB4B16C2336908DF",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0010.base.json",
+   "sha256": "B7B850ED955A0B2C37A350163C127D1B5E4651DBEF3248553EAC42BA3AF0CD75",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0011.base.json",
+   "sha256": "CA4FCAD74924F4557E466F0DEF5D3603806B5DE65C73FE56E79953C4C5B4437D",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0012.base.json",
+   "sha256": "353213E5E14C9C7828298555C805BAF55D8BEEA5283F19DB9E498B311982E6B2",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0013.base.json",
+   "sha256": "EBCE106CE452F85538509590916AF04E088BF90C86B4AB4D0D8624F6C5D648EF",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0014.base.json",
+   "sha256": "707980AF59D3ADD5D2194E7ACB26C96E3F32E99DC758D7664077986BB332BA61",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0015.base.json",
+   "sha256": "4B7533A0877D3C41F17A7FB492215931E88BD0DB3E320A885AEE4B34333AB378",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0016.base.json",
+   "sha256": "77F835E6B795435A9C42D7383CF7C6574369F9ED4CEEECC8D250D632298A655B",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0017.base.json",
+   "sha256": "CCCAE938BEF2EBBB7C6C2C16671391F55F82E20535A0706C1853B420C063BC6B",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0018.base.json",
+   "sha256": "1403AB73C810AAD11F1521CE727033598DB64678EE488EDD3D7A1EDBEC266980",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0019.base.json",
+   "sha256": "472118FFDB5508EFCB057AFDCE3599018A78AB92FA219C16B761F7E4611BFCEE",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0020.base.json",
+   "sha256": "1E3C5819DC71741EFE7B6A70A2B5D821CE659508076D0F157EE7DEE2E5367DC8",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0021.base.json",
+   "sha256": "04228C5C26D1B8F5267F8B932AD8D29A89B386E0CE65EEBC6027792D16217B09",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0022.base.json",
+   "sha256": "03673B79FBA423CB4CE63294D2ACC2C0508F220238B2F105E3FE6326B6077161",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0023.base.json",
+   "sha256": "DEE894EFD02417C3654076814005741C4F622DC5343D08815A63E0D60CA76190",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0024.base.json",
+   "sha256": "E6411821FA21BAED7D075949F343DD5D4E2CD449752F5582FAC00DB67D7207B8",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0025.base.json",
+   "sha256": "10C03AD01D5C32DBE1B86654DE4E19DE7DA488BCFFFCF3A9413C4DAADBA84759",
+   "count": 1000
+  },
+  {
+   "path": "poetry-source-master/source/词/清/ci.清.0026.base.json",
+   "sha256": "B9A05C15435B290D41FC10741924DEF30D8F61B2FB2F35DB64F7685887FA108B",
+   "count": 742
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.0.json",
+   "sha256": "7761BC5EF50305753EA3DCEA9E1EF3164E153E3EE366169E9C5A9A7D85B21B22",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.1000.json",
+   "sha256": "5F79A2D9011E6D414F04E51176C5D4F4C762FD784DCE98B035968367B6F2EF4E",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.10000.json",
+   "sha256": "8D37B015132BF9776FB41C44D445572D2CD9BF5E250DDE213596C480E5962545",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.11000.json",
+   "sha256": "9A4F5082638F82339AFBDE99F1AF7BAE1719207F77D5516CB8F6D370C9C1D0C9",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.12000.json",
+   "sha256": "A89094FED6B3003C171A9036052FF6A289367B4DD68D97C000B5F5E90EA2DF2F",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.13000.json",
+   "sha256": "DD51B268DEC508D44A18E2D4A84EDD109FF8C532B6EACE4160EA88674F62515C",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.14000.json",
+   "sha256": "9D7410BCAEBC31685E3D999C6AF218A3583FD8E9F57CACF640C66607121E2DBF",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.15000.json",
+   "sha256": "5E441C85494955290138ED8561DECB3F302D3628FE390CEA3477E1D446039525",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.16000.json",
+   "sha256": "D003D66C58E40FAB1D2A40F17F6149EEF53A126C7E54B035153CEAE4FE707742",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.17000.json",
+   "sha256": "B46B9F908B5BB0A3B4DD18F268C233A50B8B794D6AB1EC79AFCB3612792F0574",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.18000.json",
+   "sha256": "751CF8EE2A925F4957D010E6F4BF46CC9E0A90A176CFB731185BA43ECB72B14B",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.19000.json",
+   "sha256": "C6BECB6A81CC04E25564F501FF768482B6C328D976C48E2003C8B8BD94EF4612",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.2000.json",
+   "sha256": "F700D8E14DF62D371DFBA7CE18BF1641C304540907B26B68D356C4B6B256FE8D",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.20000.json",
+   "sha256": "1DFC08051969AB2ECDFA3EEA8B29BF79D3DFE9AD1133127F25F622C2B14348C2",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.2019y.json",
+   "sha256": "2A7539735776C3F33C952EE0A5422B0F646276C2E36DCD28CBE89A267251E407",
+   "count": 3
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.21000.json",
+   "sha256": "3344BA453AE7840339944CE29E4295B5B668D79F79210A99E6E1A58EE874DBC5",
+   "count": 50
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.3000.json",
+   "sha256": "1791391A8A2CA855E133F7EA48BF0C104B3890D628AE2929F9378960A66C1427",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.4000.json",
+   "sha256": "48C3E33BAB920E17929EA08300C4C5CA72B246669ED5767E5CB985D894514150",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.5000.json",
+   "sha256": "1E10EE4BE18E225C2EFA0BB8D58691EBB6D40CD83588F308D9635A37392BDADD",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.6000.json",
+   "sha256": "8FF2B21B4E92A435F72DA04FCB935A6A3498E839CDE5C837EA418871F133C248",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.7000.json",
+   "sha256": "8FE3F7AC40AB7D6C80CDD42305E848C1DC51CFF26BC42B335DDFDFACCD48D1BA",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.8000.json",
+   "sha256": "8D9C26A4AA62264D2EEA853944E47A1420DD94E7465BEE7C3E52CEC2CF8BD653",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/宋词/ci.song.9000.json",
+   "sha256": "BD6A4D90B17EF195F32E38DFA483B0D39D671DB3CDD5B462B292AAC6916F26A6",
+   "count": 1000
+  },
+  {
+   "path": "chinese-poetry-master/元曲/yuanqu.json",
+   "sha256": "C2BE37D2349CEC99EC7F2D7C4107EB08BBB3AC869221DB24531C8FFED2A88B12",
+   "count": 11057
+  }
+ ]
+}

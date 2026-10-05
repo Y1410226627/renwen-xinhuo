@@ -137,8 +137,7 @@ def main():
     corpus_dir = (os.environ.get('LVC_CORPUS')
                   or os.path.join(os.path.dirname(os.path.dirname(DB)), '语料'))
     if not os.path.isdir(corpus_dir):
-        corpus_dir = (os.environ.get('LVC_CORPUS') or os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '数据', '语料')))          # 本机默认（换机请用 LVC_CORPUS）
+        corpus_dir = r'D:\桌面\人文薪火\数据\语料'          # 本机默认（换机请用 LVC_CORPUS）
     ps = corpus.load_qing(corpus_dir)
     if ps:
         pids = [x.pid for x in ps]

@@ -20,11 +20,8 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-# 数据目录：按本仓库布局相对定位（开源版\数据\…）；可用 LVC_QUESTIONS_DIR / LVC_CORPUS 覆盖
-_BASE = os.path.abspath(os.path.join(ROOT, '..', '..'))
-D = os.environ.get('LVC_QUESTIONS_DIR') or os.path.join(
-    _BASE, '数据', '初赛数据', '薪火人文-清词-1000题库-V5版本')
-CORPUS = os.environ.get('LVC_CORPUS') or os.path.join(_BASE, '数据', '语料')
+D = r'D:\桌面\人文薪火\数据\初赛数据\薪火人文-清词-1000题库-V5版本'
+CORPUS = r'D:\桌面\人文薪火\数据\语料'
 PUB_Q = os.path.join(D, '公开测试集_700题.jsonl')
 SEC_Q = os.path.join(D, '保密验证集_300题_题面.jsonl')
 SEC_G = os.path.join(D, '保密验证集_300题_答案.jsonl')
@@ -39,7 +36,8 @@ def pick_python(explicit=None):
     """
     cands = []
     for c in (explicit, os.environ.get('LVC_PYTHON'), sys.executable,
-              shutil.which('python'), shutil.which('py')):
+              shutil.which('python'), r'D:\conda_envs\langchain-env\python.exe',
+              r'C:\Python314\python.exe'):
         if c and c not in cands and (os.path.exists(c) or shutil.which(c)):
             cands.append(c)
     for c in cands:
@@ -112,10 +110,22 @@ def main():
     steps.append(run('护栏真触发（7 道）',
                      [PY, 'solve/test_guards.py', '--question', PUB_Q], tail=2))
     if not args.quick:
-        steps.append(run('前端视图生成（离线四视图 + 在线检索页）', [PY, 'web/build_views.py'], tail=2))
+        steps.append(run('前端视图构建（Vue3 离线四视图 + 问答页，vite）',
+                         ['node', 'frontend/tools/build-all.mjs'], tail=6,
+                         env_extra={'LVC_PYTHON': PY})
+                     if shutil.which('node') else
+                     run('前端数据生成（离线视图数据脚本）', [PY, 'web/build_views.py'], tail=2))
         steps.append(run('全库字段导出（供「全库对照」，防止抽样漏错）',
                          [PY, 'tools/dump_metrics_all.py'], tail=1))
         if shutil.which('node'):
+            steps.append(run('逻辑层等价性（core 真源 vs 冻结基线，全库逐字节）',
+                             ['node', 'frontend/tools/check-core.cjs'], tail=3))
+            steps.append(run('组件冒烟（6 视图 SSR 渲染不报错）',
+                             ['node', 'frontend/tools/ssr-smoke.mjs'], tail=3))
+            steps.append(run('类型检查（TypeScript / vue-tsc）',
+                             ['node', 'frontend/tools/check-types.mjs'], tail=4))
+            steps.append(run('组件文档一致性（docs/组件API.md 与源码不漂移）',
+                             ['node', 'frontend/tools/gen-docs.mjs', '--check'], tail=2))
             steps.append(run('前端↔引擎逐字段对照（node，全库 26,742 篇）',
                              ['node', 'web/verify_views.js', '--all'], tail=2))
             steps.append(run('前端渲染门禁（页面拼出的表格不得有 NaN／空表）',
@@ -174,7 +184,7 @@ def main():
               '6. `node web/test_ui.js`（前端功能门禁：检索篇数与 SQL 标尺一致、页面/共享文件自洽）',
               '7. `python web/test_api.py`（服务端门禁：检索／理解／成文／对比／问答／解析）',
               '8. `python web/serve.py` 后浏览器打开 http://127.0.0.1:8000/（问答）与 /browse.html（多条件检索）',
-              '9. 浏览器打开 `data/index.html`（离线四视图，无 CDN）', '',
+              '9. 浏览器打开 `data/vue/index.html`（Vue3 离线四视图，无 CDN、双击即可）', '',
               '> 报告里写的都是**本次实际输出**；任何一条都能被上面命令重跑验伪。', '']
     io.open(args.out, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines))
     print('\n%s  %d/%d 步 PASS → %s' % ('✓' if npass == len(steps) else '✗', npass, len(steps),
