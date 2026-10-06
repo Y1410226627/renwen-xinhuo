@@ -1397,6 +1397,28 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #   负值更会被当成"全部"（563 篇）。这里统一夹到 [1, 200]。
     spec, pnote = understand(conn, question, llm=llm, llm_parse=llm_parse,
                              llm_policy=llm_policy, context=context)
+    # ⭐ **题名条件的「存在性」统一收口**（2026-10-06，主人实测「题名=忆梦中最长的→0 篇」）：
+    #   `title_any` 的来源有规则路（「词牌·题名」识别——值来自语料原文，天然可信）与
+    #   大模型路（`qlm.validate` 此前**完全没校验 title**——实测模型会把「忆梦中最长的」
+    #   这类**问句描述**当成题名塞进来 → `title LIKE` 0 命中 → 全条件 0 篇 →
+    #   答复「本语料中没有作品」，而正确篇目明明就在库里）。
+    #   这里统一收口：**LIKE 命中 0 的题名一律降级**——移出硬条件、降为词面（若 ≥2 字），
+    #   并如实披露。这样无论未来再加多少条产生 title 的路径，出口都只放行「库里真实存在」的题名。
+    _bad_t, _ok_t = [], []
+    for _t in (spec.title_any or []):
+        _row = conn.execute('SELECT 1 FROM poems WHERE title LIKE ? LIMIT 1',
+                            ('%' + _t + '%',)).fetchone()
+        (_ok_t if _row else _bad_t).append(_t)
+    if _bad_t:
+        spec.title_any = _ok_t
+        for _t in _bad_t:
+            if len(_t) >= 2 and _t not in (spec.keywords or []):
+                spec.keywords.append(_t)
+        spec.title = _ok_t[0] if len(_ok_t) == 1 else None
+        pnote['notes'] = list(pnote.get('notes') or []) + [
+            '题名「%s」在语料标题中不存在，已降级为词面参与语义检索（不再作为硬条件）'
+            % '／'.join(_bad_t)]
+        retrieve._finalize(spec)
     # ⭐ **「题名当词原文」兜底**（2026-10-05，朋友实测驱动）：
     #   裸题名（不带词牌，如「清明同诸子集原白斋中」「寄怀阿嫂」）解析后只剩「词面=…」，
     #   无硬条件 → 走语义融合排序 → 端上来的却是元曲里偶含「阿嫂」二字的《单刀会》，
