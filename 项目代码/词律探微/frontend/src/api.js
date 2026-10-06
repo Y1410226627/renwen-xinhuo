@@ -10,6 +10,42 @@ const base = () => {
   return (window.__API_BASE__ === undefined) ? '' : window.__API_BASE__;
 };
 
+/* ⚠ 2026-10-06 加（主人实测：页面永远停在「正在检索语料并核算…」）：
+ *   原先所有请求都**没有超时**——当本地服务没在运行、或浏览器缓存了旧页面导致脚本 404、
+ *   或后端卡住时，`fetch` 会一直挂着，界面只显示一个转圈占位，用户**完全看不出发生了什么**。
+ *   这里给三类请求各一个**明确的失败期限**，超时后抛出带**处置建议**的中文错误。
+ *   （数值选择依据：本地实测正常问答首帧 0.03 秒、总耗时 0.06 秒；
+ *     留足余量后：普通接口 30 秒、流式首帧 20 秒、流式空闲 60 秒。） */
+const ASK_TIMEOUT_MS = 30000;
+const STREAM_FIRST_MS = 20000;
+const STREAM_IDLE_MS = 60000;
+
+function timeoutMsg(label, ms) {
+  return label + ' 超过 ' + Math.round(ms / 1000) + ' 秒无响应——请确认本地服务在运行'
+    + '（`python web/serve.py`）；若是刚更新过代码或页面，请按 Ctrl+F5 强制刷新后重试。';
+}
+
+/* 网络层失败（服务没起 / 端口不通 / 页面从旧缓存加载）也给出同一套可读指引 */
+function netMsg(label, detail) {
+  return label + ' 失败：' + detail + '——请确认本地服务在运行（`python web/serve.py`）；'
+    + '若是刚更新过代码或页面，请按 Ctrl+F5 强制刷新后重试。';
+}
+
+async function withTimeout(ms, label, fn) {
+  const ctrl = new AbortController();
+  let hit = false;
+  const t = setTimeout(() => { hit = true; try { ctrl.abort(); } catch (e) { /* 忽略 */ } }, ms);
+  try {
+    return await fn(ctrl.signal);
+  } catch (e) {
+    if (hit || (e && e.name === 'AbortError')) { throw new Error(timeoutMsg(label, ms)); }
+    if (e instanceof TypeError) { throw new Error(netMsg(label, e.message || '连接失败')); }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export async function getJson(path, params) {
   const b = base();
   if (b === null) { throw new Error('离线模式：没有本地服务，无法调用 ' + path); }
@@ -21,8 +57,11 @@ export async function getJson(path, params) {
       .join('&');
   }
   const url = b + path + (qs ? ('?' + qs) : '');
-  const r = await fetch(url);
-  return r.json();
+  return withTimeout(ASK_TIMEOUT_MS, '接口 ' + path, async (signal) => {
+    const r = await fetch(url, { signal });
+    if (!r.ok) { throw new Error('接口 ' + path + ' 返回 HTTP ' + r.status); }
+    return r.json();
+  });
 }
 
 export const api = {
@@ -44,13 +83,24 @@ export const api = {
       .filter((k) => params[k] !== '' && params[k] !== null && params[k] !== undefined)
       .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
       .join('&');
-    return fetch(b + '/api/ask_stream?' + qs).then((r) => {
+    /* 超时策略（2026-10-06 加）：**首帧** 20 秒 —— 服务没起 / 旧页面脚本 404 时立刻给出可读错误；
+       收到首帧后改为**空闲** 60 秒 —— 大模型流式长回答不会被误杀。 */
+    const ctrl = new AbortController();
+    let hit = false;
+    let timer = null;
+    const arm = (ms) => {
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(() => { hit = true; try { ctrl.abort(); } catch (e) { /* 忽略 */ } }, ms);
+    };
+    arm(STREAM_FIRST_MS);
+    return fetch(b + '/api/ask_stream?' + qs, { signal: ctrl.signal }).then((r) => {
       if (!r.ok || !r.body || !r.body.getReader) { throw new Error('该浏览器不支持流式'); }
       const rd = r.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
       const pump = () => rd.read().then((x) => {
         if (x.done) { return; }
+        arm(STREAM_IDLE_MS);
         buf += dec.decode(x.value, { stream: true });
         const parts = buf.split('\n\n');
         buf = parts.pop();
@@ -65,6 +115,12 @@ export const api = {
         return pump();
       });
       return pump();
-    });
+    }).catch((e) => {
+      if (hit || (e && e.name === 'AbortError')) {
+        throw new Error(timeoutMsg('流式问答（首帧）', STREAM_FIRST_MS));
+      }
+      if (e instanceof TypeError) { throw new Error(netMsg('流式问答', e.message || '连接失败')); }
+      throw e;
+    }).finally(() => { if (timer) { clearTimeout(timer); } });
   }
 };
