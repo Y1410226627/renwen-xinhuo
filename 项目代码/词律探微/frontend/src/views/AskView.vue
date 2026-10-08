@@ -27,6 +27,108 @@ const llmTag = ref('');
 const chips = ref([]);
 const turns = ref([]);          // [{ question, ctx, ctxN, concl, evid, detail, gap, status, delta, ... }]
 let lastTurn = null;            // { q, spec, pids } —— 供下一轮 ctx / ctx_pids 取用
+/* ⚠ 2026-10-08 新增：**是否「承上一轮」由用户显式决定，默认关闭**。
+ *   旧版无条件带上上一轮的问句摘要与结果集 → 用户问一个**新问题**时范围会被悄悄收窄
+ *   （主人实测反馈：「每次问下一个问题总会默认承上一轮，导致检索范围有误」）。
+ *   `lastTurn` 仍始终记录（供勾选时使用），但**不勾就不发**。 */
+const carryOn = ref(false);
+
+/* ─────────────── 多会话（本地保存，可删除）───────────────
+ * 目标：像大模型对话那样「一个会话一条线」，互不污染；会话存 localStorage，可新建 / 切换 / 删除。
+ * 存储纪律：只存**能恢复视图的字段**（问题、结论/证据 HTML、理解详情、状态、篇号），
+ *   不存函数与响应式包装；会话数与每会话轮数都设上限，避免把 localStorage 撑爆。 */
+const SKEY = 'lvc_ask_sessions_v1';
+const S_MAX = 30;               // 最多保留 30 个会话
+const T_MAX = 60;               // 每个会话最多保留 60 轮
+const sessions = ref([]);       // [{ id, title, ts, turns: [...] }]
+const activeId = ref('');
+const sessPanel = ref(false);   // 会话面板开关
+
+function uid() { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function nowTs() { return Date.now(); }
+
+function titleOf(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  return t ? (t.length > 18 ? t.slice(0, 18) + '…' : t) : '（空问题）';
+}
+
+/* 精简一轮：只留能恢复视图的字段（HTML 直接存，重新打开即原样呈现） */
+function slim(t) {
+  return {
+    question: t.question || '', ctx: !!t.ctx, ctxN: t.ctxN || 0,
+    concl: t.concl || '', evid: t.evid || '', detail: t.detail || null,
+    gap: t.gap || '', pids: (t.pids || []).slice(0, 200),
+    status: t.status || '', error: t.error || '',
+    streaming: false, delta: '', done: true
+  };
+}
+
+function persist() {
+  try {
+    localStorage.setItem(SKEY, JSON.stringify({
+      active: activeId.value,
+      sessions: sessions.value.slice(0, S_MAX).map((s) => ({
+        id: s.id, title: s.title, ts: s.ts, turns: (s.turns || []).slice(-T_MAX).map(slim)
+      }))
+    }));
+  } catch (e) { /* 配额满 / 隐私模式：静默降级（功能仍可用，只是不持久化） */ }
+}
+
+function restore() {
+  try {
+    const raw = localStorage.getItem(SKEY);
+    if (!raw) { return false; }
+    const o = JSON.parse(raw);
+    if (!o || !Array.isArray(o.sessions) || !o.sessions.length) { return false; }
+    sessions.value = o.sessions.map((s) => ({
+      id: s.id || uid(), title: s.title || '（未命名）', ts: s.ts || nowTs(),
+      turns: (s.turns || []).map((t) => Object.assign({}, slim(t), { done: true, streaming: false }))
+    }));
+    activeId.value = sessions.value.some((s) => s.id === o.active) ? o.active : sessions.value[0].id;
+    loadActive();
+    return true;
+  } catch (e) { return false; /* 存储损坏：当作全新开始 */ }
+}
+
+function activeSession() { return sessions.value.find((s) => s.id === activeId.value) || null; }
+
+function loadActive() {
+  const s = activeSession();
+  turns.value = s ? s.turns : [];
+  // 恢复「承上一轮」所需上下文：取最后一轮的问句与篇号（解析摘要不持久化，留空即可）
+  const last = turns.value.length ? turns.value[turns.value.length - 1] : null;
+  lastTurn = last ? { q: last.question, spec: '', pids: (last.pids || []) } : null;
+  scrollBottom();
+}
+
+function newSession() {
+  const s = { id: uid(), title: '新会话', ts: nowTs(), turns: [] };
+  sessions.value.unshift(s);
+  if (sessions.value.length > S_MAX) { sessions.value.length = S_MAX; }
+  activeId.value = s.id;
+  turns.value = [];
+  lastTurn = null;
+  persist();
+  sessPanel.value = false;
+  scrollBottom();
+}
+
+function switchSession(id) {
+  if (id === activeId.value) { sessPanel.value = false; return; }
+  activeId.value = id;
+  loadActive();
+  persist();
+  sessPanel.value = false;
+}
+
+function delSession(id) {
+  const i = sessions.value.findIndex((s) => s.id === id);
+  if (i < 0) { return; }
+  sessions.value.splice(i, 1);
+  if (!sessions.value.length) { newSession(); return; }
+  if (activeId.value === id) { activeId.value = sessions.value[0].id; loadActive(); }
+  persist();
+}
 
 /* 页面生成时间探针（由服务端在返回 HTML 时替换 @@STAMP@@ 注入）。 */
 const stamp = ref('');
@@ -110,22 +212,39 @@ function applyResult(turn, j) {
   turn.pids = pidsOf(j);
 }
 
+/* 一轮结束后的收尾：更新会话标题（首轮取问句前 18 字）并落盘。 */
+function finishTurn(text) {
+  const s = activeSession();
+  if (s) {
+    s.ts = nowTs();
+    if (/^(新会话|（未命名）)$/.test(s.title)) { s.title = titleOf(text); }
+  }
+  persist();
+}
+
 async function go() {
   const text = q.value.trim();
   if (!text) { UI.toast('先写一句问题'); return; }
 
-  /* 多轮：把上一轮的「问句+解析摘要」与「命中结果集」一起带上。 */
-  const carry = useParse.value && lastTurn;
+  /* 多轮：**只有用户勾了「承上一轮」**才把上一轮的「问句摘要 + 命中结果集」带上（默认不发）。 */
+  const carry = useParse.value && carryOn.value && lastTurn;
   const ctxv = carry
     ? `上一问：${lastTurn.q}｜上一轮解析为：${lastTurn.spec}`.slice(0, 300) : '';
   const ctxPids = carry ? (lastTurn.pids || []).slice(0, 200) : [];   // 空数组 → api 不发送
 
-  const turn = {
+  turns.value.push({
     question: text, ctx: !!ctxv, ctxN: ctxPids.length,
     concl: '', evid: '', detail: null, gap: '', pids: [],
     streaming: false, status: '', delta: '', done: false, error: ''
-  };
-  turns.value.push(turn);
+  });
+  /* ⚠⚠ 关键修复（2026-10-08，主人实测「问完必须按一下退格键才显示答案」）：
+   *   Vue3 的响应式是**惰性代理** —— `turns.value.push(obj)` 之后，`turns.value[n]` 才是**代理**，
+   *   而刚才那个对象仍是**原始对象**。对原始对象赋值**不经过代理 setter** → **不触发重渲染** →
+   *   界面一直停在「正在检索语料并核算…」，直到用户敲一下退格键改了 `q.value` 才引发重渲染，
+   *   把早已算好的结果「突然」显示出来。
+   *   修法：**push 之后从数组取回代理**，后续所有赋值都走它（依赖追踪才能正常工作）。
+   *   （已用 @vue/reactivity 做确定性验证：改原始对象渲染增量 0；改代理增量 1。） */
+  const turn = turns.value[turns.value.length - 1];
   scrollBottom();
 
   const streaming = !!(useLlm.value || useArg.value) && typeof window.fetch === 'function';
@@ -178,6 +297,7 @@ async function go() {
       }
       turn.streaming = false; turn.done = true;
     }
+    finishTurn(text);
     return;
   }
 
@@ -199,11 +319,14 @@ async function go() {
   }
   turn.streaming = false; turn.done = true;
   scrollBottom();
+  finishTurn(text);
 }
 
 function pickExample(s) { q.value = s; go(); }
 
 onMounted(async () => {
+  /* 会话：先从 localStorage 恢复；没有（或存储损坏）就开一个新的。 */
+  if (!restore()) { newSession(); }
   try {
     const x = await api.llm();
     llmTag.value = x.available ? `大模型就绪：${x.model}` : '大模型未接入（按模板作答）';
@@ -217,6 +340,28 @@ onMounted(async () => {
 
 <template>
   <AppShell active="ask" :online="true" data-note="本地引擎（data/corpus.db）" :stamp="stamp">
+    <!-- 会话栏：多会话（本地保存）、可新建 / 切换 / 删除；「承上一轮」默认关闭，由用户显式勾选 -->
+    <div class="card sess">
+      <div class="sess-head">
+        <button class="ghost" @click="sessPanel = !sessPanel">
+          {{ sessPanel ? '收起会话' : '会话' }}（{{ sessions.length }}）
+        </button>
+        <span class="sess-cur">{{ (activeSession() && activeSession().title) || '新会话' }}</span>
+        <button class="ghost" @click="newSession">＋ 新会话</button>
+        <label class="dim carry">
+          <input type="checkbox" v-model="carryOn"> 承上一轮结果集
+        </label>
+        <span class="dim sess-hint">不勾 = 每问独立（默认）；勾上才把上一轮的篇目范围带进来</span>
+      </div>
+      <ul v-if="sessPanel" class="sess-list">
+        <li v-for="s in sessions" :key="s.id" :class="{ on: s.id === activeId }">
+          <a href="#" @click.prevent="switchSession(s.id)">{{ s.title }}</a>
+          <span class="dim">{{ (s.turns || []).length }} 轮</span>
+          <button class="ghost del" title="删除该会话" @click="delSession(s.id)">删除</button>
+        </li>
+      </ul>
+    </div>
+
     <div class="card ask-intro">
       <h1>问我一句</h1>
       <p class="dim">可以这样问（点一下就填进输入框）：</p>
@@ -320,6 +465,20 @@ onMounted(async () => {
  * 配色沿用 core/ui.js 的 CSS 变量，不另起一套；不引入任何依赖。
  * 注意：回答正文/证据块由 core/ask.js 生成（v-html），scoped 样式覆盖不到，故此处用非 scoped。 */
 
+/* 0) 会话栏（多会话，本地保存；可新建/切换/删除，「承上一轮」默认关闭） */
+.sess { padding: 10px 14px; margin-bottom: 10px; }
+.sess-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sess-cur { font-weight: 600; color: var(--accent); }
+.sess-hint { font-size: 12.5px; }
+.sess .carry { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
+.sess-list { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px dashed var(--line); }
+.sess-list li { display: flex; align-items: center; gap: 10px; padding: 6px 2px;
+  border-bottom: 1px dashed var(--line); }
+.sess-list li.on a { font-weight: 700; color: var(--accent); }
+.sess-list a { color: var(--ink); text-decoration: none; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.sess-list .del { margin-left: auto; }
+
 /* 1) 输入区：控件用 flex 对齐，间距一致（改前各控件靠 inline margin 拼，窄屏易散） */
 .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .bar label { margin-left: 0 !important; }
@@ -373,5 +532,6 @@ onMounted(async () => {
 @media (max-width: 640px) {
   .bar { position: static; }
   #log .u-row { grid-template-columns: 1fr; }
+  .sess-hint { display: none; }
 }
 </style>
