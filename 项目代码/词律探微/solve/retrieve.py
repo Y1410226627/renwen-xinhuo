@@ -1227,6 +1227,40 @@ def _parse_core(conn, text, keep_names=False):
                      (r'(?:阈值|长句阈值)\s*%s\s*%s' % (UP, NUM), 'thr_min'),
                      (r'(?:阈值|长句阈值)\s*%s\s*%s' % (DOWN, NUM), 'thr_max')):
         n_num += take(pat, key, int)
+    # ⚠ 2026-10-08 第二轮（开放措辞基准 `tests/nl_paraphrase.jsonl` 实测驱动）：
+    #   上面那批模式要求「指标词 + 方向词 + 数字」**紧邻且词形固定**，于是
+    #     「仄声**占比**超过 45**个百分点**」（占比≠比例、单位是「个百分点」不是 %）→ 整条漏；
+    #     「仄声比例**在 45% 以上**」（方向词在数字**之后**）→ 整条漏；
+    #     「篇幅不少于 40**字**」（数字后带量词）→ 整条漏。
+    #   实测：开放措辞基准 40 条里有 6 条栽在这类同义改写上。
+    #
+    #   ★ 本块的两条自律（这是它**不可能**造成 1000 题回归的原因）：
+    #     ① **只填空**：`if key not in spec.rng` —— 上面已定下的值**绝不覆盖**；
+    #     ② **只加词形**：不改动任何既有模式的匹配结果与算子口径（UP 仍是 >=、DOWN 仍是 <=）。
+    _ALIAS = {
+        'ze_min': (r'(?:仄声|仄字|仄)(?:比例|占比|比重|字占比|字比例|声比例|声占比)?', UP),
+        'ze_max': (r'(?:仄声|仄字|仄)(?:比例|占比|比重|字占比|字比例|声比例|声占比)?', DOWN),
+        'len_min': (r'(?:字数|篇幅|全篇字数|总字数|字)', UP),
+        'len_max': (r'(?:字数|篇幅|全篇字数|总字数|字)', DOWN),
+        'sent_min': (r'(?:句数|句子数|句)', UP),
+        'sent_max': (r'(?:句数|句子数|句)', DOWN),
+        'change_min': (r'变化(?:值|幅度)?', UP),
+        'change_max': (r'变化(?:值|幅度)?', DOWN),
+        'thr_min': (r'(?:阈值|长句阈值)', UP),
+        'thr_max': (r'(?:阈值|长句阈值)', DOWN),
+    }
+    _UNIT = r'\s*(?:%|％|个百分点|个字|字|句|首|篇)?'
+    for key, (metric, direc) in _ALIAS.items():
+        if key in spec.rng:
+            continue
+        cast = float if key.startswith('ze') else int
+        # 方向词在数字**之前**（超过45个百分点）
+        n_num += take(r'%s\s*%s\s*(%s)%s' % (metric, direc, NUM, _UNIT), key, cast)
+        if key in spec.rng:
+            continue
+        # 方向词在数字**之后**（45% 以上）；「以上/以下」这类后置方向词才这么写
+        n_num += take(r'%s\s*(%s)%s\s*(?:以上|以下|及以上|及以下|以内)' % (metric, NUM, _UNIT),
+                      key, cast)
 
     # 声律模式：整串只由 平/仄/？ 组成且长度 ≥3 的 token（如「仄仄平平」）
     for tok in re.split(r'[\s，,、；;：:]+', rest):
@@ -1822,12 +1856,53 @@ def _leaf_exists_lines(expr, vals):
             % (expr, ','.join('?' * len(vals)))), list(vals)
 
 
-def _leaf_title(vals):
-    """题名子串并集（`p.title LIKE %题名%`，多项 OR）；空 → None。"""
+_DERIVED_CACHE = {}
+
+
+def _derived_ready(conn):
+    """派生检索索引（题名 FTS / 平仄三字组倒排）是否已建。结果按连接缓存（只查一次）。"""
+    if conn is None:
+        return (False, False)
+    key = id(conn)
+    if key in _DERIVED_CACHE:
+        return _DERIVED_CACHE[key]
+    t = g = False
+    try:
+        t = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='poems_title_fts'").fetchone())
+        g = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='pz_gram'").fetchone())
+    except Exception:                                            # noqa: BLE001
+        t = g = False
+    _DERIVED_CACHE[key] = (t, g)
+    return (t, g)
+
+
+def _leaf_title(vals, conn=None):
+    """题名子串并集（`p.title LIKE %题名%`，多项 OR）；空 → None。
+
+    ⚠ 2026-10-08 第二轮（审查 B8）：题名检索原本是 `LIKE '%…%'` **全表扫**。
+      现用 `poems_title_fts`（FTS5 trigram）**先把候选收窄**，再**保留原 LIKE 复验**——
+      派生索引只用于**加速**，真假仍由 LIKE 判定，故结果集与原实现**逐篇相同**
+      （`tools/build_indexes.py --check` 实测这个不变式：92 == 92）。
+      安全边界：值含非纯汉字、或短于 3 字（trigram 不产生词元）时**不启用** FTS，
+      回退到纯 LIKE —— 宁可慢，不可错。
+    """
     if not vals:
         return None
-    return ('(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')',
-            ['%' + t + '%' for t in vals])
+    like = '(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')'
+    args = ['%' + t + '%' for t in vals]
+    _fts, _ = _derived_ready(conn)
+    if not _fts:
+        return like, args
+    _han = re.compile(r'^[\u4e00-\u9fff\u3400-\u4dbf]{3,}$')
+    pre, pa = [], []
+    for t in vals:
+        if t and _han.match(t):
+            pre.append('p.rowid IN (SELECT rowid FROM poems_title_fts '
+                       'WHERE poems_title_fts MATCH ?)')
+            pa.append('"%s"' % t)
+    if not pre:                                   # 没有可用 FTS 项 → 纯 LIKE，行为不变
+        return like, args
+    return ('(%s) AND (%s)' % (' OR '.join(pre), like), pa + args)
 
 
 def _leaf_pid(vals):
@@ -1842,11 +1917,38 @@ def _leaf_num(col, op, v):
     return '%s %s ?' % (col, op), [v]
 
 
-def _leaf_pz(v):
-    """声律模式（平仄串子串）；`?`/`？` 通配 → SQL `_`。"""
+def _leaf_pz(v, conn=None):
+    """声律模式（平仄串子串）；`?`/`？` 通配 → SQL `_`。
+
+      ⚠ 2026-10-08 第二轮（审查 B8）：`pz` 检索原本也是 `LIKE '%…%'` **全表扫**（42 万行）。
+      `tools/build_indexes.py` 可生成 `pz_gram`（平仄三字组倒排表）。
+      **但实测它在本库上更慢，故默认不启用**，须 `LVC_PZ_GRAM=1` 才开：
+          仄仄平平          ：253 ms → 1929 ms（命中 57707/58852，候选几乎全库）
+          仄平平仄仄平仄平    ：286 ms → 4425 ms（命中 5891）
+          平平仄仄平平仄仄…  ：287 ms → 7984 ms（命中 776，**越选择性越慢**）
+      原因：SQLite 对 42 万行的 LIKE 全扫已经是顺序 IO、很快；而本实现的
+      `l.pid IN (SELECT pid FROM pz_gram WHERE gram=?)` 每条三字组都要**物化一个巨大的中间集**，
+      长模式的 gram 越多，物化次数越多 → 反而线性变慢。
+      ★ 结论如实记录在案：**这条派生索引在本 workload 下不成立**（与审查 B8 的推测相反）。
+      保留建表工具与开关，供将来换成「单条 EXISTS + 复合索引」或列存方案时复用。
+    """
     pat = v.replace('?', '_').replace('？', '_')
     # IN 子查询代替逐篇 EXISTS（实测 1,600+ ms → 800 ms；pz 是 LIKE 通配、主体不可索引）。
-    return 'p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?)', ['%' + pat + '%']
+    base_sql = 'p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?)'
+    base_args = ['%' + pat + '%']
+    _, _gram = _derived_ready(conn)
+    if not _gram or os.environ.get('LVC_PZ_GRAM', '0') != '1':
+        # 默认关闭：见上方实测（本库上倒排路径更慢）。默认行为 = 原实现，逐字不变。
+        return base_sql, base_args
+    src = str(v or '')
+    N = 3
+    grams = [src[i:i + N] for i in range(len(src) - N + 1)
+             if all(c in '平仄' for c in src[i:i + N])]
+    if not grams:
+        return base_sql, base_args
+    pre = ' AND '.join('l.pid IN (SELECT pid FROM pz_gram WHERE gram=?)' for _ in grams)
+    return (('p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ? AND %s)' % pre),
+            base_args + grams)
 
 
 def _leaf_tail_pz(v):
@@ -1890,7 +1992,15 @@ def _leaf_consist(v):
 
 # 数值条件字段 → SQL 列/表达式（Plan 叶子用列名；`abs_change` = `ABS(p.change)`）
 _NUM_COL = {'ze_ratio': 'p.ze_ratio', 'han_len': 'p.han_len', 'sent_n': 'p.sent_n',
-            'threshold': 'p.threshold', 'change': 'p.change', 'abs_change': 'ABS(p.change)'}
+            'threshold': 'p.threshold', 'change': 'p.change', 'abs_change': 'ABS(p.change)',
+            # ⚠ 2026-10-08 第二轮：`queryplan.LEAF_SCHEMA` 登记了这些**真实存在且可派生的列**
+            #   （`build_corpus` 已写入 poems 表），但布尔编译器原先不认 → LLM Planner 给出来会被
+            #   判 unsupported（第二轮审查抓的契约漂移）。补进来即可支持「最长句为 9 字」
+            #   「前段仄声占比高于 50%」这类全新问法。
+            #   安全性：`_NUM_COL` **只被 `_leaf_sql` 使用**（applied 于布尔树路径），
+            #   经典字段路径 `_sql()` 不遍历它 → 1000 题零回归。
+            'longest_len': 'p.longest_len', 'longest_seq': 'p.longest_seq',
+            'f_ratio': 'p.f_ratio', 'b_ratio': 'p.b_ratio'}
 
 
 def _sql(spec):
@@ -2015,11 +2125,11 @@ def _sql_filters(conn, node):
         s, a = _sql_filters(conn, node.get('not'))
         return 'NOT (%s)' % s, a
     if 'field' in node:
-        return _leaf_sql(node)
+        return _leaf_sql(node, conn)
     raise ValueError('filters 节点既非布尔节点也非叶子：%r' % (node,))
 
 
-def _leaf_sql(node):
+def _leaf_sql(node, conn=None):
     """单个叶子 `{"field","op","value"}` → (sql, args)。字段与 op 的兼容性由 `queryplan.validate` 校验。"""
     f, op, v = node.get('field'), node.get('op'), node.get('value')
     if f in ('dynasty', 'author', 'cipai'):
@@ -2027,13 +2137,16 @@ def _leaf_sql(node):
         r = _leaf_one(col, list(v) if isinstance(v, (list, tuple)) else [v])
         return r if r else ('1=1', [])
     if f == 'title':
-        r = _leaf_title(list(v) if isinstance(v, (list, tuple)) else [v])
+        r = _leaf_title(list(v) if isinstance(v, (list, tuple)) else [v], conn)
         return r if r else ('1=1', [])
     if f == 'pid':
         r = _leaf_pid(list(v) if isinstance(v, (list, tuple)) else [v])
         return r if r else ('1=1', [])
     if f == 'scene':
         return 'p.scene = ?', [v]
+    if f == 'source':
+        # 语料来源标记（poetry-source / chinese-poetry 等不同源）
+        return _leaf_one('p.source', list(v) if isinstance(v, (list, tuple)) else [v]) or ('1=1', [])
     if f == 'consist':
         return _leaf_consist(v)
     if f in _NUM_COL:
@@ -2046,7 +2159,7 @@ def _leaf_sql(node):
     if f == 'tail_pz':
         return _leaf_tail_pz(v)
     if f == 'pz':
-        return _leaf_pz(v)
+        return _leaf_pz(v, conn)
     if f == 'pz_exact':
         return _leaf_pz_exact(v)
     if f == 'tail_each':
@@ -2055,6 +2168,12 @@ def _leaf_sql(node):
     if f == 'line_q':
         w, a = _line_q_where(v)     # 单一来源：与经典路径同一编译
         return (('(' + ' AND '.join(w) + ')') if w else '1=1'), a
+    if f == 'parity':
+        # ⚠ 2026-10-08 第二轮新增：`QuerySpec.parity`（句位奇偶）原本**只有**经典路径会用，
+        #   布尔树叶子不认 → Planner 按 schema 给出来会被判「未知字段」。
+        #   语义（与 `_pred_sql('parity', v)` **逐字对齐**）：`l.idx` 从 0 起，
+        #   value=0 → 第 1/3/5… 句（奇数句位）；value=1 → 第 2/4/6… 句。
+        return ('p.pid IN (SELECT l.pid FROM lines l WHERE (l.idx % 2) = ?)', [v])
     raise ValueError('未知的 filters 叶子字段：%r' % (f,))
 
 
@@ -2523,17 +2642,27 @@ def semantic_signal(spec):
 def _vector_channel(conn, qtext, restrict, topk):
     """跑一次向量检索，返回 `{pid: score}`。**任何不可用/异常都返回 `{}`**（主链绝不因它崩）。
 
-    硬性约束③：有硬条件时用 `restrict` 收窄——向量候选**绕不过**硬过滤。
+    ★ 2026-10-08 第二轮审查 V1 修正 —— **受限向量检索（filtered vector search）**：
+      旧做法是「全库取 top150，再用 `restrict` 套一层硬过滤」：
+          全库 semantic top150 → 其中是清词的只剩 5 首 → 最多就给 5 首。
+      而正确答案可能排在全库第 151~500 名（因为「清代」「非纳兰」这些硬条件与「秋景」相关度
+      无关），于是**硬条件把向量召回截断了**——正是「库里明明有答案却召不回来」的形态之一。
+
+      现改为：**把 `restrict`（SQL 硬条件得出的候选全集）交给索引，
+      让它在候选集内部检索**；候选不够就动态扩大 k（见 `vector_index._restricted_search`）。
+      硬条件照旧收窄（`allow` 就是 `restrict`），语义排序在通过硬条件的那些篇里做。
     """
     try:
         import vector_index
         if not qtext or not vector_index.available(conn):
             return {}
-        hits = vector_index.search(qtext, topk=max(50, topk * 10), conn=conn)
-    except Exception:
+        hits = vector_index.search(qtext, topk=max(50, topk * 10), conn=conn,
+                                   allow=restrict)
+    except Exception:                                        # noqa: BLE001
         return {}
     d = {pid: s for pid, s in hits}
     if restrict is not None:
+        # 双保险：即便上层索引没实现 allow，`restrict` 依然必须在语义上生效（硬条件不可绕过）
         d = {pid: s for pid, s in d.items() if pid in restrict}
     return d
 
@@ -2601,18 +2730,19 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
            if (_vector_enabled() and semantic_signal(spec)) else {})
     if vec:
         import fusion as _fusion
-        # ⚠ 2026-10-08：**向量主导排序的两版尝试均不理想，已回退为经典 RRF**——
-        #   版本一（restrict 为 None 时向量主导）：仅覆盖无硬条件场景；
-        #   版本二（向量经 restrict 收窄后主导）：部分语义问句被硬条件把向量候选滤空 → 0 篇拒答。
-        #   两版都出现「写秋景」排到不相关篇或 0 篇的问题 → 恢复经典 RRF（至少不出 0 篇）。
-        #   语义排序的调优（向量分阈值、语义题专用通道、rerank 介入点）记为下一迭代（D26）。
-        #   基础设施保留：vector_index.py（嵌入+faiss）、fusion.py（RRF+rerank）、
-        #   build_vector_index.py（建索引 CLI，--limit 试跑/断点续跑），开关 LVC_VECTOR 默认关。
-        _rrf = _fusion.rrf([_fusion.ranked(lex), _fusion.ranked(meta), _fusion.ranked(ft),
-                            _fusion.ranked(num), _fusion.ranked(pzs), _fusion.ranked(vec)])
-        cands = set(_rrf)
-        # 六路（含向量）各按名次降序 → RRF 融合：多路共识者靠前，免疫量纲差异。
-        _rrf = _fusion.rrf([_fusion.ranked(lex), _fusion.ranked(meta), _fusion.ranked(ft),
+        # ⚠ 2026-10-08 第二轮审查 V6 修正：**`meta` 必须退出 RRF 排名**。
+        #   `meta = {pid: 1.0 for pid in restrict}` 只是「属于硬过滤集合」的**二值成员信号**，
+        #   所有值都是 1.0 —— 拿它进 `ranked()` 再进 `rrf()` 会把「纯顺序」伪装成「排序」：
+        #   `meta` 通道内部所有篇并列第一，次序退化成 pid 的返回顺序，于是 RRF 实际混进了
+        #   一条**与语义无关、却权重相当**的伪排名。硬过滤的活已经在 `restrict` 里做完了，
+        #   它只需要当**候选宇宙**，不需要当排序通道。
+        #   参与排名的只有真正带语义/结构的通道：lex / ft / num / pzs / vec。
+        #
+        # ⚠ 另记：2026-10-08 曾尝试「向量主导排序」两版，均不理想，已回退经典 RRF：
+        #   版本一（restrict 为 None 时向量主导）：只覆盖无硬条件场景，排到不相关篇；
+        #   版本二（向量经 restrict 收窄后主导）：部分语义问句候选被滤空 → 0 篇拒答。
+        #   基础设施保留，语义排序调优见 D26 迭代清单。
+        _rrf = _fusion.rrf([_fusion.ranked(lex), _fusion.ranked(ft),
                             _fusion.ranked(num), _fusion.ranked(pzs), _fusion.ranked(vec)])
         cands = set(_rrf)
         if restrict is not None:
@@ -2856,6 +2986,62 @@ def _patch_parse(text, spec):
     return spec
 
 
+def _lift_known_names(conn, spec):
+    """**已知实体回填**（只填空、不覆盖）——修「实体粘连」导致的整条条件丢失。
+
+    实测（开放措辞基准 `tests/nl_paraphrase.jsonl`）：
+        「清代临江仙一共有多少首」→ 词牌**没被认出**，退化成「词面=临江仙一共有」
+        「纳兰性德写了几首词」    → 词人**没被认出**，退化成「词面=纳兰性德写了几首词」
+    根因：`_parse_core` 有一条刻意的兵险逻辑——**整串不含分隔符时视为「正文片段」**，
+    于是「临江仙一共有」「纳兰性德写了几首词」被整体当词面，不再查名单。
+    这条逻辑保护的是「不要把任意串当人名」，**不宜推翻**；但它可以被**补**：
+    名单里真实存在的词牌/词人，若作为**前缀**出现在残留词面里，就把它抬出来。
+
+    ★ 三条自律（保证**不可能**造成 1000 题回归）：
+      ① **只填空**：`cipai_any`/`author_any` 任一非空就**完全不动**；
+      ② **只认真名**：候选必须来自库里的 `cipai` / `authors` 表，且达到频次门槛（防脏词牌）；
+      ③ **前缀锚定**：必须以残留词面的**开头**匹配，避免从句子中段捞出无关实体。
+    """
+    if spec.cipai_any or spec.author_any:
+        return spec
+    try:
+        cipais = [(r[0], r[1]) for r in conn.execute(
+            'SELECT cipai, n FROM cipai WHERE n>=? AND length(cipai) BETWEEN 2 AND 5', (10,))]
+        authors = [(r[0], r[1]) for r in conn.execute(
+            'SELECT author, n FROM authors WHERE length(author)>=3')]
+    except Exception:                                            # noqa: BLE001
+        return spec
+    kws = list(spec.keywords or [])
+    if not kws:
+        return spec
+    cipais.sort(key=lambda x: (-len(x[0]), -x[1]))
+    authors.sort(key=lambda x: (-len(x[0]), -x[1]))
+    picked = None
+    for kw in kws:
+        for name, _n in cipais:
+            if kw.startswith(name) and len(kw) > len(name):
+                picked = ('cipai', name, kw)
+                break
+        if picked:
+            break
+        for name, _n in authors:
+            if kw.startswith(name) and len(kw) > len(name):
+                picked = ('author', name, kw)
+                break
+        if picked:
+            break
+    if not picked:
+        return spec
+    kind, name, kw = picked
+    if kind == 'cipai':
+        spec.cipai_any.append(name)
+    else:
+        spec.author_any.append(name)
+    _rest = kw[len(name):]
+    spec.keywords = [w for w in kws if w != kw] + ([_rest] if len(_rest) >= 2 else [])
+    return _finalize(spec)
+
+
 def parse_query(conn, text):
     """对外入口：**挖空算子短语** → 内部规则解析 → 句级算子 → 解析补丁 → 算子认账。
 
@@ -2868,4 +3054,5 @@ def parse_query(conn, text):
     spec.raw_question = text or ''
     parse_line_ops(text, spec)
     _patch_parse(text, spec)
+    _lift_known_names(conn, spec)          # 已知实体回填（只填空，不覆盖）
     return _flag_ops(spec, text)

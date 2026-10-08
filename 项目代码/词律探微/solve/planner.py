@@ -38,7 +38,14 @@ PLAN_MAX_TOKENS = 700
 
 
 # --------------------------------------------------------------------------- 规划提示词
-SYSTEM = (
+# ⚠ 2026-10-08 第二轮审查 P0-#2（**契约漂移**）：审查原话——
+#   「Planner 的 Prompt 告诉 LLM 可以用 scene/consist/tail_pz/pz_exact/tail_each/line_q/parity，
+#     但 `queryplan._LEAF_FIELDS` 实际只有 14 个 → 正确理解被判 unsupported → plan() 返回 None
+#     → 回落旧规则。根源是 Prompt Schema ≠ IR Schema ≠ Validator Schema。」
+#   本版的治法：**字段/算子/步骤/召回模式的说明书由 `queryplan.plan_schema_prompt()` 现场生成**，
+#   Planner 不再手写任何一份字段清单。`queryplan.check_schema_alignment()` 与
+#   `selftest()` 里的「Prompt 覆盖全部字段」断言保证二者不可能再漂移。
+_SYSTEM_HEAD = (
     '你是「词律探微」（清代词律声情研究助手）的**查询规划器（Query Planner）**。\n'
     '你的任务不是填表格，而是**先想清楚这道题要做什么，再把它写成一个查询计划**。\n'
     '只输出这个**计划 JSON 对象本身**，不要解释、不要代码块、不要多余文字。\n'
@@ -55,51 +62,22 @@ SYSTEM = (
     '  "context": {},\n'
     '  "evidence": {}\n'
     '}\n'
+)
+
+_SYSTEM_TAIL = (
     '\n'
-    '--- intent（先决定「要做什么」）---\n'
-    '  "list"      筛出满足条件的篇目（最常见）\n'
-    '  "count"     数一数有多少篇（问「共几篇/多少首」）\n'
-    '  "aggregate" 分组统计（问「宋词与清词哪个更高」「哪个词人最多」）\n'
-    '  "extreme"   取极值篇（问「哪一首…最高/最低」）\n'
-    '  "pair"      配对题（问「找出几对…两首词」）\n'
-    '  "extract"   篇内取值（问「第 N 句第 M 个字是什么」）\n'
-    '  "similarity" 找语义相近的篇目\n'
-    '\n'
-    '--- filters（布尔树：**精确条件**必须写在这里）---\n'
-    '  布尔节点三选一：\n'
+    '--- 布尔节点的写法（filters 是**任意嵌套**的树，不是平铺列表）---\n'
     '    {"and": [子节点, …]}   —— 全部满足\n'
     '    {"or":  [子节点, …]}   —— 满足其一\n'
     '    {"not": 子节点}        —— 不满足\n'
-    '  叶子：{"field": <字段>, "op": <算子>, "value": <值>}\n'
-    '  合法「字段 op value」清单（**务必按此写，字段/算子写错计划就作废**）：\n'
-    '    dynasty    op=in         value=["清"]        （并集可 ["清","宋"]）\n'
-    '    author     op=in         value=["朱彝尊"]\n'
-    '    cipai      op=in         value=["临江仙"]     （**词牌**，不是题名）\n'
-    '    title      op=contains   value=["四月一日感粤事"]（**题名/词题**，不在正文里）\n'
-    '    lines.tail op=in         value=["灯","声"]     （句脚字：存在一句句脚∈该集）\n'
-    '    tail_pz    op==          value="平"            （句脚平仄，只能 平/仄）\n'
-    '    pz         op=contains   value="仄仄平平"      （声律**子串**）\n'
-    '    pz_exact   op==          value="仄仄平平仄"    （整句平仄**全等**）\n'
-    '    tail_each  op=all_in     value=["花","草"]     （**每一句**句脚都落在该集）\n'
-    '    scene      op==          value="后段上升"|"后段下降"|"前后持平"\n'
-    '    consist    op==          value="后段上升"|"后段下降"|"前后持平"\n'
-    '    ze_ratio / han_len / sent_n / threshold / change / abs_change\n'
-    '               op= >= <= > < = !=   value=<数值>\n'
-    '      （ze_ratio 仄声比例百分数；han_len 汉字数；sent_n 句数；\n'
-    '        threshold 长句阈值；change 前后段变化值；abs_change 变化绝对值）\n'
     '  句级「没有任何一句 / 至少两句」用 布尔组合 或 line_q 叶子表达：\n'
     '    · 「没有任何一句句脚为「愁」」→ {"not": {"field":"lines.tail","op":"in","value":["愁"]}}\n'
     '      （lines.tail 的存在性取反 = 不存在这样的句子）\n'
-    '    · 「每一句句脚都是「愁」」→ {"field":"tail_each","op":"all_in","value":["愁"]}\n'
+    '    · 「每一句句脚都是「愁」」→ line_q 叶子的 value 写 {"op":"∀","pred":["tail","愁"]}\n'
     '    · 「至少两句句脚为「愁」」→\n'
-    '        {"field":"line_q","op":"≥k","value":{"op":"≥k","pred":["tail","愁"],"k":2}}\n'
-    '      （line_q 叶子的 value 是**整个算子对象**：op 与谓词 pred 同源；\n'
-    '        「正好 N 句」用 op="=k" 且带 "k"；「存在一句」用 op="∃"。）\n'
-    '\n'
-    '--- retrieve（**语义条件**：写秋景/离愁/主题相近）---\n'
-    '  形如 [{"mode":"vector","q":"秋日 悲秋 离愁 凄凉"}]；\n'
-    '  纯条件题（如「清 临江仙 仄声>45%」）写 [{"mode":"sql"}]。\n'
-    '  ★ 只有「内容/意象/情绪」才放这里；框架词（「哪些」「描写」「作品」）不要放。\n'
+    '        {"field":"line_q","op":"=","value":{"op":"≥k","pred":["tail","愁"],"k":2}}\n'
+    '      （line_q 叶子的 value 是**整个算子对象**；「正好 N 句」用 op="=k" 且带 "k"；\n'
+    '        「存在一句」用 op="∃"；「没有任何一句」用 op="∄"。）\n'
     '\n'
     '=================  五条铁律  =================\n'
     '1) **精确条件进 filters，语义条件进 retrieve**：能落到列上的（朝代/作者/词牌/题名/\n'
@@ -149,6 +127,29 @@ SYSTEM = (
     '但**上下文里没出现过的条件不许臆造**；本轮问句若已自足，就忽略上下文。\n'
 )
 
+
+def system_prompt():
+    """完整提示词 = 头部 + **由 IR 现场生成的字段说明书** + 尾部（铁律与示例）。
+
+    这就是第二轮审查 P0-#2 的解药：字段/算子/步骤/召回的说明**只有一份**（`queryplan.LEAF_SCHEMA`），
+    Prompt 是它的**渲染结果**，不是第二份手写清单。
+    """
+    QP = _load_queryplan()
+    mid = ''
+    if QP is not None:
+        try:
+            mid = '\n' + QP.plan_schema_prompt() + '\n'
+        except Exception:                                        # noqa: BLE001
+            mid = ''
+    return _SYSTEM_HEAD + mid + _SYSTEM_TAIL
+
+
+# 兼容旧引用（`planner.SYSTEM`）：module 级即生成，queryplan 不可用则退化为「无字段说明书」版本
+try:
+    SYSTEM = system_prompt()
+except Exception:                                                # noqa: BLE001
+    SYSTEM = _SYSTEM_HEAD + _SYSTEM_TAIL
+
 # field 的族归类（落地校验与 filters 剪枝共用；**宽松**匹配多种写法）
 _AUTHOR_FIELD = ('author', 'authors', 'poet', 'writer')
 _CIPAI_FIELD = ('cipai', 'cipais', 'tune', 'cipai_name')
@@ -195,18 +196,29 @@ def _leaf_values(leaf):
     return [v]
 
 
+def _real_sets(conn):
+    """库里真实存在的作者/词牌集合（查不到表时退化为 None，表示「无法校验」——**不臆断**）。"""
+    try:
+        authors = {r[0] for r in conn.execute('SELECT author FROM authors')}
+    except Exception:                                            # noqa: BLE001
+        authors = None
+    try:
+        cipai = {r[0] for r in conn.execute('SELECT cipai FROM cipai')}
+    except Exception:                                            # noqa: BLE001
+        cipai = None
+    return authors, cipai
+
+
 def _landing_check(node, conn):
     """对 filters 做**落地校验**：作者/词牌是否真在库中、题名是否真命中。
 
     返回 `(bad_pairs, dropped)`：
-      · bad_pairs：`{(field, value), …}`——落不了地的叶子（供剪枝用）；
+      · bad_pairs：`{(field, value), …}`——落不了地的叶子（**不再用于剪枝**，见 `_mark_not_found`）；
       · dropped：  中文说明列表（**记 dropped，绝不静默丢**）。
     """
     bad, dropped = set(), []
-    try:
-        real_authors = {r[0] for r in conn.execute('SELECT author FROM authors')}
-        real_cipai = {r[0] for r in conn.execute('SELECT cipai FROM cipai')}
-    except Exception:
+    real_authors, real_cipai = _real_sets(conn)
+    if real_authors is None and real_cipai is None:
         return bad, dropped
 
     for leaf in _iter_leaves(node):
@@ -216,22 +228,63 @@ def _landing_check(node, conn):
         for val in _leaf_values(leaf):
             if not isinstance(val, str):
                 continue
-            if fld in _AUTHOR_FIELD and val not in real_authors:
+            if fld in _AUTHOR_FIELD and real_authors is not None and val not in real_authors:
                 bad.add((fld, val))
                 dropped.append('词人=%s（库中没有此人）' % val)
-            elif fld in _CIPAI_FIELD and val not in real_cipai:
+            elif fld in _CIPAI_FIELD and real_cipai is not None and val not in real_cipai:
                 bad.add((fld, val))
                 dropped.append('词牌=%s（库中没有此调）' % val)
             elif fld in _TITLE_FIELD:
                 try:
                     hit = conn.execute('SELECT 1 FROM poems WHERE title LIKE ? LIMIT 1',
                                        ('%' + val + '%',)).fetchone()
-                except Exception:
+                except Exception:                                # noqa: BLE001
                     hit = None
                 if not hit:
                     bad.add((fld, val))
                     dropped.append('题名=%s（语料标题中不存在）' % val)
     return bad, dropped
+
+
+# ⛔ 常量：**永不匹配**的 pid 哨兵。用于把「查无此实体」编译成恒假的叶子，
+#    而不是把条件删掉（删掉 = 全库查询，那是审查 §25 点名的危险形态）。
+_NOT_FOUND_PID = '__LVC_NOT_FOUND__'
+
+
+def _mark_not_found(node, bad):
+    """把「查无此实体」的叶子换成**恒假/恒真**哨兵 —— **绝不剪枝**。
+
+    为什么不能再剪枝（2026-10-08 第二轮审查 §25，原话）：
+
+    > 用户问「只有某个不存在的人」→ 剪掉以后 filters 变成空 → 退化为**全库查询**。
+    > 这是非常危险的：「模型认为条件不存在」不能等价于「用户没有这个条件」。
+    > 对 `author = nonexistent`，正确语义是**结果集 = 空 / NOT_FOUND**，不是全库。
+
+    ★ 一个容易判反的细节（本函数第一版就搞错了，自检抓了出来）：
+      无效实体的叶子**在任何位置都换成「恒假」**，不需要按是否在 `not` 之下分方向——
+      因为布尔逻辑自己会处理：
+        · 普通位：`author=查无此人` → FALSE → 整篇不命中 → **0 篇**（正确）；
+        · `not` 之下：`NOT(author=查无此人)` = `NOT FALSE` = TRUE → **全库**
+          （正确：库里确实没有这人写的，所以「不是他写的」对每一篇都成立）。
+      若像第一版那样在 `not` 之下换成「恒真」，就得到 `NOT TRUE` = FALSE → 0 篇，**判反了**。
+    """
+    def rec(n):
+        if not isinstance(n, dict):
+            return n
+        if isinstance(n.get('and'), list):
+            return {'and': [rec(c) for c in n['and']]}
+        if isinstance(n.get('or'), list):
+            return {'or': [rec(c) for c in n['or']]}
+        if isinstance(n.get('not'), (dict, list)):
+            return {'not': rec(n['not'])}
+        if 'field' not in n:
+            return n
+        fld = str(n.get('field') or '').strip()
+        for val in _leaf_values(n):
+            if (fld, val) in bad:
+                return {'field': 'pid', 'op': 'in', 'value': [_NOT_FOUND_PID]}
+        return n
+    return rec(node) if node else node
 
 
 def _prune(node, bad):
@@ -284,7 +337,10 @@ def validate(plan, conn):
     if dropped:
         plan['_dropped'] = list(plan.get('_dropped') or []) + dropped
     if bad:
-        plan['filters'] = _prune(plan.get('filters'), bad) or {'and': []}
+        # ⛔ 不再剪枝（审查 §25）：改成**恒假哨兵**，让结果集诚实地为「空 + NOT_FOUND」，
+        #    而不是「条件消失 → 全库」。同时把引用记录下来供上层如实披露。
+        plan['_not_found'] = list(plan.get('_not_found') or []) + dropped
+        plan['filters'] = _mark_not_found(plan.get('filters'), bad)
     # (2) 交给 IR 做结构/语义校验
     try:
         ok, problems = QP.validate(plan, conn)
@@ -344,7 +400,10 @@ def plan(conn, llm, question, context=None):
         if not ok:
             return None
         pl['_raw'] = raw or ''
-        pl['_notes'] = ['计划已通过 queryplan.validate 与落地校验（落不了地的值已剪枝并记入 dropped）']
+        pl['_notes'] = ['计划已通过 queryplan.validate 与落地校验'
+                        + ('（其中 %d 个实体在语料中查无，已按「结果集为空」处理，'
+                           '而非删除条件）' % len(pl.get('_not_found') or [])
+                           if pl.get('_not_found') else '')]
         return pl
     except Exception:
         return None               # 硬约束：绝不抛异常
@@ -357,9 +416,19 @@ def main():
     ap = argparse.ArgumentParser(description='查询规划器：问句 → Query Plan（JSON）')
     ap.add_argument('--db', default=os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), 'data', 'corpus.db'))
-    ap.add_argument('--question', required=True)
+    ap.add_argument('--question', default=None)
     ap.add_argument('--provider', default=None)
+    ap.add_argument('--selftest', action='store_true', help='跑契约/落地自检（不需要大模型）')
     args = ap.parse_args()
+    if args.selftest:
+        import sqlite3
+        _c = sqlite3.connect(args.db)
+        try:
+            return 0 if selftest(_c) else 1
+        finally:
+            _c.close()
+    if not args.question:
+        ap.error('缺少 --question（或改用 --selftest）')
     if _load_queryplan() is None:
         print('queryplan（Query Plan IR）尚未就绪 → planner 优雅降级，返回 None（调用方回落规则路）')
         return 1
@@ -371,6 +440,59 @@ def main():
     print('计划：%s' % (json.dumps(pl, ensure_ascii=False, indent=2) if pl else 'None（回落规则路）'))
     conn.close()
     return 0
+
+
+def selftest(conn):
+    """自检：契约不漂移（#2）+ 无效实体不退化成全库（#14）+ 未就绪时优雅降级。"""
+    ok_all = True
+    QP = _load_queryplan()
+
+    # ① 契约：Prompt 里出现过的字段**必须**都在 IR schema 里（反向由 queryplan 自检兜住）
+    if QP is None:
+        print('✗ queryplan 不可用，无法做契约检查')
+        return False
+    _p = system_prompt()
+    import re as _re
+    mentioned = set(_re.findall(r'`([a-zA-Z_][\w.]*)`', _p))
+    unknown = sorted(f for f in mentioned
+                     if f not in QP.LEAF_SCHEMA and f not in QP.STEP_OPS
+                     and f not in QP.RETRIEVE_MODES and f not in QP.INTENTS
+                     and f not in QP.AGG_METRICS)
+    ok1 = not unknown
+    ok_all &= ok1
+    print('%s 契约检查：Prompt 提及的字段全部在 IR schema 内（越界：%s）'
+          % ('✓' if ok1 else '✗', unknown or '无'))
+
+    # ② 无效实体 → 结果集为空，**不是全库**
+    bad = {('author', '查无此人'), ('cipai', '不存在的词牌')}
+    node = {'and': [{'field': 'dynasty', 'op': 'in', 'value': ['清']},
+                    {'field': 'author', 'op': 'in', 'value': ['查无此人']}]}
+    fixed = _mark_not_found(node, bad)
+    sql, args = QP.compile_filters(conn, fixed)
+    n_bad = conn.execute('SELECT COUNT(*) FROM poems p WHERE %s' % sql, args).fetchone()[0]
+    n_all = conn.execute("SELECT COUNT(*) FROM poems WHERE dynasty='清'").fetchone()[0]
+    ok2 = (n_bad == 0 and n_all > 0)
+    ok_all &= ok2
+    print('%s 无效实体 → 命中 %d 篇（清词共 %d 篇 → 必须为空，不得退化为全库）'
+          % ('✓' if ok2 else '✗', n_bad, n_all))
+
+    # ③ NOT 之下的无效实体 → 语义上恒真（「不是查无此人写的」= 全部）
+    node2 = {'and': [{'field': 'dynasty', 'op': 'in', 'value': ['清']},
+                     {'not': {'field': 'author', 'op': 'in', 'value': ['查无此人']}}]}
+    fixed2 = _mark_not_found(node2, bad)
+    sql2, args2 = QP.compile_filters(conn, fixed2)
+    n_not = conn.execute('SELECT COUNT(*) FROM poems p WHERE %s' % sql2, args2).fetchone()[0]
+    ok3 = (n_not == n_all)
+    ok_all &= ok3
+    print('%s NOT(无效实体) → 命中 %d 篇（应等于清词全部 %d 篇）'
+          % ('✓' if ok3 else '✗', n_not, n_all))
+
+    # ④ 无模型时 `plan()` 必须返回 None（绝不抛异常、绝不伪造计划）
+    ok4 = (plan(conn, None, '清 临江仙') is None)
+    ok_all &= ok4
+    print('%s 无大模型时优雅降级（返回 None → 调用方回落规则路）' % ('✓' if ok4 else '✗'))
+    print('自检：%s' % ('全部通过' if ok_all else '存在失败'))
+    return bool(ok_all)
 
 
 if __name__ == '__main__':

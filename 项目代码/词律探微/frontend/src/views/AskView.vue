@@ -294,12 +294,21 @@ function sessNoteOf(turn) {
 function setCheckLines(sc) {
   if (!sc || typeof sc !== 'object') { return []; }
   const out = [];
-  if (sc.checked === false) {
-    out.push('集合身份校验：未执行（' + (sc.reason || '无硬条件') + '）');
+  // ⚠ 2026-10-08 第二轮审查 §23：旧的 `sc.ok` 是**布尔**，「没做校验」与「做完且通过」
+  //   都会让界面显示「通过」→ 用户以为系统已证明答案正确。现按后端**五态 status** 显示：
+  //     VERIFIED_EXACT / VERIFIED_DERIVED → 证明到什么程度就说清楚；
+  //     SEMANTIC_NOT_EXHAUSTIVE           → 明确「这类问题本就没有可判定的全集」；
+  //     NOT_CHECKED                       → 明确「未验证」，禁止画 ✓；
+  //     FAILED                            → 校验不通过。
+  const st = String(sc.status || '');
+  const txt = String(sc.status_text || sc.reason || '');
+  if (!sc.checked) {
+    out.push('集合身份校验：' + statusLabel(st) + (txt ? '（' + txt + '）' : ''));
+    if (sc.reason && sc.reason !== txt) { out.push(sc.reason); }
     return out;
   }
   const tot = (typeof sc.hit_total === 'number') ? sc.hit_total : '—';
-  out.push('集合身份校验：' + (sc.ok ? '通过' : '未通过')
+  out.push('集合身份校验：' + statusLabel(st)
     + '（独立复算命中 ' + tot + ' 篇；结果给出 ' + (sc.shown != null ? sc.shown : '—') + ' 篇）');
   if (sc.extra_n) { out.push('多出的（不在条件命中集内）' + sc.extra_n + ' 篇：' + fmtList(sc.extra, '、')); }
   if (sc.missing_n) { out.push('漏掉的（满足条件却未在结果中）' + sc.missing_n + ' 篇：' + fmtList(sc.missing, '、')); }
@@ -308,7 +317,19 @@ function setCheckLines(sc) {
   return out;
 }
 
-/* 一轮结束后的收尾：更新会话标题（首轮取问句前 18 字）并落盘。 */
+/* 校验状态 → 徽标文案。**未验证的三种一律不给 ✓**。 */
+function statusLabel(st) {
+  switch (st) {
+    case 'VERIFIED_EXACT': return '已验证（完整集合逐篇比对通过）';
+    case 'VERIFIED_DERIVED': return '已验证（结果每篇都满足条件，为 top-k 子集）';
+    case 'SEMANTIC_NOT_EXHAUSTIVE': return '未做集合校验（语义排序，本无可判定全集）';
+    case 'NOT_CHECKED': return '未验证（本次未能执行校验）';
+    case 'FAILED': return '未通过';
+    default: return st || '未知';
+  }
+}
+
+/* 会话追问范围：语义排序集要**明说**只在展示过的那几篇里找（第二轮审查 §22）。 */
 function finishTurn(text) {
   const s = activeSession();
   if (s) {

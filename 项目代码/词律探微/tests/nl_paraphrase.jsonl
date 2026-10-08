@@ -1,0 +1,40 @@
+{"id":"NL001","q":"清代临江仙里仄声比例高于45%的有哪些","fields":["dynasty","cipai","ze_ratio"],"truth_sql":"SELECT pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.ze_ratio>=45","note":"模板基线：明确的三条件"}
+{"id":"NL002","q":"清词中的临江仙，如果仄声占比超过45个百分点，请列出来","fields":["dynasty","cipai","ze_ratio"],"truth_sql":"SELECT pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.ze_ratio>=45","note":"同义改写：『超过45个百分点』= >=45"}
+{"id":"NL003","q":"临江仙这调，清朝人写的，仄声比例在45%以上的","fields":["dynasty","cipai","ze_ratio"],"truth_sql":"SELECT pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.ze_ratio>=45","note":"倒装 + 口语化"}
+{"id":"NL004","q":"仄声比例至少45%的清代临江仙","fields":["dynasty","cipai","ze_ratio"],"truth_sql":"SELECT pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.ze_ratio>=45","note":"『至少』= >=；定语后置"}
+{"id":"NL005","q":"清朝的临江仙词，仄声比例不低于45的有哪些篇","fields":["dynasty","cipai","ze_ratio"],"truth_sql":"SELECT pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.ze_ratio>=45","note":"『不低于』= >="}
+{"id":"NL006","q":"清代临江仙一共有多少首","fields":["dynasty","cipai"],"expect_count_sql":"SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙'","intent":"count","note":"计数意图的开放措辞"}
+{"id":"NL007","q":"清词里临江仙的数量是多少","fields":["dynasty","cipai"],"expect_count_sql":"SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙'","intent":"count","note":"『数量是多少』= count"}
+{"id":"NL008","q":"纳兰性德写了几首词","fields":["author"],"expect_count_sql":"SELECT COUNT(*) FROM poems p WHERE p.author='纳兰性德'","intent":"count","note":"单条件计数"}
+{"id":"NL009","q":"朱彝尊的词里字数最多的是哪一首","fields":["author"],"intent":"extreme","note":"极值：不比数字，只验证解析出作者与极值意图"}
+{"id":"NL010","q":"哪一首清词的仄声比例最高","fields":["dynasty"],"intent":"extreme","note":"极值 + 单条件"}
+{"id":"NL011","q":"句脚是「愁」的清词有哪些","fields":["dynasty","lines.tail"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT pid FROM lines WHERE tail='愁')","note":"句脚字（存在一句）"}
+{"id":"NL012","q":"清朝人写的词里，有没有句脚落在「愁」字上的","fields":["dynasty","lines.tail"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT pid FROM lines WHERE tail='愁')","note":"同义改写 + 口语『有没有…的』"}
+{"id":"NL013","q":"清词里没有任何一句句脚是「愁」的有哪些","fields":["dynasty","line_q"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid NOT IN (SELECT pid FROM lines WHERE tail='愁')","note":"∄ 量化：NOT EXISTS"}
+{"id":"NL014","q":"清词里每一句的句脚都是仄声的有哪些","fields":["dynasty","line_q"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid NOT IN (SELECT l.pid FROM lines l WHERE l.pz IS NULL OR substr(l.pz,-1,1)<>'仄') AND p.pid IN (SELECT l.pid FROM lines l)","note":"∀ 量化"}
+{"id":"NL015","q":"清代既不是纳兰性德也不是朱彝尊写的临江仙","fields":["dynasty","cipai"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.author NOT IN ('纳兰性德','朱彝尊')","note":"★复合布尔 NOT(OR)：规则槽位表表达不了，改写法仍须覆盖到朝代+词牌"}
+{"id":"NL016","q":"清代写临江仙的，除了纳兰性德和朱彝尊以外还有谁的作品","fields":["dynasty","cipai"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' AND p.author NOT IN ('纳兰性德','朱彝尊')","note":"『除了…以外』= NOT IN，与 NL015 同义"}
+{"id":"NL017","q":"清朝或宋朝的临江仙有哪些","fields":["cipai"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.cipai='临江仙' AND p.dynasty IN ('清','宋')","note":"★跨字段 OR（朝代并集）：平铺槽位只能取并集，改写法仍须两朝代都在"}
+{"id":"NL018","q":"宋词和清词里的临江仙","fields":["cipai"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.cipai='临江仙' AND p.dynasty IN ('清','宋')","note":"『和』= 并集，与 NL017 同义"}
+{"id":"NL019","q":"清词里字数在40到60之间的有哪些","fields":["dynasty","han_len"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.han_len BETWEEN 40 AND 60","note":"闭区间"}
+{"id":"NL020","q":"清词里篇幅不少于40字、又不超过60字的","fields":["dynasty","han_len"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.han_len BETWEEN 40 AND 60","note":"『不少于…不超过…』= BETWEEN，与 NL019 同义"}
+{"id":"NL021","q":"清词中句数不少于5的作品","fields":["dynasty","sent_n"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.sent_n>=5","note":"句数条件（用『不少于』避免 超过=严格大于 的口径争议）"}
+{"id":"NL022","q":"清朝的临江仙里，哪一首的仄声比例最低","fields":["dynasty","cipai"],"intent":"extreme","note":"极值 + 两条件（方向 = 最小）"}
+{"id":"NL023","q":"蝶恋花·四月一日感粤事是谁写的","fields":["cipai","title"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.cipai='蝶恋花' AND p.title LIKE '%四月一日感粤事%'","note":"★词牌与题名必须分清（题名不是词面）"}
+{"id":"NL024","q":"《蝶恋花》中题作「四月一日感粤事」的那首词的作者","fields":["cipai","title"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.cipai='蝶恋花' AND p.title LIKE '%四月一日感粤事%'","note":"与 NL023 同义，措辞完全不同"}
+{"id":"NL025","q":"清词里句脚平仄为仄的有哪些","fields":["dynasty","tail_pz"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT l.pid FROM lines l WHERE substr(l.pz,-1,1)='仄')","note":"句脚平仄"}
+{"id":"NL026","q":"清朝作品里，句子平仄恰好是「仄仄平平仄」的","fields":["dynasty","pz_exact"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT l.pid FROM lines l WHERE l.pz='仄仄平平仄')","note":"★平仄串全等（非子串）"}
+{"id":"NL027","q":"清词里含有平仄串「仄仄平平」的句子出现在哪些作品","fields":["dynasty","pz"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE '%仄仄平平%')","note":"声律子串"}
+{"id":"NL028","q":"后段上升的清词有哪些","fields":["dynasty","scene"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.scene='后段上升'","note":"声情转向"}
+{"id":"NL029","q":"清词里声情标注与实测前后段相反、标注为后段上升的","fields":["dynasty","consist"],"note":"★consist（一致性矛盾）：开放措辞下最容易听漏的一类"}
+{"id":"NL030","q":"篇内既有句脚「花」又有句脚「草」的清词","fields":["dynasty","tail_each"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT l.pid FROM lines l WHERE l.tail='花') AND p.pid IN (SELECT l.pid FROM lines l WHERE l.tail='草')","note":"★篇内交集（不是存在一句）"}
+{"id":"NL031","q":"清词里第1、3、5句位置上句脚为仄的","fields":["dynasty","line_q"],"note":"★句位奇偶 parity：开放措辞表达"}
+{"id":"NL032","q":"清词里至少有两句句脚是「愁」的有哪些","fields":["dynasty","line_q"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT l.pid FROM lines l WHERE l.tail='愁' GROUP BY l.pid HAVING COUNT(*)>=2)","note":"★≥k 句级计数"}
+{"id":"NL033","q":"元朝的词里临江仙有几首","fields":["dynasty","cipai"],"expect_count_sql":"SELECT COUNT(*) FROM poems p WHERE p.dynasty='元' AND p.cipai='临江仙'","intent":"count","note":"非清朝计数（防『默认清朝』的隐性假设）"}
+{"id":"NL034","q":"全库一共有多少首词","fields":[],"expect_count_sql":"SELECT COUNT(*) FROM poems","intent":"count","note":"无条件计数（最容易退化成 0 或拒答）"}
+{"id":"NL035","q":"清词里最长句达到9个字的有哪些","fields":["dynasty","longest_len"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.longest_len=9","note":"新增可查询列（第二轮 schema 扩展后可用）"}
+{"id":"NL036","q":"前段仄声占比超过一半的清词","fields":["dynasty","f_ratio"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.f_ratio>50","note":"新增列 f_ratio"}
+{"id":"NL037","q":"前后段仄声占比变化幅度超过10个百分点的清词","fields":["dynasty","abs_change"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND ABS(p.change)>10","note":"★『变化幅度』= 绝对值，不是有符号值"}
+{"id":"NL038","q":"句脚是「灯」或者「声」的清词","fields":["dynasty","lines.tail"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.pid IN (SELECT pid FROM lines WHERE tail IN ('灯','声'))","note":"并集（同一字段内 OR）"}
+{"id":"NL039","q":"清代临江仙里仄声比例最高的三首","fields":["dynasty","cipai"],"intent":"extreme","note":"极值 + top3"}
+{"id":"NL040","q":"不属于临江仙的清词有多少","fields":["dynasty"],"truth_sql":"SELECT p.pid FROM poems p WHERE p.dynasty='清' AND p.cipai<>'临江仙'","note":"★NOT 单叶：平铺槽位无法表达『不等于』"}

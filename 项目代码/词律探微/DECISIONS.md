@@ -662,3 +662,148 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
 | 前端六门禁 | **全 0 不符**、`check-types` 0 错误、文档一致 |
 
 - **状态**：✅ 已接受（部分子项列为后续 Phase）。
+
+---
+
+## D27 ✅ 已修：**QueryPlan 接管执行**（第二轮审查 15 项 P0/P1 全数落地）
+
+> 依据：`架构第二轮意见（deepseek）.md`（B1–B13 / Top20 / Phase 0–9）与
+> `架构第二轮意见（GPT）.md`（§1–36 / Top15）。两份文档的**共同结论**是：
+> 「核心零件已经造出来，但主链还没有完成从 QuerySpec → QueryPlan 的迁移」。
+> 本轮按此逐项落地，并按「默认零回归」铁律全部走通门禁。
+
+### 一、契约漂移（GPT Top15 #2、#5）——立 `LEAF_SCHEMA` 为唯一真源
+
+- **问题（原话）**：`Planner 的 Prompt ≠ queryplan._LEAF_FIELDS ≠ Validator`，
+  于是 LLM 正确给出 `line_q / pz_exact / tail_each / parity` 时被判 unsupported
+  → `plan()` 返回 None → 回落旧规则。
+- **改法**：`solve/queryplan.py` 新增 `LEAF_SCHEMA`（**26 个字段**的中文说明 + 允许算子 +
+  示例），由它派生 `_LEAF_FIELDS`，并用它**生成** Planner 的 Prompt（`plan_schema_prompt()`）。
+  Planner 不再手写任何字段清单。
+- **牙齿**：`check_schema_alignment()` 双向比对「本表 ⟷ `retrieve._leaf_sql` 真正接受的字段」，
+  **任一侧多出来即自检失败**；`selftest` 另断言 Prompt 覆盖全部字段。
+  实测：`✓ 本表 26 字段 vs 编译器一致`、`✓ Prompt 覆盖 26/26`。
+- 同时把 `retrieve._leaf_sql` 补齐原本不认的 `source / parity`，并把
+  `longest_len / longest_seq / f_ratio / b_ratio` 加进 `_NUM_COL`（**只被布尔树路径使用**
+  → 经典路径逐字不变）。
+
+### 二、`to_plan()` 覆盖 `_legacy`（GPT #4）——实际 bug，已修
+
+旧代码先写 `plan['_legacy']['keep_legacy_filters']`，后面又**整体赋值** `plan['_legacy'] = {...}`
+→ 两项被静默覆盖（注释宣称「不静默丢」，实际丢了）。现改为**先拼全、一次性赋值**，
+并在 `from_plan` 里真正**还原**这些复杂条件（_old 只 setattr 一个标记）。自检往返 5/5 全过。
+
+### 三、`PlanExecutor` + 溯源 DAG（GPT #3、#15、Phase 6）
+
+- 新增 `solve/plan_exec.py`：**16 个步骤算子**（filter/sort/limit/group_by/aggregate/argmax/
+  count/extract/pair/locate/intersect/union/diff/anchor/annotate/materialize_as）
+  + 3 种召回模式（sql/fts/vector）+ 6 个聚合指标，**全部复用** `retrieve`/`aggregate`/`pairing`
+  （编排层，不是第二实现）。
+- **多键排序**（审查 #13）：SQL 只取值、Python 侧按「低优先级→高优先级」做**稳定排序**
+  ——因跨 SQL 查询**没有稳定性**（第一版踩过：同 `sent_n` 时 `han_len` 次序被打散）。
+- **溯源 DAG**：每步留一个节点，`render()` 自底向上回放（`F2 count ← F1 sql.filter ← corpus`），
+  回答「为什么是这个结果」。
+- 自检 **10 项**全部与独立 SQL/Python 复算一致（含 `group→count→argmax`、
+  `sort(asc)+limit`、多键排序、`materialize→filter→diff`、`sort→limit→extract`、句级 `line_q`）。
+
+### 四、Planner 进入主链（GPT #1）——`LVC_PLANNER=plan`
+
+`ask.answer()` 新增 `_answer_by_plan()`：Planner → `queryplan.validate` → 实体落地 →
+`plan_exec.execute` → 复用 `items_of` 出证据块、`guard.verify` 出护栏，并附 `plan` /
+`provenance` 供前端展示。**默认 `rule`/`llm` 时根本不调用**（零回归）；规划路任一环节失败
+返回 None → 回落既有成熟链路（宁可不用，不给半成品）。
+
+### 五、无效实体不再剪枝成全库（GPT #14、#25）
+
+`planner._prune()` 会把「查无此人」从 filters 删掉 → **filters 变空 → 全库查询**，
+审查称为「非常危险」。改为 `_mark_not_found()`：把无效实体叶子换成**恒假哨兵**，
+结果集诚实地为「空 + NOT_FOUND」。
+⚠ 一个判反的细节（第一版错了、被自检抓出）：**任何位置都换恒假**，不需按 `not` 分方向——
+`NOT(author=查无此人)` = `NOT FALSE` = 全库，布尔逻辑自己会处理；若在 `not` 下换恒真会得到
+`NOT TRUE` = 0 篇，**正好判反**。实测：`无效实体→0 篇`、`NOT(无效实体)→26742 篇（全库清词）`。
+
+### 六、向量检索六处（GPT V1–V6）
+
+| 项 | 改法 | 实测 |
+| --- | --- | --- |
+| V1 硬条件截断向量召回 | **受限检索**：把 `restrict`（SQL 候选全集）交给索引，在候选集内检索 + 动态扩大 k | `vector_index._restricted_search` |
+| V2 只嵌入前两句 | 改为**全篇正文**（头信息 + 全部句子，上限 1200 字） | 3000 篇 141 秒 |
+| V3 `--only lines` 形同虚设 | 两层各自独立循环 + 独立 progress 段 | **句级 22083 条**已建 |
+| V4 同一批文本嵌入两遍 | 删除重复 embed（只 `flush()` 一次）；删除死代码 | 成本减半 |
+| V5 manifest 只校 corpus_sha | 强校验 `index_version / model / dim / 各层条数 / 向量数==元数据数` | INDEX_VERSION=2 |
+| V6 `meta` 伪排序通道进 RRF | **移除**：二值成员信号只当候选宇宙（`restrict`），不参与排名 | 五通道 RRF |
+
+### 七、Context 语义类型 + 验证器不再 fail-open（GPT §22、§23、§24）
+
+- `context.py` 新增 `RESULT_KIND_EXACT / RESULT_KIND_SEMANTIC`：语义排序集会在 `resolve()`
+  里返回 `scope_note`，**明说**「本轮只在展示出来的那 N 篇里找」，不再冒充完整集合；
+  `serve.py::_store_turn` 按 `hit_pids()` 是否为 None 自动标注。
+- `answer_verify.set_check` 由布尔 `ok` 升级为**五态 status**：
+  `VERIFIED_EXACT / VERIFIED_DERIVED / SEMANTIC_NOT_EXHAUSTIVE / NOT_CHECKED / FAILED`，
+  聚合复算同样三态（`PASS / FAIL / NOT_EXECUTED`）——**「没算」不再等于「算过且对」**（§24）。
+  前端 `AskView.vue` 按 status 显示徽标，**未验证的三种一律不给 ✓**。
+
+### 八、理解层与数据层（DeepSeek B8 / #11 / #13）
+
+- **开放理解基准**（DeepSeek #11）：`tests/nl_paraphrase.jsonl`（40 条同义改写）+ 
+  `tools/nl_benchmark.py`，真值用**独立 SQL**（避开审查点名的「自证循环」），
+  度量 Coverage / SetIdentity / AnswerCorrect / RefusalQuality，基线冻结在
+  `tests/nl_baseline.json`（入 CI：只许变好、不许回退）。
+  首次实测 **20/40**，随后做了两处**只填空、不覆盖**的加法式改进（数值同义词、
+  已知实体回填）→ 仍如实保留 20 项缺口与根因（见下）。
+- **题名索引提速**（B8）：`poems_title_fts`（FTS5 trigram）收窄 + **原 LIKE 复验**
+  → `四月一日感粤事` 60.7ms **→ 1.0ms（60×）**，结果集逐篇一致（92==92）。
+- **平仄 n-gram 倒排：实测否决**（与 B8 推测相反）：短/长模式**全都更慢**
+  （253→1929ms、286→4425ms、287→7984ms），因每条三字组都要物化巨大中间集。
+  如实记档，默认关闭（`LVC_PZ_GRAM=1` 可开），建表工具保留。
+
+### 九、验收（最终代码实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| `selftest` | **235/235** |
+| `regress` 双集 | **`BF863368…` / `ACEF8B15…` 逐字节不变** |
+| `verify_1000` | **1000/1000、「条件理解不一致」0 题**（1179 秒） |
+| `omission_check` | **9 类 0 不一致** |
+| `invariant_check` | **0 违反** |
+| `queryplan` 自检 | 对齐 + 布尔树 6 用例 + 往返 5 条 **全过** |
+| `plan_exec` 自检 | **10 项全过**（逐步 vs 独立复算） |
+| `planner --selftest` | **4 项全过**（契约 / 无效实体 / NOT 语义 / 优雅降级） |
+| `answer_verify` | 五态 status + 聚合三态，自检含「语义题不得显示 ✓」断言 |
+| `nl_benchmark` | 40 条跑通、与基线**无回退** |
+| 前端六门禁 | check-core 213,972/0、ssr-smoke 26/0、test_ui / test_render / verify_views 全通过、check-types 0 错误、gen-docs 一致 |
+
+### 十、如实披露：开放理解基准仍有的 20 项缺口（根因与去向）
+
+| 根因 | 涉及用例 | 为什么这轮不硬改 |
+| --- | --- | --- |
+| **实体粘连**：`_parse_core` 刻意有「整串无分隔符 ⇒ 当正文片段」的兵险逻辑，故「临江仙一共有多少首」「纳兰性德写了几首词」认不出实体 | NL006/007/008/015/024/033 | 该逻辑保护 1000 题（防把任意串当人名）；已加**只填空**的回填，彻底改需另立项并全量复核 |
+| **跨字段 OR**（清或宋）与 **NOT 单叶**（不属于临江仙） | NL017/018/040 | 平铺槽位**结构上**表达不了；**正解是布尔树**——`queryplan` + `plan_exec` 已支持，需 Planner 路（`LVC_PLANNER=plan`）接管 |
+| **句级量化的开放措辞**（每一句/第1、3、5句/篇内交集/一致性矛盾） | NL014/029/030/031 | 规则路只认题库里的模板措辞；Plan 的 `line_q`/`tail_each`/`consist`/`parity` 叶子已能表达 |
+| **新增列的开放措辞**（最长句/前段占比/变化幅度） | NL035/036/037 | schema 已扩展（布尔树可查），规则路尚未接词形 |
+| **全库无条件计数** | NL034 | 需新增 count 意图的落地（规划路已支持 `intent=count`） |
+
+→ 这些缺口**正是**基准集存在的意义：它们现在是**可度量、可回归**的，而不是散落的经验。
+   下一步按 Plan 路（`LVC_PLANNER=plan` + 真向量索引全量）逐条消解，每消一条基线即上调。
+
+- **状态**：✅ 已修（15 项 P0/P1 全数落地；剩余为基准集暴露的理解缺口，已列根因与去向）。
+
+---
+
+## D28 ✅ 已修：**派生索引的语料指纹口径**（第二轮实测踩坑）
+
+- **现象**：`tools/build_indexes.py` 往 `corpus.db` 加了两张**派生表**（题名 FTS、平仄倒排），
+  随后向量索引被判「与语料不匹配」而失效。
+- **根因**：`vector_index` 原先用 **corpus.db 整个文件的 sha256** 当语料指纹。
+  而派生表是**加性的**（poems/lines 一个字节都没改），不该让向量索引作废。
+- **改法**：改为**内容指纹**——`篇数 | 句数 | 汉字总数 | 最大 pid` 的哈希
+  （`vector_index.corpus_fingerprint()`）。语料内容一变就变；加派生索引则不变，
+  而且比读 100 MB 文件快得多。构建脚本 `build_vector_index.py` 同步改用同一函数。
+- **顺带修掉一个更危险的隐患**：指纹**取不到时返回空串**，而 `'' == ''` 会让
+  「取不到指纹」与「旧 manifest 的指纹为空」误配 → 等于**悄悄关掉了这项校验**。
+  现改为：取不到指纹一律判**不可用**并说明原因。
+- **另加 `--dynasty`**：实测「按 pid 取前 N 篇」会先落到宋词（pid 升序时 `ci.宋… < ci.清…`），
+  3000 篇试跑索引里**一首清词都没有** → 受限检索（`allow=清词`）恒为空。
+  本项目目标域是清词，故加此开关，现已启动**清词全量篇级索引**的构建。
+
+- **状态**：✅ 已修。

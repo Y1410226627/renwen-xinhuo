@@ -37,6 +37,26 @@ MAX_SESSIONS = 50            # 最多保留 50 个会话（超出按最近使用
 MAX_TURNS = 20               # 每个会话最多保留 20 轮（超出丢最旧）
 MAX_PIDS_PER_TURN = 20000    # 每轮 pid 上限；超出→截断并标记 truncated: True
 
+# ───────── 结果集合的**语义类型**（2026-10-08 第二轮审查 §22 新增） ─────────
+# 旧版把「上一轮结果集」当成一种东西，实际上两种**可追问性完全不同**：
+#   EXACT_SET             ：由 SQL 硬条件得出的**完整命中集**（如「清代字数>50 的词」共 3000 篇）。
+#                           追问「其中最短的」是在**全集**里找 —— 语义正确。
+#   SEMANTIC_RANKED_SET   ：由向量/FTS 相似度排出来的 **top-k**（如「写秋景的词」展示 5 篇）。
+#                           它不是「全部写秋景的词」，只是**排序最前的 k 篇**；
+#                           追问「其中最短的」只能在这 k 篇里找 —— 必须**如实说明**，
+#                           否则用户会以为「系统查了全库却只给我 5 篇」或反之误以为 5 篇即全部。
+RESULT_KIND_EXACT = 'EXACT_SET'
+RESULT_KIND_SEMANTIC = 'SEMANTIC_RANKED_SET'
+RESULT_KINDS = (RESULT_KIND_EXACT, RESULT_KIND_SEMANTIC)
+
+
+def kind_of_answer(total, shown, hard):
+    """由答案形态反推结果集类型（供上层标注，不必自己判断语义）。
+
+    `hard`=True（有可精确判定的 SQL 条件）且 `total` 已知 → 精确集；否则是语义排序集。
+    """
+    return RESULT_KIND_EXACT if hard else RESULT_KIND_SEMANTIC
+
 # ─────────────────────────── 指代判据（显式词表，可单测） ───────────────────────────
 # 集合指代：问的是「上一轮那**一批**」。
 SET_REF_WORDS = (
@@ -172,24 +192,35 @@ class Session:
 
     # ---- 写 ----
     def add_turn(self, question, spec_desc, result_pids, result_total,
-                 max_pids=MAX_PIDS_PER_TURN):
+                 max_pids=MAX_PIDS_PER_TURN, result_kind=None):
         """追加一轮；返回该轮 dict。
 
         截断纪律：`result_pids` 超过 `max_pids` 时**截断并置 `truncated=True`**
         （调用方据此提示「上一轮结果过多，仅保留前 M 篇参与追问」）——绝不静默。
+
+        `result_kind`：见模块常量 `RESULT_KIND_EXACT / RESULT_KIND_SEMANTIC`。
+        **不传则按「是否截断」以外的信息无法判定，默认 `EXACT_SET`**（向后兼容旧调用方）；
+        但上层若知道这一轮是语义排序的结果，**必须显式传 `SEMANTIC_RANKED_SET`**，
+        否则下一轮追问会被当成「在完整集合里找」。
         """
         pids = _dedup(result_pids)
         truncated = False
         if max_pids and len(pids) > max_pids:
             pids = pids[:max_pids]
             truncated = True
+        if result_kind not in RESULT_KINDS:
+            result_kind = RESULT_KIND_EXACT
+        exhaustive = (result_kind == RESULT_KIND_EXACT) and not truncated
         turn = {'question': question or '', 'spec_desc': spec_desc or '',
                 'result_pids': pids, 'result_total': result_total,
-                'truncated': truncated, 'created_at': time.time()}
+                'truncated': truncated, 'created_at': time.time(),
+                'result_kind': result_kind, 'exhaustive': exhaustive}
         self.turns.append(turn)
         if len(self.turns) > MAX_TURNS:         # 只留最近 MAX_TURNS 轮
             self.turns = self.turns[-MAX_TURNS:]
-        # 「上一轮唯一篇」：只有**恰好一篇且未被截断**时才可作单篇指代的目标
+        # 「上一轮唯一篇」：只有**恰好一篇且未被截断**时才可作单篇指代的目标。
+        # ⚠ 语义排序集即使只有一篇，那也只是「最像的一篇」，仍可作为指代目标
+        #   （用户说「那首」指的就是屏幕上那一首），故不因 result_kind 而禁用。
         self.prev_single = pids[0] if (len(pids) == 1 and not truncated) else None
         self.updated_at = turn['created_at']
         return turn
@@ -232,8 +263,21 @@ def resolve(session, question):
     last = session.turns[-1]
     if kind == 'set':
         pids = list(last.get('result_pids') or [])
-        return {'kind': 'set', 'pids': pids, 'total': last.get('result_total'),
-                'truncated': bool(last.get('truncated')), 'marker': cls.get('marker')}
+        rk = last.get('result_kind') or RESULT_KIND_EXACT
+        out = {'kind': 'set', 'pids': pids, 'total': last.get('result_total'),
+               'truncated': bool(last.get('truncated')), 'marker': cls.get('marker'),
+               'result_kind': rk, 'exhaustive': bool(last.get('exhaustive', True))}
+        if rk == RESULT_KIND_SEMANTIC:
+            # ★ 语义排序集：追问范围只等于「上一轮**展示出来的**那些」，不是全库里所有相关的篇。
+            #   这句话必须由上层说给用户听（GPT §22：「不能都叫上一轮结果集」）。
+            out['scope_note'] = (
+                '上一轮是**语义相关度排序**的结果，并非「满足该主题的全体作品」；'
+                '本轮只在其中 %d 篇（展示出来的那些）里进一步找。'
+                % len(pids))
+        elif last.get('truncated'):
+            out['scope_note'] = ('上一轮命中过多，仅保留前 %d 篇参与追问（共 %s 篇）。'
+                                 % (len(pids), tot_of(last.get('result_total'))))
+        return out
     if kind == 'single':
         pid = getattr(session, 'prev_single', None)
         if pid is None:
@@ -311,11 +355,12 @@ class ContextStore:
             return len(self.sessions)
 
     # ---- 写 ----
-    def add_turn(self, session, question, spec_desc, result_pids, result_total):
+    def add_turn(self, session, question, spec_desc, result_pids, result_total,
+                 result_kind=None):
         if session is None:
             session = self.new()
         turn = session.add_turn(question, spec_desc, result_pids, result_total,
-                                max_pids=self.max_pids)
+                                max_pids=self.max_pids, result_kind=result_kind)
         with self._lock:
             self.sessions[session.sid] = session
             self._evict_locked()

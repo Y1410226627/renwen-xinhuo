@@ -827,7 +827,10 @@ def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
             total=(_tot if isinstance(_tot, int) and not isinstance(_tot, bool) else None),
             shown=shown, agg_result=agg_result)
     except Exception as exc:
-        out['set_check'] = {'ok': None, 'checked': False,
+        # ★ 未做成 ≠ 通过（审查 §24）：显式标 `NOT_CHECKED`，不许让它落在任何「✓」的语义里
+        out['set_check'] = {'ok': None, 'checked': False, 'status': 'NOT_CHECKED',
+                            'agg_status': 'NOT_EXECUTED',
+                            'status_text': '集合校验未执行（未验证）',
                             'reason': '集合校验未执行：%s: %s' % (type(exc).__name__, exc)}
         if isinstance(note, dict) and note.get('error'):
             out['set_check']['reflect'] = note['error']
@@ -855,8 +858,14 @@ def _store_turn(session, q, spec, out, result_pids):
     _tot = out.get('total')
     if not (isinstance(_tot, int) and not isinstance(_tot, bool)):
         _tot = len(store_pids) if store_pids else None
+    # ⚠ 2026-10-08 第二轮审查 §22：`hit_pids` 返回 None **并不表示「0 篇」**，而是
+    #   「本轮是语义相关度排序，不存在可判定的完整命中集」。此时存下去的只能是
+    #   **展示出来的那几篇**，且必须标成 `SEMANTIC_RANKED_SET`——
+    #   否则下一轮追问「其中最短的」会被当成「在全集里找」，而这个「全集」从不存在。
+    import context as CTX
+    _kind = CTX.RESULT_KIND_EXACT if (full is not None) else CTX.RESULT_KIND_SEMANTIC
     return SESSIONS.add_turn(session, q, (spec.describe() if spec is not None else ''),
-                             store_pids, _tot)
+                             store_pids, _tot, result_kind=_kind)
 
 
 def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None,

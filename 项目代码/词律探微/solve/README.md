@@ -1689,3 +1689,47 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 **验收**：`selftest` 235/235 ｜ `regress` 双集**逐字节不变** ｜ `verify_1000` **1000/1000、0 不一致** ｜
 `omission_check` **0 类不一致** ｜ `invariant_check` 1,731,388 项 0 违反 ｜ `queryplan` 自检全过 ｜
 前端六门禁全 0 不符 ｜ `check-types` 0 错误。详见 `DECISIONS.md` D26。
+
+---
+
+## §50 QueryPlan 接管执行（2026-10-08 第二轮架构审查落地）
+
+**一句话**：把「Query Plan 是中间表示候选、旧 QuerySpec 仍是生产主线」改成
+**「Planner → Plan → Validator → Executor → Verifier」真正成为主链**（默认仍走规则路 → 零回归）。
+
+### 模块地图（新增/改动）
+
+| 模块 | 角色 |
+| --- | --- |
+| `queryplan.py` | **IR 唯一真源**：`LEAF_SCHEMA`（26 字段）+ `STEP_OPS` + `RETRIEVE_MODES`；由它生成 Planner 的 Prompt；`check_schema_alignment()` 双向防漂移 |
+| `plan_exec.py` | **执行器**：16 步骤算子 + 3 召回模式 + 6 聚合指标 + `ProvDAG` 溯源，复用 `retrieve/aggregate/pairing` |
+| `planner.py` | 规划器：Prompt 由 schema 生成；无效实体 → `_not_found`（恒假哨兵），**绝不剪枝成全库** |
+| `vector_index.py` | 双层（篇/句）受限检索 + manifest 五项强校验（`INDEX_VERSION=2`）+ `similar()` |
+| `build_vector_index.py` | 建索引 CLI：全篇嵌入、句级真实现、无重复 embed、断点续跑 |
+| `context.py` | `RESULT_KIND_EXACT / SEMANTIC_RANKED_SET`：语义集追问时**明说**范围 |
+| `answer_verify.py` | `set_check` 五态 status + 聚合三态：**未验证 ≠ 已验证** |
+| `tools/build_indexes.py` | 派生索引（题名 FTS 提速 60×；平仄 n-gram 实测否决、默认关） |
+| `tests/nl_paraphrase.jsonl` + `tools/nl_benchmark.py` | 开放理解基准（独立 SQL 真值，基线入 CI） |
+
+### 开关（**默认全部关闭 → 行为逐字不变**）
+
+| 环境变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `LVC_PLANNER` | `rule` | `plan` 时走 Planner→Plan→Executor 主链 |
+| `LVC_VECTOR` | 关 | 开启真向量召回（受限检索 + RRF） |
+| `LVC_RERANK` | 关 | 精排（本机 reranker 多文档区分度不足） |
+| `LVC_PZ_GRAM` | 关 | 平仄 n-gram 倒排（实测更慢，默认关） |
+
+### 快速自检
+
+```bash
+PY="D:/conda_envs/langchain-env/python.exe"
+"$PY" solve/queryplan.py            # schema 对齐 + 布尔树 6 用例 + 往返 5 条
+"$PY" solve/plan_exec.py            # 执行器 10 项（逐步 vs 独立复算）
+"$PY" solve/planner.py --selftest   # 契约 / 无效实体 / NOT 语义 / 优雅降级
+"$PY" solve/answer_verify.py        # 五态 status
+"$PY" tools/nl_benchmark.py         # 开放理解基准（对比基线，只许变好）
+"$PY" tools/build_indexes.py --check
+```
+
+详见 `DECISIONS.md` D27（含 20 项开放理解缺口的根因与去向）。

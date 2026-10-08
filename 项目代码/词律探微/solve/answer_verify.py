@@ -22,6 +22,32 @@
 
 import retrieve as RT
 
+# ⚠ 2026-10-08 第二轮审查 §23：旧版 `set_check` 只有 `ok: true/false`，
+#   而「没有硬条件 → 未做集合身份校验」时也是 `ok=True` —— 前端只看到 ✓ 就会被读成
+#   「系统已经**证明**答案正确」，实际上**什么都没证明**。现改为**五态**，让状态自解释：
+#
+#   VERIFIED_EXACT           已用 SQL 独立复算，**完整集合**逐篇比对通过（最强结论）
+#   VERIFIED_DERIVED         已独立复算，但结果自称是 top-k 子集（派生集合，通过了「无多出」的比对）
+#   SEMANTIC_NOT_EXHAUSTIVE  语义/向量排序结果：**不存在**可判定的完整命中集，未做（也无法做）集合校验
+#   NOT_CHECKED              本可以做却没做成（异常/缺输入）—— **不许**显示成"已验证"
+#   FAILED                   校验执行了且不通过（多出 / 该完整却漏了 / 聚合复算不符）
+#
+#   另附 `agg_status`（PASS / FAIL / NOT_EXECUTED），同样**不许**把「没算」当成「算过了且对」。
+VERIFY_STATUS = ('VERIFIED_EXACT', 'VERIFIED_DERIVED', 'SEMANTIC_NOT_EXHAUSTIVE',
+                 'NOT_CHECKED', 'FAILED')
+AGG_STATUS = ('PASS', 'FAIL', 'NOT_EXECUTED')
+
+
+def status_text(st):
+    """状态 → 面向用户的中文说明（前端直接显示，别自己再意译）。"""
+    return {
+        'VERIFIED_EXACT': '已用独立 SQL 逐篇复算，结果与条件完全相符（完整集合）',
+        'VERIFIED_DERIVED': '已用独立 SQL 复算，结果中的每一篇都满足条件（本次为 top-k 展示，非全集）',
+        'SEMANTIC_NOT_EXHAUSTIVE': '本条为语义相关度排序，不存在可判定的「完整命中集」，未做集合身份校验',
+        'NOT_CHECKED': '集合身份校验未能执行（未验证）',
+        'FAILED': '集合身份校验未通过（结果与条件不符）',
+    }.get(st, st)
+
 try:                                     # 聚合复算是「可选」项：没有 aggregate 也能跑
     import aggregate as AGG
 except Exception:                        # pragma: no cover - 环境缺依赖时静默降级
@@ -103,17 +129,26 @@ def verify_result(conn, spec, result_pids, expect_complete=False, sample=8):
 def _agg_recompute(conn, spec, agg_result, tol=0.11):
     """**聚合复算**（可选）：用独立 SQL 把分组统计重算一遍，与结果里的 `agg.rows` 比对。
 
-    返回 `(ok, problems)`；无法复算时返回 `(True, [])`（宁可不判，也不误判）。
+    返回 `(ok, problems, executed)` —— **三态**。
+
+    ⚠ 2026-10-08 第二轮审查 §24：旧实现在**复算过程抛异常时返回 `(True, […])`**，
+      等于「没算出来也算通过」—— 对「保证复杂问答可靠」这个目标是危险的 fail-open。
+      现改为：
+        · 复算成功 → `(True/False, problems, True)`；
+        · **没能复算（异常 / 缺少输入）→ `(True, [说明], False)`，`executed=False`**，
+          由上层把 `status` 标成 `NOT_EXECUTED`，**绝不允许**未算就说 PASS。
+      「宁可不判」仍然成立，**但必须在状态里写明「没判」**。
+
     只比对**确定性字段**：组名 / 篇数 / 篇均 / 加权；浮点给 0.11 容差（与 `test_api` 同口径）。
     """
     if not agg_result or AGG is None or spec is None:
-        return True, []
+        return True, ['（聚合复算未执行：缺少 agg 结果或 aggregate 模块）'], False
     ag = getattr(spec, 'agg', None)
     if not ag:
-        return True, []
+        return True, ['（聚合复算未执行：本条不是聚合题）'], False
     rows_have = agg_result.get('rows')
     if not rows_have:
-        return True, []
+        return True, ['（聚合复算未执行：结果里没有分组行）'], False
     try:
         gb, mt, cat = ag.get('group_by'), ag.get('metric'), ag.get('cat')
         vals = ag.get('values')
@@ -123,8 +158,8 @@ def _agg_recompute(conn, spec, agg_result, tol=0.11):
         else:
             rows2 = AGG.top_groups(conn, gb, 5, mt, cat, where, args,
                                    ag.get('extreme') or 'max')
-    except Exception as exc:                                 # 复算路径不可用 → 不判
-        return True, ['（聚合复算未执行：%s: %s）' % (type(exc).__name__, exc)]
+    except Exception as exc:                                 # noqa: BLE001
+        return True, ['（聚合复算未执行：%s: %s）' % (type(exc).__name__, exc)], False
     by2 = {str(r.get('group')): r for r in rows2}
     problems = []
     for r in rows_have:
@@ -173,18 +208,27 @@ def build_set_check(conn, spec, result_pids, total=None, shown=None,
     if total is not None and shown is not None:
         truncated = total > shown
 
-    S = hit_pids(conn, spec)
-    checked = S is not None
+    # ---- 集合身份 ----
     notes = []
-    if not checked:
+    S = hit_pids(conn, spec)
+    if S is None:
+        # 无硬条件 = 语义排序：不是「没查」，是「这类查询本来就没有可判定的全集」
+        checked = False
+        semantic = True
         ok = True
-        problems = []
-        extra, missing = [], []
+        problems, extra, missing = [], [], []
         hit_total = None
         notes.append('未执行集合身份校验：本条问句没有可执行的硬条件，检索为语义相关度排序，'
-                     '「命中集」不可判定。')
+                     '「命中集」本身不可判定。')
     else:
-        ok, problems = verify_result(conn, spec, pids, expect_complete=expect_complete, sample=sample)
+        checked, semantic = True, False
+        try:
+            ok, problems = verify_result(conn, spec, pids, expect_complete=expect_complete,
+                                         sample=sample)
+        except Exception as exc:                             # noqa: BLE001
+            # ★ 不再 fail-open（审查 §24）：校验自己崩了 → NOT_CHECKED，**不许**当成通过
+            ok, problems = True, ['（集合身份校验未能执行：%s: %s）' % (type(exc).__name__, exc)]
+            checked = False
         Sset = set(S)
         Rset = set(pids)
         extra = [p for p in pids if p not in Sset]
@@ -205,19 +249,38 @@ def build_set_check(conn, spec, result_pids, total=None, shown=None,
             notes.append('命中总数不一致：引擎自报 %s 篇，独立复算 %s 篇（两条理解路径的结果集不同，'
                          '多为理解层对条件的取舍差异）' % (total, hit_total))
 
-    agg_ok, agg_pb = _agg_recompute(conn, spec, agg_result)
-    if agg_pb:
+    # ---- 状态定级（三态而非布尔）----
+    if not checked:
+        status = 'SEMANTIC_NOT_EXHAUSTIVE' if semantic else 'NOT_CHECKED'
+    elif not ok:
+        status = 'FAILED'
+    else:
+        status = 'VERIFIED_EXACT' if expect_complete else 'VERIFIED_DERIVED'
+
+    # ---- 聚合复算（三态）----
+    agg_ok, agg_pb, agg_executed = _agg_recompute(conn, spec, agg_result)
+    if agg_pb and not agg_ok:
+        ok = False
+        problems = list(problems) + list(agg_pb)
+    if agg_result is None:
+        agg_status = 'NOT_EXECUTED'          # 压根不是聚合题
+    elif not agg_executed:
+        agg_status = 'NOT_EXECUTED'
+        status = status if status == 'FAILED' else status   # 未执行的聚合**不降级**整体状态，
+        # 但要单独如实标出（见下 agg_status），避免把「没算」混进「已验证」。
+    else:
+        agg_status = 'PASS' if agg_ok else 'FAIL'
         if not agg_ok:
             ok = False
-        problems = list(problems) + list(agg_pb)
+            status = 'FAILED'
 
-    reason = None
-    if not checked:
-        reason = '无硬条件：检索为语义相关度排序，命中集不可判定，未做集合身份校验'
     return {
         'ok': bool(ok),
+        'status': status,
+        'status_text': status_text(status),
         'checked': bool(checked),
-        'reason': reason,
+        'agg_status': agg_status,
+        'reason': status_text(status),
         'hit_total': hit_total,
         'result_total': total,
         'shown': shown,
@@ -227,7 +290,8 @@ def build_set_check(conn, spec, result_pids, total=None, shown=None,
         'missing': missing[:sample], 'missing_n': len(missing),
         'problems': problems,
         'notes': notes,
-        'agg': (None if agg_ok or not agg_pb else {'ok': False, 'problems': list(agg_pb)}),
+        'agg': (None if agg_status == 'NOT_EXECUTED'
+                else {'ok': bool(agg_ok), 'problems': list(agg_pb)}),
     }
 
 
@@ -255,19 +319,28 @@ def _selftest():
     print('④ 无硬条件 ->', verify_result(conn, spec2, ['x']))
     # ⑤ 结构化
     sc = build_set_check(conn, spec, S[:5], total=len(S), shown=5)
-    print('⑤ set_check =', {k: sc[k] for k in ('ok', 'checked', 'hit_total', 'result_total',
+    print('⑤ set_check =', {k: sc[k] for k in ('ok', 'status', 'agg_status', 'checked',
+                                               'hit_total', 'result_total',
                                                'shown', 'truncated', 'extra_n', 'missing_n',
                                                'complete_checked')})
+    print('   status_text =', sc['status_text'])
     print('   problems =', sc['problems'])
     print('   notes    =', sc['notes'])
-    # ⑥ 自称完整 + 多出 → 必须判失败
+    # ⑥ 自称完整 + 多出 → 必须判失败（status=FAILED）
     sc2 = build_set_check(conn, spec, list(S[:3]) + ['GHOST'], total=3, shown=4)
-    print('⑥ 自称完整但多出 → ok=%s problems=%s' % (sc2['ok'], sc2['problems']))
-    # ⑦ 自称完整且完全一致 → 通过
+    print('⑥ 自称完整但多出 → ok=%s status=%s problems=%s' % (sc2['ok'], sc2['status'], sc2['problems']))
+    # ⑦ 自称完整且完全一致 → VERIFIED_EXACT
     sc3 = build_set_check(conn, spec, S, total=len(S), shown=len(S))
-    print('⑦ 完整一致 → ok=%s complete_checked=%s truncated=%s'
-          % (sc3['ok'], sc3['complete_checked'], sc3['truncated']))
-    return 0
+    print('⑦ 完整一致 → ok=%s status=%s complete_checked=%s truncated=%s'
+          % (sc3['ok'], sc3['status'], sc3['complete_checked'], sc3['truncated']))
+    # ⑧ **关键**：语义题必须显示 SEMANTIC_NOT_EXHAUSTIVE（不得显示成"已验证"）
+    spec_sem = RT.parse_query(conn, '写离愁的词')
+    sc4 = build_set_check(conn, spec_sem, ['x'], total=None, shown=1)
+    ok8 = (sc4['status'] == 'SEMANTIC_NOT_EXHAUSTIVE' and sc4['checked'] is False)
+    print('⑧ 语义题 → ok=%s checked=%s status=%s' % (sc4['ok'], sc4['checked'], sc4['status']))
+    print('   %s 「未验证」与「已验证」已区分（前端不得把 %s 显示成 ✓）'
+          % ('✓' if ok8 else '✗', sc4['status']))
+    return 0 if ok8 else 1
 
 
 if __name__ == '__main__':

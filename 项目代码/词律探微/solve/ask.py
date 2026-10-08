@@ -1176,6 +1176,114 @@ def _understanding_status(spec):
     return 'OK', None
 
 
+def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=None,
+                    session=None, kind=None):
+    """**「规划式理解」主链**（第二轮审查 P0-#1）：Planner → Plan → Validator → Executor。
+
+    为什么必须单独走一条：旧主链是 `理解 → QuerySpec → 单条 SQL → 排序`，
+    **结构上无法表达多步**（先筛 → 再分组 → 再计数 → 再取最大 → 再取篇内第 N 句）。
+    即便 `qlm.plan_mode()=='planner'` 让模型产出了 Plan，`from_plan` 回落到 spec 时
+    那些 steps 也会被丢掉——于是「Planner 已实现但没真正接管执行」（审查 §5）。
+
+    本函数让 Plan **真正执行**：`plan_exec.execute()` 逐步产出帧并留下溯源 DAG。
+
+    ⚠ 启用条件（**默认完全不启用**）：环境变量 `LVC_PLANNER=plan`。
+      · 默认（`rule` / `llm`）时，`answer()` **根本不会调用本函数** → 1000 题零回归；
+      · 本函数内部任何环节失败（模型不可用 / Plan 不合法 / 执行器报错）都返回 **None**，
+        由 `answer()` **回落到既有成熟链路**——宁可不用，也不给半成品。
+    """
+    try:
+        import queryplan as QP
+        import planner as PL
+        import plan_exec as PX
+    except Exception:                                            # noqa: BLE001
+        return None
+    if not (llm and llm.available()):
+        return None
+    pl = PL.plan(conn, llm, question, context=context)
+    if not isinstance(pl, dict):
+        return None
+    _ok, _pb = QP.validate(pl, conn)
+    if not _ok:
+        return None
+    # 上一轮结果集：优先服务端会话，其次前端 ctx_pids
+    if (pl.get('scope') or {}).get('base') != 'prev_result':
+        _p = list(ctx_pids or [])
+        if not _p and session is not None:
+            try:
+                import context as CTX
+                _r = CTX.resolve(session, question)
+                if _r.get('kind') == 'set':
+                    _p = list(_r.get('pids') or [])
+            except Exception:                                    # noqa: BLE001
+                _p = []
+        if _p:
+            pl['scope'] = {'base': 'prev_result', 'ctx': _p}
+    try:
+        res = PX.execute(conn, pl, session=session, question=question, topk=topk)
+    except Exception:                                            # noqa: BLE001
+        return None
+    if not res or res.get('frame') is None:
+        return None
+    f = res['frame']
+    _probs = list(res.get('problems') or [])
+    _dropped = list(pl.get('_dropped') or [])
+    _nf = list(pl.get('_not_found') or [])
+    _notes = ['以「查询计划」方式作答（Planner → Plan → Executor，共 %d 步）'
+              % len(res['dag'].to_list())]
+    for x in _dropped:
+        _notes.append('计划里有条件未能落地：%s' % x)
+    for x in _nf:
+        _notes.append('计划里引用了语料中查无的实体：%s' % x)
+
+    # ---- 按帧形态产出答案（**复用**既有证据块 `items_of` 与护栏 `guard`，不另写一套口径）----
+    try:
+        blocks = retrieve.items_of(conn, f.pids[:topk]) if f.kind in ('set', 'single') else []
+    except Exception:                                            # noqa: BLE001
+        blocks = []
+    if f.kind == 'scalar':
+        text = '共 %s 篇。' % f.value
+    elif f.kind == 'groups' and f.rows:
+        _r = f.rows[0]
+        text = '按%s分组，%s为【%s】（%s）。' % (
+            '作者', '最多' if str((pl.get('steps') or [{}])[-1].get('dir') or 'desc') == 'desc' else '最少',
+            _r.get('key'), _r.get('value', _r.get('n')))
+    elif f.kind == 'rows' and f.rows:
+        _r = f.rows[0]
+        text = ('第%s句%s：【%s】' % (_r.get('sent'), '第%s字' % _r.get('pos')
+                                   if _r.get('unit') == 'char' else '整句', _r.get('value'))
+                if _r.get('unit') else json.dumps(_r, ensure_ascii=False))
+    elif blocks:
+        _b0 = blocks[0]
+        text = ('满足条件共 %d 篇，最前者为%s《%s》。'
+                % (len(f.pids), (_b0.get('author') or ''), (_b0.get('title') or _b0.get('cipai') or '')))
+    elif f.kind in ('set', 'single') and not f.pids:
+        text = ('现有语料未见支持：该条件在库中没有命中的作品。'
+                if not _nf else
+                '现有语料未见支持：条件中引用的%s在语料里查无。' % '、'.join(_nf))
+    else:
+        return None
+    try:
+        _g_ok, _g_pb = guard.verify(text, blocks, boundary_kind=kind)
+    except Exception:                                            # noqa: BLE001
+        _g_ok, _g_pb = True, ['（护栏未执行：规划路渲染异常）']
+    return {
+        'question': question, 'kind': kind or '规划式检索',
+        'spec': QP.render(pl), 'blocks': blocks,
+        'answer': text + ('\n【查询理解】' + '；'.join(_notes) if _notes else ''),
+        'verify': (bool(_g_ok and not _probs), list(_g_pb) + _probs),
+        'verify_kind': 'guard' if blocks else 'numbers',
+        'refused': False, 'problems': list(_g_pb) + _probs,
+        'total': (f.value if f.kind == 'scalar' else len(f.pids)),
+        'pid': (f.pids[0] if len(f.pids) == 1 else None),
+        # ⭐ 新架构产物：**溯源 DAG + Plan**，供前端「理解详情」展示与人工复核
+        'plan': pl, 'provenance': res['dag'].to_list(),
+        'provenance_text': res['dag'].render(f.prov),
+        'notes': _notes, 'dropped': _dropped, 'not_found': _nf,
+        'plan_seconds': res.get('seconds'),
+    }
+
+
 def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', context=None,
                ctx_pids=None):
     """问句 → `(QuerySpec, note)`（**对外入口**；在 `_understand_impl` 之上加「附加层」）。
@@ -1929,6 +2037,14 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     # ⚠ 2026-10-04 修（代码审查 P2-10）：**topk 未校验**。实测 `topk=0` 会落进
     #   「没有可引用的篇目」分支，答案谎报「未召回任何词作」——而同一问句实际命中 568 篇。
     #   负值更会被当成"全部"（563 篇）。这里统一夹到 [1, 200]。
+    # ⭐ 2026-10-08 第二轮审查 P0-#1：**让 Planner 真正接管主链**。
+    #   仅当 `LVC_PLANNER=plan` 时才进入（默认 `rule`/`llm` **完全不调用**，零回归）；
+    #   规划路任何环节失败 → 返回 None → **回落到下面这条成熟链路**（不会给出半成品）。
+    if os.environ.get('LVC_PLANNER', 'rule').strip().lower() == 'plan':
+        _pr = _answer_by_plan(conn, question, topk=topk, llm=llm, context=context,
+                              ctx_pids=ctx_pids, kind=kind)
+        if _pr is not None:
+            return _pr
     spec, pnote = understand(conn, question, llm=llm, llm_parse=llm_parse,
                              llm_policy=llm_policy, context=context, ctx_pids=ctx_pids)
     # ⚠ 2026-10-08 加（实测驱动）：**没有上文却用了强指代词**时如实提示。
