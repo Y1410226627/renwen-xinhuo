@@ -108,6 +108,15 @@ def _line_note(spec, L):
         return '（此句句脚为%s，合问句条件）' % ((L.get('pz') or '')[-1:] or '')
     if '声律模式' in rs:
         return '（此句合声律模式 %s）' % (spec.pz or '')
+    # ⚠ 2026-10-08 加：高级句级算子（`pz_exact` / `tail_each` / `line_q`）的命中句说明。
+    #   证据层此前已能正确算出命中句（见 retrieve.line_satisfies），但这里没有对应分支
+    #   → 命中句「无说明」，用户看不出「为什么展示这一句」。
+    if '平仄串全等' in rs:
+        return '（此句整句平仄为 %s，合问句条件）' % (L.get('pz') or spec.pz_exact or '')
+    if '篇内交集·句脚字' in rs:
+        return '（此句句脚为 %s，合篇内交集条件）' % (L.get('tail') or '')
+    if '句级算子·满足句' in rs:
+        return '（此句合句级条件）'
     return ''
 
 
@@ -487,6 +496,121 @@ def _absorb_leftovers(base, model, notes):
     return False
 
 
+def _lq_label(lq):
+    """句级算子的人类可读标签（用于吸收时的如实披露）。"""
+    k, v = (lq or {}).get('pred') or (None, None)
+    _kl = {'tail': '句脚字', 'tail_any': '句脚字', 'tail_pz': '句脚平仄', 'pz': '声律串含',
+           'pz_exact': '整句平仄全等', 'len': '句长', 'parity': '句位'}
+    if k == 'len' and isinstance(v, (list, tuple)) and len(v) == 2:
+        ptxt = '%s=%s~%s' % (_kl.get(k, k), v[0], v[1])
+    elif k == 'parity':
+        ptxt = '句位=%s' % ('奇数' if v == 0 else '偶数')
+    else:
+        vt = '／'.join(v) if isinstance(v, (list, tuple)) else v
+        ptxt = '%s=%s' % (_kl.get(k, k), vt)
+    op = (lq or {}).get('op')
+    if op == '∃':
+        q = '至少有一句'
+    elif op == '∀':
+        q = '每一句都'
+    elif op == '∄':
+        q = '没有任何一句'
+    elif op == '≥k':
+        q = '至少 %d 句' % lq.get('k', 0)
+    elif op == '=k':
+        q = '正好 %d 句' % lq.get('k', 0)
+    elif op == '占比≥p':
+        q = '满足句占比≥%.0f%%' % (100 * lq.get('ratio', 0))
+    else:
+        q = '满足句数 %s~%s' % (lq.get('ka', 0), lq.get('kb', 0))
+    return '%s；%s' % (q, ptxt)
+
+
+def _drop_consumed(base, consumed):
+    """把「已被回填成条件」的词面残片从 keywords/unparsed 里清掉（避免重复、避免误导披露）。"""
+    frags = [str(c) for c in (consumed or []) if c and len(str(c)) >= 2]
+    if not frags:
+        return
+
+    def _hit(s):
+        s = str(s)
+        return any((f in s or s in f) for f in frags)
+    base.keywords = [k for k in (base.keywords or []) if not _hit(k)]
+    base.unparsed = [u for u in (base.unparsed or []) if not _hit(u)]
+
+
+def _absorb_model_extras(base, model, question, notes):
+    """在 `_absorb_leftovers` **之外**，额外吸收「**规则路没有、而模型给出了**」的条件（纯加法）。
+
+    为什么需要（2026-10-08，外部审查 · schema 缺口）：规则路 `parse_query` 表达不了
+    题名（title_any）／句级算子（line_q）／平仄全等（pz_exact）／篇内交集（tail_each）／
+    句位奇偶（parity）／走向一致性（consist）／语义检索词（semantic）；`qlm.SYSTEM` 本轮
+    已补齐这些字段，于是模型**能给出**它们——而旧版 `understand` 只在「规则路留了词面残片」
+    时吸收与残片相关的条件，其余一律忽略 → **模型听懂了也被静默丢弃**（如「蝶恋花·四月一日
+    感粤事」的题名、「至少两句句脚为愁」的句级量词）。
+
+    硬约束（保护既有 1000 题行为）：
+      · **只在规则路没有该条件时吸收**（同类条件已有则**不覆盖**）；
+      · 每条吸收都追加 notes 如实披露；
+      · 吸收后调 `retrieve._finalize(base)` 让单值字段重新派生。
+    """
+    got = []
+    # 1) 题名（词题）——规则路只有「词牌·题名」一种入口，模型能直接给题名
+    if getattr(model, 'title_any', None) and not base.title_any:
+        base.title_any = list(model.title_any)
+        got.append('规则路未表达题名，已采纳大模型给出的题名（%s）' % '／'.join(base.title_any))
+    # 2) 平仄串全等（与 pz 子串互斥；line_q 已按全等谓词接管时不重复）
+    if getattr(model, 'pz_exact', None) and not base.pz_exact and not base.line_q:
+        base.pz_exact = model.pz_exact
+        got.append('规则路未表达平仄串全等，已采纳大模型给出的平仄串全等（%s）' % model.pz_exact)
+    # 3) 篇内交集（每一个取值都必须各有一句）
+    if getattr(model, 'tail_each', None) and not base.tail_each:
+        base.tail_each = list(model.tail_each)
+        got.append('规则路未表达篇内交集，已采纳大模型给出的篇内交集（%s）'
+                   % '／'.join(base.tail_each))
+    # 4) 句级算子（∄/∀/∃/≥k/=k/占比/条数）
+    if getattr(model, 'line_q', None) and not base.line_q:
+        base.line_q = dict(model.line_q)
+        got.append('规则路未表达句级算子，已采纳大模型给出的句级算子（%s）'
+                   % _lq_label(base.line_q))
+    # 5) 句位奇偶：口径同 retrieve（0=奇数位）；检索层只经 line_q 谓词执行，故同时落一条 ∃ 谓词
+    if getattr(model, 'parity', None) is not None and base.parity is None:
+        base.parity = model.parity
+        if not base.line_q:
+            base.line_q = {'op': '∃', 'pred': ('parity', model.parity)}
+        got.append('规则路未表达句位奇偶，已采纳大模型给出的句位奇偶（%s）'
+                   % ('奇数句位' if model.parity == 0 else '偶数句位'))
+    # 6) 走向一致性（声情标注为 X 但实测前后段相反）——与规则路口径一致地同时标注 scene
+    if getattr(model, 'consist', None) and not getattr(base, 'consist', None):
+        base.consist = model.consist
+        if not base.scene:
+            base.scene = model.consist
+        got.append('规则路未表达走向一致性，已采纳大模型给出的走向一致性（%s）' % model.consist)
+    # 7) 语义检索词（**只作全文召回扩展，不进 SQL**；规则路恒为空）
+    if getattr(model, 'semantic', None) and not (getattr(base, 'semantic', None) or []):
+        base.semantic = list(model.semantic)
+        got.append('规则路未表达语义检索词，已采纳大模型给出的语义检索词（%s）'
+                   % '／'.join(base.semantic))
+
+    # 8) 「口语算子回填」：规则路与模型路**都没给** line_q 时，尽力从问句回填（见 qlm.recover_line_ops）。
+    #    典型：模型把算子片段如实塞进 unparsed、却没填 line_ops（如「至少两句」「每一句…正好是…」）。
+    if not base.line_q and not getattr(model, 'line_q', None):
+        rec = qlm.recover_line_ops(question)
+        if rec and rec.get('line_q'):
+            base.line_q = rec['line_q']
+            if rec.get('pz_exact') and not base.pz_exact:
+                base.pz_exact = rec['pz_exact']
+            if rec.get('tail_each') and not base.tail_each:
+                base.tail_each = list(rec['tail_each'])
+            _drop_consumed(base, rec.get('consumed') or [])
+            got.append('规则路未表达句级算子，已由问句口语回填（%s）' % _lq_label(base.line_q))
+
+    if got:
+        retrieve._finalize(base)
+        notes.extend(got)
+    return bool(got)
+
+
 def _clean_extreme_unparsed(spec):
     """「最高／最低」这类极值词若还留在 unparsed 里，披露文案会写成「未被理解成条件，
     已忽略」——而它其实**已经**被用作排序条件了：这句话本身就不对。补回排序后一并清掉。"""
@@ -497,8 +621,8 @@ def _clean_extreme_unparsed(spec):
                      if not any(str(x) == w or str(x).startswith(w + '（已转为') for w in _ew)]
 
 
-def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', context=None):
-    """问句 → QuerySpec。
+def _understand_impl(conn, question, llm=None, llm_parse=False, llm_policy='always', context=None):
+    """问句 → QuerySpec（**内部实现**；对外入口是下面的 `understand` 包装器）。
 
     `llm_parse=True` 且模型可用时走**大模型理解路**（`qlm`）：模型只把话听明白，
     字段逐个经引擎校验（落不到库上的直接丢弃并记录）；失败则回落规则解析。
@@ -635,6 +759,11 @@ def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', c
         else:
             notes.append('规则解析已听全整句条件，大模型多给/不同的条件一律忽略（执行以规则解析为准）')
             rule.source = '规则解析（整句已完整解析，大模型仅作听写核对）'
+        # ⭐ **模型补充吸收（加法）**：即便规则路「听全了」，只要它在**新字段**（题名/句级算子/
+        #    平仄全等/篇内交集/句位奇偶/走向一致性/语义检索词）上**没有**该条件、而模型给出了，
+        #    就补进来执行——旧版一律静默丢弃（模型听懂了也不算）。规则路已有的同类条件**不覆盖**。
+        if _absorb_model_extras(rule, spec, question, notes):
+            rule.source = '规则解析（整句已完整解析；并补齐了规则路未表达的字段）'
         _clean_extreme_unparsed(rule)
         return rule, {'source': rule.source, 'dropped': q['dropped'],
                       'notes': notes, 'alt': spec}
@@ -650,7 +779,14 @@ def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', c
                          % (spec.order_label, '最高' if spec.extreme == 'max' else '最低'))
         if context and _looks_elliptic(question):
             _copy_ctx_attested(rule, spec, context, notes)
-        if _absorb_leftovers(rule, spec, notes):
+        _abs_left = _absorb_leftovers(rule, spec, notes)
+        # ⭐ **模型补充吸收（加法）**：规则路留了词面残片时，除了吸收与残片相关的条件，
+        #    再把模型在**新字段**上给出、而规则路没有的条件补进来（题名/句级算子/平仄全等/
+        #    篇内交集/句位奇偶/走向一致性/语义检索词），并做「口语算子回填」（见函数注释）。
+        _abs_extra = _absorb_model_extras(rule, spec, question, notes)
+        if _abs_extra:
+            rule.source = '规则解析（大模型补齐了规则路未表达的字段）'
+        elif _abs_left:
             rule.source = '规则解析（大模型补消化了词面残片）'
         else:
             rule.source = '规则解析（模型多出的条件与问句残片无关）'
@@ -691,6 +827,86 @@ def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', c
     retrieve._finalize(spec)
     return spec, {'source': spec.source, 'dropped': q['dropped'],
                   'notes': notes, 'alt': rule}
+
+
+def _understanding_status(spec):
+    """给上层一个**可查询的状态标记**，区分「有明确未理解的部分」与「本来就是自由词面查询」。
+
+    返回 `(status, note_text_or_None)`：
+      · `'UNDERSTANDING_INCOMPLETE'`：`spec.unparsed` 非空**且没有形成任何硬条件**
+        （也没有 agg/pair/order 这类意图）→ 上层**不应**拿「语义相关度前几篇」冒充答案，
+        而应如实告知「未能转成可执行条件」；
+      · `'KEYWORD_FREEFORM'`：本来就是自由词面/语义查询（`spec.keywords` 非空、`unparsed` 为空、
+        无硬条件）→ 正常的语义检索；
+      · `'OK'`：其余（有硬条件，或空问句）。
+
+    ★ 为什么做成**标记**而不是给 `QuerySpec` 加字段：`QuerySpec` 是别人的文件（本任务不改），
+      且 `ask.answer` 的 `total is None` 分支**属另一条战线**——本函数只**提供可检测的标记**，
+      由调用者（如 answer 的语义排序分支）决定怎么用。
+    """
+    _has_hard = retrieve.has_hard(spec)
+    _intent = bool(spec.agg or getattr(spec, 'pair', None) or getattr(spec, 'order_by', None))
+    _unp = list(getattr(spec, 'unparsed', None) or [])
+    _kws = list(getattr(spec, 'keywords', None) or [])
+    if not _has_hard and not _intent and _unp:
+        return ('UNDERSTANDING_INCOMPLETE',
+                'UNDERSTANDING_INCOMPLETE：问句有未能转成可执行条件的部分（%s），'
+                '且没有形成任何硬条件——不要以「语义相关度前几篇」冒充答案'
+                % '；'.join(_clean_frag(u) for u in _unp))
+    if not _has_hard and not _intent and _kws and not _unp:
+        return 'KEYWORD_FREEFORM', None
+    return 'OK', None
+
+
+def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', context=None,
+               ctx_pids=None):
+    """问句 → `(QuerySpec, note)`（**对外入口**；在 `_understand_impl` 之上加「附加层」）。
+
+    `ctx_pids`（可选，2026-10-08 新增）：**上一轮命中的 pid 集合**。多轮指代（「那里面哪个最短」）
+    的正确做法不是让模型猜「那里面」指什么，而是把上一轮的真实结果集**作为硬条件**带进来 ——
+    落到 `spec.ctx_pids` 后由 `retrieve._sql()` 编译成 `p.pid IN (…)`，范围即被锁定。
+    规则路永远不会产出该字段，故对本项目 1000 题（不开大模型、不带多轮）**零影响**。
+
+    附加层（纯加法，不改判定与执行）：
+      · `note['understanding_status']`：见 `_understanding_status`（'OK' /
+        'UNDERSTANDING_INCOMPLETE' / 'KEYWORD_FREEFORM'）——**调用者**据此区分
+        「未理解」与「自由词面查询」；
+      · 仅当**走过大模型理解路**（`llm_parse`）且状态为未完成时，把带
+        `UNDERSTANDING_INCOMPLETE` 前缀的说明**追加进 note['notes']**（规则路答案文本保持逐字不变，
+        以免影响 1000 题与既有门禁的文字口径）；
+      · 附上可回放的 AST（`note['ast']`）与两路差异（`note['ast_rule']`/`note['ast_diff']`），
+        纯调试用、失败静默（不影响理解结果）。
+    """
+    spec, note = _understand_impl(conn, question, llm=llm, llm_parse=llm_parse,
+                                  llm_policy=llm_policy, context=context)
+    # ⭐ 多轮「结果集」作为硬条件（2026-10-08）：把上一轮命中的 pid 集合锁进本轮范围。
+    #   必须在 `_understanding_status()` **之前**设置——否则 `has_hard()` 看不到它，
+    #   会把「那里面…」误判成「没形成任何条件」（UNDERSTANDING_INCOMPLETE）。
+    if ctx_pids:
+        _cp = []
+        for _p in ctx_pids:
+            _s = str(_p).strip()
+            if _s and _s not in _cp:
+                _cp.append(_s)
+        if _cp:
+            spec.ctx_pids = _cp
+            retrieve._finalize(spec)
+            note['notes'] = list(note.get('notes') or []) + [
+                '范围锁定为上一轮结果集（%d 篇）' % len(_cp)]
+    status, msg = _understanding_status(spec)
+    note['understanding_status'] = status
+    if llm_parse and msg:
+        note['notes'] = list(note.get('notes') or []) + [msg]
+    try:                                    # 调试层：AST 与「规则路 vs 模型路」差异（可回放）
+        import queryast as _qa
+        note.setdefault('ast', _qa.to_ast(spec))
+        _alt = note.get('alt')
+        if _alt is not None:
+            note['ast_rule'] = _qa.to_ast(_alt)
+            note['ast_diff'] = _qa.diff_ast(note['ast_rule'], note['ast'], '规则路', '模型路')
+    except Exception:
+        pass
+    return spec, note
 
 
 def _parse_head(spec, note):
@@ -1312,7 +1528,7 @@ def _answer_pair(conn, question, spec, pnote, kind='数值型', llm=None, narrat
 
 def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=False,
            argument=False, llm_parse=False, llm_policy='always', on_delta=None,
-           on_engine=None, context=None):
+           on_engine=None, context=None, ctx_pids=None):
     """执行一次完整问答，返回 dict（回答文本、证据块、护栏结论、问句类型、是否拒答）。
 
     `llm_parse=True` 时先让大模型理解问句（条件经引擎校验），否则用规则解析。
@@ -1396,7 +1612,18 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #   「没有可引用的篇目」分支，答案谎报「未召回任何词作」——而同一问句实际命中 568 篇。
     #   负值更会被当成"全部"（563 篇）。这里统一夹到 [1, 200]。
     spec, pnote = understand(conn, question, llm=llm, llm_parse=llm_parse,
-                             llm_policy=llm_policy, context=context)
+                             llm_policy=llm_policy, context=context, ctx_pids=ctx_pids)
+    # ⚠ 2026-10-08 加（实测驱动）：**没有上文却用了强指代词**时如实提示。
+    #   实测：「那里面哪一首最短？」在不带 ctx_pids 时会把「那里面」当词面去全文检索，
+    #   于是端上来元曲《西华山陈抟高卧》—— 用户以为系统听懂了「那里面」，其实在乱搜。
+    #   这里只**加一句提示**（不改检索、不改词面），让用户知道该补什么。
+    if not ctx_pids:
+        _REF = ('那里面', '这其中', '这些里面', '那些里', '上面的', '它们', '其中')
+        _hit_ref = [w for w in _REF if w in (question or '')]
+        if _hit_ref:
+            pnote['notes'] = list(pnote.get('notes') or []) + [
+                '本轮没有上文，「%s」无法确定所指——请把范围写进问题里，或先问一句再追问'
+                % _hit_ref[0]]
     # ⭐ **题名条件的「存在性」统一收口**（2026-10-06，主人实测「题名=忆梦中最长的→0 篇」）：
     #   `title_any` 的来源有规则路（「词牌·题名」识别——值来自语料原文，天然可信）与
     #   大模型路（`qlm.validate` 此前**完全没校验 title**——实测模型会把「忆梦中最长的」
@@ -1588,11 +1815,26 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         for attr in cover:
             allow += list(cov[attr].values())
     if total is None:
-        head = ('【结论】未给结构化条件，按语义相关度排序（融合分）展示前 %d 篇；'
-                '融合排序最前者为 '
-                '%s·%s《%s》：全篇 %d 句 / %d 字，平 %d、仄 %d，仄声比例 %.1f%%，声情 %s [E1]。'
-                % (len(blocks), b0['dynasty'], b0['author'], b0['title'], b0['sent_n'],
-                   b0['han_len'], b0['ping'], b0['ze'], b0['ze_ratio'], b0['scene']))
+        # ⚠ 2026-10-08 修（外部分析「理解失败会退化成模糊搜索并给出答案」· P0）：
+        #   理解**不完整**时（有未理解片段、且没形成任何硬条件），**不得**把「按词面相关度排的
+        #   前几篇」冒充成答案 —— 那正是「问 A 却答了看起来有关的 B」的观感来源。
+        #   此时明确告知「没转成条件」，并把结果**降级标注**为「不是对该问题的回答」。
+        #   而「本来就是自由词面查询」（keywords 非空、unparsed 为空）仍走正常语义检索，不打扰。
+        _ust = (pnote.get('understanding_status') if isinstance(pnote, dict) else None)
+        _unp = [str(x) for x in (getattr(spec, 'unparsed', None) or []) if str(x).strip()]
+        if _ust == 'UNDERSTANDING_INCOMPLETE':
+            head = ('【结论】未能把这句话转成可执行条件——其中「%s」没有被理解成检索条件，'
+                    '因此没有按条件执行检索。下面按词面相关度展示的前 %d 篇'
+                    '**不是对这个问题的回答**，仅供参考。'
+                    '请换一种说法，或把它拆成「词牌／词人／朝代／句脚字／声律模式／字数句数」'
+                    '这类可执行条件。'
+                    % ('、'.join(_clean_frag(x) for x in _unp[:3]), len(blocks)))
+        else:
+            head = ('【结论】未给结构化条件，按语义相关度排序（融合分）展示前 %d 篇；'
+                    '融合排序最前者为 '
+                    '%s·%s《%s》：全篇 %d 句 / %d 字，平 %d、仄 %d，仄声比例 %.1f%%，声情 %s [E1]。'
+                    % (len(blocks), b0['dynasty'], b0['author'], b0['title'], b0['sent_n'],
+                       b0['han_len'], b0['ping'], b0['ze'], b0['ze_ratio'], b0['scene']))
     elif ei is not None:
         more = '（按【%s%s】排序展示前 %d 篇）' \
                % (ei['label'], '取最高' if spec.extreme == 'max' else '取最低', len(blocks))

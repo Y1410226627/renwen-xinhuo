@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.request
 
@@ -58,6 +59,9 @@ ORDER = ('ucass', 'zhipu', 'deepseek', 'dashscope')
 # 优先级：显式参数 > 环境变量 > 本地配置文件 > PROVIDERS 默认值
 LOCAL_CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'llm_local.json')
 
+# 「缓存未命中」哨兵：`dict.get` 无法区分「没有」与「存的就是 None」，用一个独立对象做标记。
+_MISS = object()
+
 
 class LLM:
     """一个极小的对话客户端。`available()` 为假时调用方应回落到模板。"""
@@ -67,8 +71,26 @@ class LLM:
         # 超时默认 25 秒（原来 40 秒偏长——响应速度优先；可用 LVC_LLM_TIMEOUT 覆盖）
         self.timeout = int(timeout or os.environ.get('LVC_LLM_TIMEOUT') or 25)
         self.max_retry = max_retry
-        self.calls = 0
-        self.last_error = None
+        # ⚠ 2026-10-08 修（外部审查 P0：共享可变状态竞争）——
+        #   改前：`self.calls` / `self.last_error` / `self._cache` 都是**实例级可变状态**；
+        #         而 `web/serve.py:122 get_llm()` 返回的是**全局唯一 LLM 实例**（多线程共享），
+        #         且 serve.py 自 2026-10-06 起已不再用 LOCK 包住 LLM 调用（见 serve.py:128-137
+        #         的说明）→ 真并发。症状：请求 A 写 `last_error='timeout'` → 请求 B 成功写 `None`
+        #         → A 回来读到的却是 B 的 `None`，`chat()` 里「流式重试 / EMPTY_CONTENT 重试 /
+        #         直接结束」的分支判定随之错乱；`_cache` 无锁并发读写也可能损坏。
+        #   改后（依据：下方 `last_error` / `calls` 两个 property + `_cache_get/_cache_put`）：
+        #     · `last_error` 是**每次调用的瞬时状态** → 放进 `threading.local()`，每线程各看各的，
+        #       不再跨请求串号（选它而非「改成返回值」是因为它已被外部读取，见下）；
+        #     · `calls`（进程内累计计数，语义上是共享的）→ 用 `self._lock` 保护的 `self._calls`；
+        #     · `_cache` 的读 / 写 / 淘汰统一加 `self._lock`。
+        #   兼容：刻意**保留 `last_error` / `calls` / `_cache` 同名属性**（前两者为 property），
+        #         使 `ask.py:1751`、`gen.py:121`、`web/serve.py:426` 的 `client.last_error`、
+        #         `selftest.py:342` 的 `_FakeLLM.last_error=None`、`web/test_api.py:256` 的
+        #         `_StubLLM.last_error=''` 等既有读写方式**一行都不用改**。
+        self._lock = threading.Lock()
+        self._tls = threading.local()          # 线程私有的瞬时调用状态（last_error）
+        self._calls = 0
+        self.last_error = None                 # 经 property 写入 _tls，见下方定义
         self.enable_thinking = bool(enable_thinking)
         self.stream_default = bool(stream)     # 默认流式（首字快一个数量级；可用 stream=False 关闭）
         self._cache = {}
@@ -118,6 +140,43 @@ class LLM:
                 return name
         return None
 
+    # —— 线程安全支撑（改前 → 改后 → 依据，详见 __init__ 注释）——
+    #   改前：`last_error`/`calls` 是普通实例属性、`_cache` 是裸 dict，均无保护。
+    #   改后：`last_error` 落线程本地；`calls` 与 `_cache` 用 `self._lock` 保护。
+    @property
+    def last_error(self):
+        """本线程**最近一次**调用的失败原因（成功为 None）。线程隔离，不与其他请求串号。"""
+        return getattr(self._tls, 'last_error', None)
+
+    @last_error.setter
+    def last_error(self, value):
+        self._tls.last_error = value
+
+    @property
+    def calls(self):
+        """累计发起的底层请求次数（进程内共享计数；读写均加锁，保持同名属性兼容）。"""
+        with self._lock:
+            return self._calls
+
+    @calls.setter
+    def calls(self, value):
+        with self._lock:
+            self._calls = value
+
+    def _bump_call(self):
+        with self._lock:
+            self._calls += 1
+
+    def _cache_get(self, ck):
+        with self._lock:
+            return self._cache.get(ck, _MISS)
+
+    def _cache_put(self, ck, value):
+        with self._lock:
+            if self._cache_size and len(self._cache) >= self._cache_size:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[ck] = value
+
     def available(self):
         return bool(self.provider and self.key and self.url)
 
@@ -149,11 +208,14 @@ class LLM:
         use_stream = self.stream_default if stream is None else bool(stream)
         ck = (self.model, json.dumps(messages, ensure_ascii=False), temperature, max_tokens,
               think, use_stream, expect_json)
-        if ck in self._cache and on_delta is None:
+        if on_delta is None:
             # ⚠ 2026-10-04 修（代码审查 P3-5）：旧写法外层已要求 `on_delta is None`，
             #   内层 `if on_delta and cached` 永假（死分支），已删；顺带说明：
             #   传了 on_delta（边生成边显示）时不读缓存，这是刻意的（否则"流式"没有增量）。
-            return self._cache[ck]
+            # ⚠ 2026-10-08 修（P0 并发）：缓存读取改走 `_cache_get`（持锁），与写入对称。
+            _hit = self._cache_get(ck)
+            if _hit is not _MISS:
+                return _hit
         out = None
         if use_stream:
             out = self.chat_stream(messages, temperature, max_tokens, think,
@@ -169,9 +231,7 @@ class LLM:
             #   改为：至少 512，且不小于原预算。
             out = self._chat_once(messages, temperature, max(max_tokens, 512), False)
         if out is not None and self._cache_size:
-            if len(self._cache) >= self._cache_size:
-                self._cache.pop(next(iter(self._cache)))
-            self._cache[ck] = out
+            self._cache_put(ck, out)          # ⚠ 2026-10-08 修（P0 并发）：持锁写入/淘汰
         return out
 
     def _chat_once(self, messages, temperature, max_tokens, thinking):
@@ -184,7 +244,7 @@ class LLM:
                 'User-Agent': 'cilv-tanwei/1.0',
             })
             try:
-                self.calls += 1
+                self._bump_call()          # ⚠ 2026-10-08（P0 并发）：计数加锁，替代 self.calls += 1
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     data = json.loads(r.read().decode('utf-8'))
                 ch = (data.get('choices') or [{}])[0]
@@ -265,7 +325,7 @@ class LLM:
                                          'User-Agent': 'cilv-tanwei/1.0'})
         buf = []
         try:
-            self.calls += 1
+            self._bump_call()              # ⚠ 2026-10-08（P0 并发）：计数加锁，替代 self.calls += 1
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 ctype = (r.headers.get('Content-Type') or '')
                 if 'event-stream' not in ctype:       # 服务端未走 SSE → 当普通响应处理

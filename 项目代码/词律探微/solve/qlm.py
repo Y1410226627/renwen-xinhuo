@@ -23,6 +23,7 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -40,6 +41,22 @@ RNG_BOUNDS = {'ze_min': (0, 100), 'ze_max': (0, 100), 'len_min': (1, 500), 'len_
 SCENE_OK = ('后段上升', '后段下降', '前后持平')
 SCENE_ALIAS = {'上升': '后段上升', '升高': '后段上升', '下降': '后段下降', '降低': '后段下降',
                '持平': '前后持平', '不变': '前后持平', '前段更高': '后段下降', '后段更高': '后段上升'}
+
+# ---- 新增 schema 字段的枚举与边界（单一来源：validate 与「口语算子回填」共用）----
+# ⚠ 2026-10-08 新增（外部审查 · 5 类 schema 缺口）：QSYSTEM 原来只有 dynasty/authors/
+#   cipais/tail/tail_pz/pz/scene/rng 八个字段，模型**无法表达**题名（titles）、句级算子
+#   （line_ops）、平仄全等（pz_exact）、篇内交集（tail_each）、句位奇偶（parity）、走向
+#   一致性（consist）、语义检索词（semantic）→ 这些语义只能靠规则路兜底、或整条丢失。
+#   下面把缺口的字段补进 schema，并把每个字段的**能落地校验**写在 `validate()` 里。
+LINE_OP_QUANT = ('none', 'exists', 'forall', 'count')
+LINE_OP_FIELD = ('tail', 'tail_pz', 'pz', 'pz_exact', 'len')
+LINE_OP_OP = ('=', 'in', '>=', '<=')
+COUNT_OP = ('>=', '=', '<=')
+PARITY_ALIAS = {'奇': 'odd', '奇数': 'odd', '奇句位': 'odd', '奇数句位': 'odd', 'odd': 'odd',
+                '偶': 'even', '偶数': 'even', '偶句位': 'even', '偶数句位': 'even', 'even': 'even'}
+PARITY_SET = (0, 1)                       # 0=奇数句位(1,3,5…)；1=偶数句位（口径同 retrieve.l.idx%2）
+SEM_MAX = 12                              # 语义检索词上限（**只作检索扩展，绝不进 SQL**）
+SEM_LEN_MAX = 12                          # 单个检索词长度上限
 
 SYSTEM = (
     '你是「词律探微」（清代词律声情研究助手）的**查询理解**模块。\n'
@@ -73,6 +90,49 @@ SYSTEM = (
     '               "extreme":"max"}（最少/最少见用 "min"）。\n'
     '             不是对比题就写 null。写了 agg 就**不要**再填 dynasty/authors/cipais\n'
     '             （那些是**组名**，不是检索限定）。\n'
+    '  "titles":  **题名（词题）**列表。★ 务必分清：`cipais` 是**词牌**（如「蝶恋花」），\n'
+    '             `titles` 是**词题**（如「四月一日感粤事」）——两者**不同**。\n'
+    '             「蝶恋花·四月一日感粤事」要**同时**给 "cipais":["蝶恋花"] 与\n'
+    '             "titles":["四月一日感粤事"]（「·」前是词牌，后是题名）。\n'
+    '             正例：「蝶恋花·四月一日感粤事是谁写的」→ cipais=["蝶恋花"]、\n'
+    '                  titles=["四月一日感粤事"]；反例：把「四月一日感粤事」放进 unparsed\n'
+    '                  或 keyword（那样就查不到，因为题名不在正文里）。\n'
+    '  "pz_exact": 整句平仄**全等**的串（如 "仄仄平平仄"）。\n'
+    '             ★ 与 "pz" 的区别必须分清：`pz` 是**子串**（该模式出现在某一句里即可）；\n'
+    '             `pz_exact` 是**整句完全相同**（那一句的平仄串与之逐位相等）。\n'
+    '             正例：「整句平仄串正好是仄仄平平仄」→ "pz_exact":"仄仄平平仄"；\n'
+    '             反例：「句里含仄仄平平仄」→ 用 "pz"（子串），**不要**写 pz_exact。\n'
+    '  "tail_each": 句脚字列表，要求**每一句**的句脚都取自该列表（篇内**交集**语义）。\n'
+    '             正例：「每一句句脚都是花或者草」→ ["花","草"]（每句都落在集合内，\n'
+    '             与 "tail"（**存在**一句）不同）。不是这种问法就写 []。\n'
+    '  "line_ops": **句级算子**列表（问「有几句…」「每一句…」「没有任何一句…」时）。\n'
+    '             每个元素形如 {"quantifier":"none"|"exists"|"forall"|"count",\n'
+    '               "field":"tail"|"tail_pz"|"pz"|"pz_exact"|"len",\n'
+    '               "op":"="|"in"|">="|"<=", "value":<字符串或列表>,\n'
+    '               "count_op":">="|"="|"<=", "count_value":<整数>}\n'
+    '             （`count_op`/`count_value` **只在** quantifier="count" 时填。）映射示例：\n'
+    '             · 「没有任何一句句脚为愁」→\n'
+    '                 [{"quantifier":"none","field":"tail","op":"in","value":["愁"]}]\n'
+    '             · 「每一句句脚都是愁」→ quantifier="forall"、op="in"、value=["愁"]\n'
+    '             · 「至少两句句脚为愁」→ quantifier="count"、op="in"、value=["愁"]、\n'
+    '                 count_op=">=" 、count_value=2\n'
+    '             · 「正好三句句脚为愁」→ count_op="=" 、count_value=3\n'
+    '             · 「句脚为愁的句子在 1 到 3 句之间」→ 用**两条**：\n'
+    '                 count_op ">=" value 1，count_op "<=" value 3\n'
+    '             反例：「句脚为愁」（不含量词＝**存在**一句）→ 写 "tail":["愁"]，\n'
+    '              **不要**写 line_ops。\n'
+    '  "parity":  句位**奇偶**：只能 "odd"（只要奇数句位的句：第 1、3、5…句）或\n'
+    '             "even"（第 2、4、6…句）。不是问句位就写 null。\n'
+    '  "consist": 声情**走向一致性**，只能 "后段上升"、"后段下降"、"前后持平"\n'
+    '             （问「声情标注为 X 但实测前后段相反」时填该 X）。不是就写 null。\n'
+    '  "semantic": **语义检索词**列表（**只当问句含主题/意象/情绪时才填**）。\n'
+    '             正例：「写秋愁的词」→ ["秋日","秋景","悲秋","离愁","凄凉"]；\n'
+    '                   「描写离愁的作品」→ ["离愁","别离","相思","羁旅"]。\n'
+    '             ★ 这是**检索用词**，不是筛选条件（不会进 SQL）；\n'
+    '               纯条件题（如「清 临江仙 仄声>45%」）一律写 []。\n'
+    '             ★ 不许把问句里的**框架词**（「哪些」「哪首」「描写」「作品」「的词」\n'
+    '               这类提问套话）放进来——只放**内容**词（意象/主题/情绪的同义词或\n'
+    '               高度相关词）。\n'
     '\n'
     '规则：\n'
     '1) **并列/选择要拆成列表**：「句脚是灯或者声的」→ "tail": ["灯","声"]；\n'
@@ -85,6 +145,8 @@ SYSTEM = (
     '   不要塞进 "order"（那会把「哪一篇最高」和「哪一组最多」弄混）。\n'
     '6) 若用户消息给出【上一轮上下文】，可用它补全本轮问句的指代与省略（「那里面」「它的后段」\n'
     '   「改成宋词呢」）；**上下文里没出现过的条件不许臆造**；本轮问句若已自足，就忽略上下文。\n'
+    '7) **词牌与题名要分清**：「词牌·题名」按 "·" 切开——前是词牌（cipais）、后是题名\n'
+    '   （titles）。题名是词人自拟的词题，**不在正文里**，绝不能塞进 unparsed 或当作检索词。\n'
 )
 
 
@@ -128,6 +190,141 @@ def _as_list(v):
     if isinstance(v, str):
         return [v]
     return []          # 数字/布尔等标量不是条件（审查 B32：「朝代=0」曾会被当成条件）
+
+
+# ---- 新字段（line_ops）的落地校验：元素级，坏元素丢弃、不整条崩 ----
+def _one_hanzi(v):
+    return isinstance(v, str) and len(v) == 1 and retrieve.is_hanzi(v)
+
+
+def _line_op_field_value(field, value):
+    """按 `field` 归一化 `value` → (norm_value, pred)；非法返回 (原因, None)。"""
+    if field == 'tail':
+        raw = value if isinstance(value, (list, tuple)) else ([value] if value else [])
+        vals = [str(x).strip() for x in raw if str(x).strip()]
+        if not vals:
+            return 'value 为空', None
+        bad = [v for v in vals if not _one_hanzi(v)]
+        if bad:
+            return '句脚字=%s（不是一个汉字）' % '／'.join(bad), None
+        return vals, (('tail', vals[0]) if len(vals) == 1 else ('tail_any', vals))
+    if field == 'tail_pz':
+        v = str(value).strip()
+        if v not in ('平', '仄'):
+            return '句脚平仄=%s（只能是平/仄）' % v, None
+        return v, ('tail_pz', v)
+    if field in ('pz', 'pz_exact'):
+        v = str(value).strip()
+        if not retrieve.PZ_RE.match(v):
+            return '%s=%s（只能由平/仄/？组成且≥3 位）' % (field, v), None
+        return v, (field, v)
+    if field == 'len':
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            try:
+                a, b = int(value[0]), int(value[1])
+            except (TypeError, ValueError):
+                return 'len=%s（不是整数区间）' % (value,), None
+            if a < 1 or b < a:
+                return 'len=%s（区间非法）' % (value,), None
+            return [a, b], ('len', (a, b))
+        return 'len=%s（须是 [下界,上界] 两个正整数）' % (value,), None
+    return 'field=%s（不在枚举内）' % field, None
+
+
+def _check_line_op(el):
+    """校验单个 line_ops 元素 → (retrieve.line_q 片段, None) 或 (None, 原因)。"""
+    if not isinstance(el, dict):
+        return None, 'line_ops 元素不是对象'
+    q = str(el.get('quantifier') or '').strip()
+    field = str(el.get('field') or '').strip()
+    op = str(el.get('op') or '').strip()
+    if q not in LINE_OP_QUANT:
+        return None, 'quantifier=%s（只能是 %s）' % (q, '/'.join(LINE_OP_QUANT))
+    if field not in LINE_OP_FIELD:
+        return None, 'field=%s（只能是 %s）' % (field, '/'.join(LINE_OP_FIELD))
+    if op not in LINE_OP_OP:
+        return None, 'op=%s（只能是 %s）' % (op, '/'.join(LINE_OP_OP))
+    _norm, pred = _line_op_field_value(field, el.get('value'))
+    if pred is None:
+        return None, _norm
+    if q == 'none':
+        return {'op': '∄', 'pred': pred}, None
+    if q == 'exists':
+        return {'op': '∃', 'pred': pred}, None
+    if q == 'forall':
+        return {'op': '∀', 'pred': pred}, None
+    # quantifier == count：必须有合法 count_op/count_value
+    co = str(el.get('count_op') or '').strip()
+    if co not in COUNT_OP:
+        return None, 'count_op=%s（只能是 %s）' % (co, '/'.join(COUNT_OP))
+    try:
+        k = int(el.get('count_value'))
+    except (TypeError, ValueError):
+        return None, 'count_value=%s（不是整数）' % (el.get('count_value'),)
+    if k < 0:
+        return None, 'count_value=%s（不能为负）' % el.get('count_value')
+    if co == '=':
+        return {'op': '=k', 'pred': pred, 'k': k}, None
+    if co == '>=':
+        return {'op': '≥k', 'pred': pred, 'k': k}, None
+    return {'op': '条数∈[a,b]', 'pred': pred, 'ka': 0, 'kb': k}, None
+
+
+def _merge_count_range(lst):
+    """把「≥N」与「≤M」两条（同谓词）合并成「条数∈[N,M]」（模型给区间时的常见写法）。"""
+    for a in lst:
+        if a.get('op') != '≥k':
+            continue
+        for b in lst:
+            if b.get('op') == '条数∈[a,b]' and b.get('pred') == a.get('pred'):
+                return {'op': '条数∈[a,b]', 'pred': a['pred'], 'ka': a['k'], 'kb': b['kb']}
+    return None
+
+
+# ---- 「口语算子回填」：规则路与模型路都**没给出** line_q 时，尽力从问句里补一条 ----
+# 由来（understand_eval C3/C7 实测）：像「至少两句句脚为愁」「每一句整句平仄串正好是仄仄平平仄」
+# 这类措辞，规则路不认（其规范措辞是「有 N 句以上」「每一句都整句平仄串正好是「…」」），
+# 大模型又可能把算子片段如实塞进 unparsed 而没填 line_ops。这里做**最后一道尽力而为的回填**：
+# 把少数「口语但语义确定」的句式改写成引擎的规范措辞，再复用 `retrieve.parse_line_ops`
+# 解析（**单一来源**，不另写一套判定），避免「模型听懂了却当词面残片丢掉」。
+_NORM_RXS = (
+    (re.compile(r'至少\s*([0-9零一二三四五六七八九十百两]+)\s*句'), r'有\1句以上'),
+    (re.compile(r'正好\s*([0-9零一二三四五六七八九十百两]+)\s*句'), r'正好有\1句'),
+    (re.compile(r'恰好\s*([0-9零一二三四五六七八九十百两]+)\s*句'), r'正好有\1句'),
+    (re.compile(r'每一句(?!都)'), '每一句都'),
+    (re.compile(r'(整句平仄串(?:正好是|是|为)?)([平仄?？]{3,})'), r'\1「\2」'),
+)
+
+
+def normalize_ops(text):
+    """口语句级算子 → 引擎规范措辞（尽力而为）。返回 (改写后文本, 被改写的原片段列表)。"""
+    t = text or ''
+    consumed = []
+
+    def _repl(m, rep):
+        consumed.append(m.group(0))
+        return m.expand(rep)
+
+    for rx, rep in _NORM_RXS:
+        t = rx.sub(lambda m, _rep=rep: _repl(m, _rep), t)
+    return t, consumed
+
+
+def recover_line_ops(text):
+    """从问句原文尽力回填句级算子 → {'line_q','pz_exact','tail_each','consumed'} 或 None。
+
+    只在「规则路与模型路都没有 line_q」时由 `ask._absorb_model_extras` 调用；解析走
+    `retrieve.parse_line_ops`（单一来源）。识别不出、或问句未被改写 → 返回 None（不硬凑）。
+    """
+    norm, consumed = normalize_ops(text)
+    if not consumed or norm == (text or ''):
+        return None
+    tmp = retrieve.QuerySpec()
+    retrieve.parse_line_ops(norm, tmp)
+    if not (tmp.line_q or tmp.pz_exact or tmp.tail_each):
+        return None
+    return {'line_q': tmp.line_q, 'pz_exact': tmp.pz_exact,
+            'tail_each': list(tmp.tail_each), 'consumed': consumed}
 
 
 def validate(conn, obj, question=''):
@@ -178,12 +375,38 @@ def validate(conn, obj, question=''):
         else:
             dropped.append('词牌=%s（库中没有此调）' % c)
 
+    # ⚠ 2026-10-08 新增：**题名（词题）**。★ 题名是「题名存在性」收口（源头第二道；
+    #   `ask.answer` 里已有一道兜底）。每个值必须在 `poems.title` 里 `LIKE '%值%'` 至少命中
+    #   1 篇，否则丢弃——防模型把「问句描述」（如「忆梦中最长的」）当成题名塞进来，
+    #   导致 `title LIKE` 0 命中 → 全条件 0 篇（实测主人踩过）。
+    ti = [str(x).strip() for x in _as_list(obj.get('titles'))]
+    for t in ti:
+        try:
+            row = conn.execute('SELECT 1 FROM poems WHERE title LIKE ? LIMIT 1',
+                               ('%' + t + '%',)).fetchone()
+        except Exception:
+            row = None
+        if row:
+            if t not in spec.title_any:
+                spec.title_any.append(t)
+        else:
+            dropped.append('题名=%s（语料标题中不存在）' % t)
+
     tl = [str(x).strip() for x in _as_list(obj.get('tail'))]
     for ch in tl:
         if len(ch) == 1 and retrieve.is_hanzi(ch):
             spec.tail_any.append(ch)
         else:
             dropped.append('句脚字=%s（不是一个汉字）' % ch)
+
+    # 篇内交集（每一句句脚都取自该集合）：每个元素必须是**单个汉字**
+    te = [str(x).strip() for x in _as_list(obj.get('tail_each'))]
+    for ch in te:
+        if _one_hanzi(ch):
+            if ch not in spec.tail_each:
+                spec.tail_each.append(ch)
+        else:
+            dropped.append('篇内交集字=%s（不是一个汉字）' % ch)
 
     tp = obj.get('tail_pz')
     if tp in ('平', '仄'):
@@ -199,6 +422,15 @@ def validate(conn, obj, question=''):
         else:
             dropped.append('声律模式=%s（只能由平/仄/？组成且≥3 位）' % pzs)
 
+    # 平仄串**全等**（与 pz 的子串语义互斥）：只由 平/仄/？ 组成且长度≥3
+    pze = obj.get('pz_exact')
+    if pze:
+        pzv = str(pze).strip()
+        if retrieve.PZ_RE.match(pzv):
+            spec.pz_exact = pzv
+        else:
+            dropped.append('平仄全等串=%s（只能由平/仄/？组成且≥3 位）' % pzv)
+
     sc = obj.get('scene')
     if sc:
         sc = SCENE_ALIAS.get(str(sc).strip(), str(sc).strip())
@@ -206,6 +438,28 @@ def validate(conn, obj, question=''):
             spec.scene = sc
         else:
             dropped.append('声情=%s（只能是后段上升/后段下降/前后持平）' % sc)
+
+    # 句位奇偶：odd→0（奇数句位 1,3,5…）、even→1（偶数句位）；口径同 retrieve `l.idx % 2`
+    pa = obj.get('parity')
+    if pa:
+        key = PARITY_ALIAS.get(str(pa).strip(), str(pa).strip().lower())
+        if key == 'odd':
+            spec.parity = 0
+        elif key == 'even':
+            spec.parity = 1
+        else:
+            dropped.append('句位奇偶=%s（只能是 odd/even）' % pa)
+
+    # 走向一致性：「声情标注为 X 但实测前后段相反」——与规则路口径一致地**同时**标注 scene
+    cs = obj.get('consist')
+    if cs:
+        cs = SCENE_ALIAS.get(str(cs).strip(), str(cs).strip())
+        if cs in SCENE_OK:
+            spec.consist = cs
+            if not spec.scene:
+                spec.scene = cs
+        else:
+            dropped.append('一致性=%s（只能是后段上升/后段下降/前后持平）' % cs)
 
     rng = obj.get('rng') or {}
     if isinstance(rng, dict):
@@ -228,10 +482,53 @@ def validate(conn, obj, question=''):
     elif rng:
         dropped.append('rng 字段不是对象')
 
+    # ---- 句级算子（line_ops）：逐个元素落地校验，坏元素丢弃并记明（不整条崩）----
+    lo = obj.get('line_ops')
+    valid_lq = []
+    if isinstance(lo, list):
+        for el in lo:
+            lq1, why = _check_line_op(el)
+            if lq1 is None:
+                dropped.append('句级算子（%s）' % why)
+            else:
+                valid_lq.append(lq1)
+    elif lo:
+        dropped.append('line_ops 字段不是列表')
+    if valid_lq:
+        spec.line_q = valid_lq[0]
+        if len(valid_lq) > 1:
+            _merged = _merge_count_range(valid_lq)
+            if _merged is not None:
+                spec.line_q = _merged
+                notes.append('句级算子按「区间」合并（≥%s 与 ≤%s）'
+                             % (_merged['ka'], _merged['kb']))
+                if len(valid_lq) > 2:
+                    notes.append('句级算子多于两条，已按区间合并前两条，其余忽略')
+            else:
+                notes.append('句级算子一次只支持一条，已取其第一条，其余忽略')
+
+    # ---- 语义检索词（semantic）：**只作检索扩展，绝不进 SQL** ----
+    # 每项长度 1~12、去重、最多 SEM_MAX 项；不合法项丢弃并记明。
+    sm = _as_list(obj.get('semantic'))
+    _terms = []
+    for t in sm:
+        t = str(t).strip()
+        if not (1 <= len(t) <= SEM_LEN_MAX):
+            dropped.append('语义检索词=%s（长度须在 1~%d）' % (t, SEM_LEN_MAX))
+            continue
+        if t not in _terms:
+            _terms.append(t)
+    if len(_terms) > SEM_MAX:
+        notes.append('语义检索词过多，只取前 %d 个' % SEM_MAX)
+        _terms = _terms[:SEM_MAX]
+    if _terms:
+        spec.semantic = _terms        # 语义扩展词（QuerySpec 已有该槽位；检索层并入全文召回，不进 SQL）
+
     for k in obj:
         if k not in ('dynasty', 'authors', 'author', 'cipais', 'cipai', 'tail', 'tail_pz',
                      'pz', 'scene', 'rng', 'unparsed', 'agg', 'order', 'sort', 'pair',
-                     'pair_dim'):
+                     'pair_dim', 'titles', 'pz_exact', 'tail_each', 'line_ops', 'parity',
+                     'consist', 'semantic'):
             notes.append('模型多给的字段 %s 已忽略' % k)
 
     # 分组对比（聚合）题：组名同样要**逐个在库上验**（落不了库的进 dropped）

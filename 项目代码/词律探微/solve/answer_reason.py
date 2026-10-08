@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""answer_reason.py —— 把「为什么答不出/为什么是 0」**结构化成八态**。
+"""answer_reason.py —— 把「为什么答不出/为什么是 0」**结构化成九态**。
+
+（原为八态；2026-10-08 外部审查 P1 新增 `SAFETY_BLOCKED`——内容安全拒答此前被误并为
+ 「已检索、范围内为零」，见下方 `Reason` 枚举与 `classify` 的 ①'。）
 
 由来（2026-10-05，朋友项目对照）：
     我们的 `guard.py` 护栏③「无据即认账」原本只有**一刀**——`refused` 是布尔值
@@ -23,11 +26,16 @@ from enum import Enum
 
 
 class Reason(str, Enum):
-    """八态枚举（对齐朋友 `ProviderResult.status`，落成中文标签）。"""
+    """九态枚举（对齐朋友 `ProviderResult.status`，落成中文标签）。
+
+    ⚠ 2026-10-08 新增第 9 态 `SAFETY_BLOCKED`（外部审查 P1）：入向内容安全拦截此前被
+      误归为 `NOT_FOUND`（「已检索、范围内为零」），业务语义完全错误——安全拒答**根本没执行检索**。
+    """
 
     OK = 'ok'                                 # 有确切答案
     NOT_FOUND = 'not_found'                   # 查了，范围内 0 篇（0 是确切结果）
     UNSUPPORTED = 'unsupported'               # 不支持该能力/范围（如语料外朝代）
+    SAFETY_BLOCKED = 'safety_blocked'         # 内容安全拦截（入向）：不允许的用途，未执行检索
     AMBIGUOUS = 'ambiguous'                   # 条件多解，未替用户选定
     CONFLICT = 'conflict'                     # 条件互相矛盾（交集为空且非单纯 0）
     INSUFFICIENT = 'insufficient_evidence'    # 范围非空，但该口径无可用数据
@@ -39,6 +47,7 @@ LABELS = {
     Reason.OK: '有确切答案',
     Reason.NOT_FOUND: '已检索、范围内为零（零是确切结果）',
     Reason.UNSUPPORTED: '不支持该范围或能力',
+    Reason.SAFETY_BLOCKED: '安全拦截：该请求属于不支持/不允许的用途，未执行检索',
     Reason.AMBIGUOUS: '条件多解，未替用户选定',
     Reason.CONFLICT: '条件互相矛盾',
     Reason.INSUFFICIENT: '范围非空但该口径无可用数据',
@@ -48,6 +57,10 @@ LABELS = {
 
 # —— 判据（按**优先级**从上到下；用文案里的确定短语，不依赖模糊推测）——
 _RULES = (
+    # ⚠ 2026-10-08 新增（外部审查 P1）：内容安全拦截**优先**判——它压根没进检索，
+    #   绝不能落到「已检索、范围内为零」。用 `safety.refusal()` 的固定短语兜底
+    #   （结构化判据见 classify 的 ①'，两者互为补充；此处为兼容层）。
+    (Reason.SAFETY_BLOCKED, (r'【内容安全】', r'不予回应')),
     # 语料外 / 不支持
     (Reason.UNSUPPORTED, (r'语料外范围', r'只含清/宋/元', r'不支持', r'问句过长',
                           r'未给出可解析的条件', r'官方题型')),
@@ -86,6 +99,15 @@ def classify(res) -> dict:
             return _mk(_r, refused, total, 'answer() 直接给出的结构化理由')
         except ValueError:
             pass
+    # ①' 入向内容安全拦截（结构化，最可靠）——
+    #   ⚠ 2026-10-08 新增（外部审查 P1）：`ask.answer()` 命中入向安全护栏时返回
+    #   `kind='安全拦截'`、`refused=True`、`safety=sf`（`sf['ok']` 为假），**且未进检索**。
+    #   改前它一路落到末尾 `if refused: return _mk(NOT_FOUND,…)` → 用户被误告「已检索、范围内为零」。
+    #   改后优先命中本态。注意：**问句超长**那条（ask.py:1331-1337）`safety={'ok': True}` 且
+    #   kind≠'安全拦截'，故不受影响，仍走文案判据归 UNSUPPORTED。
+    _sf = res.get('safety')
+    if res.get('kind') == '安全拦截' or (isinstance(_sf, dict) and _sf.get('ok') is False):
+        return _mk(Reason.SAFETY_BLOCKED, refused, total, '内容安全拦截：未执行检索（非「范围内为零」）')
     # ② 结构化字段（spec.unsupported 等）——不依赖文案
     _sp = res.get('spec')
     if isinstance(_sp, dict) and _sp.get('unsupported'):

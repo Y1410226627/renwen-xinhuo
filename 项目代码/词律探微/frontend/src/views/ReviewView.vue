@@ -5,6 +5,12 @@
  * 把语料自带拼音标注当**独立第三方**，与引擎逐字比对，分歧进工单等词学裁定。
  * 筛选 / 排序 / 统计复用 core/review.js 的纯函数（与 node 门禁同一份实现），
  * 保证「筛选『长』的条数」等断言与旧版逐字段一致。
+ *
+ * ⚠ 2026-10-08 精修（本轮交付）：
+ *   ① 补齐三态——加载态 / 错误态（读取失败给三步处置）/ 空态（工单为空、或筛选无结果各有一说）；
+ *   ② 长表格可读性：套用外壳的 `.view-table`（表头粘性、行悬停、窄屏横向滚动），
+ *      数值列右对齐、可排序列给出指针与方向箭头；
+ *   ③ 导出 CSV 顶部加一行「筛选条件 + 条数」元信息；筛选框支持 Enter、Esc 清错误。
  */
 import { ref, computed, onMounted } from 'vue';
 import { ReviewApp, UI } from '../core/index.mjs';
@@ -17,8 +23,13 @@ const key = ref('pid');
 const dir = ref('asc');
 const page = ref(1);
 const SIZE = 100;
+const load = ref('');
+const err = ref('');
 
 const COLS = ReviewApp.COLS;
+/* 数值列（右对齐 + 等宽数字）：阕 / 句内位。其余按文本左对齐。 */
+const NUM_COLS = { '阕': 1, '句内位': 1 };
+
 const st = computed(() => ReviewApp.stats(rows.value));
 const pages = computed(() => Math.max(1, Math.ceil(cur.value.length / SIZE)));
 const slice = computed(() => cur.value.slice((page.value - 1) * SIZE, page.value * SIZE));
@@ -27,6 +38,11 @@ const summaryText = computed(() => {
   const top1 = s.top.length ? `${s.top[0][0]}（${s.top[0][1]} 条）` : '—';
   return `工单总数 = ${s.total}；涉及字数 = ${s.chars}；TOP1 = ${top1}`;
 });
+/* 空态两种：整表为空 vs 筛选后为空 —— 文案不同（后者要引导用户清掉筛选）。 */
+const emptyAll = computed(() => !load.value && !err.value && rows.value.length === 0);
+const emptyFiltered = computed(() =>
+  !load.value && !err.value && rows.value.length > 0 && cur.value.length === 0);
+const sortInd = (c) => (key.value === c ? (dir.value === 'asc' ? '▲' : '▼') : '');
 
 function doFilter() {
   cur.value = ReviewApp.filter(rows.value, kwInput.value);
@@ -39,22 +55,38 @@ function sortBy(k) {
 }
 function goPage(p) { page.value = Math.min(Math.max(1, p), pages.value); }
 function applyKw(k) { kwInput.value = k; doFilter(); }
+function clearKw() { kwInput.value = ''; doFilter(); }
+function clearError() { if (err.value) { err.value = ''; } }
 function exportCsv() {
-  const out = [COLS];
+  if (!cur.value.length) { UI.toast('没有可导出的结果'); return; }
+  /* ⚠ 本轮交付：CSV 顶部加一行元信息（筛选条件 + 条数），脱离页面也能看清这批工单怎么来的。 */
+  const meta = ['# 导出信息', '筛选=' + (kwInput.value.trim() || '（无：全部工单）'),
+    '条数=' + cur.value.length, '总工单=' + st.value.total,
+    '生成=' + new Date().toLocaleString()];
+  const out = [meta, COLS];
   cur.value.forEach((r) => out.push(COLS.map((c) => {
     const v = r[c];
     return (v && typeof v === 'object') ? JSON.stringify(v) : v;
   })));
   UI.download('词律探微_校订工单.csv', UI.csvText(out));
-  UI.toast(`已导出 ${cur.value.length} 条`);
+  UI.toast(`已导出 ${cur.value.length} 条（含筛选说明）`);
 }
 
 onMounted(async () => {
-  if (typeof window !== 'undefined' && window.__REV__) {
-    rows.value = window.__REV__;
-  } else if (typeof window !== 'undefined' && window.__API_BASE__ === '') {
-    /* 在线模式没有 review 接口，仍读同目录 JSON（由构建时随页面一起产出） */
-    try { rows.value = await (await fetch('review_rows.json')).json(); } catch (e) { rows.value = []; }
+  load.value = '正在载入校订工单（内嵌数据或 review_rows.json）…';
+  try {
+    if (typeof window !== 'undefined' && window.__REV__) {
+      rows.value = window.__REV__;
+    } else if (typeof window !== 'undefined' && window.__API_BASE__ === '') {
+      /* 在线模式没有 review 接口，仍读同目录 JSON（由构建时随页面一起产出） */
+      const r = await fetch('review_rows.json');
+      if (!r.ok) { throw new Error('HTTP ' + r.status); }
+      rows.value = await r.json();
+    }
+    load.value = '';
+  } catch (e) {
+    load.value = '';
+    err.value = String(e && e.message ? e.message : e);
   }
   const q = UI.query();
   if (q.kw) { kwInput.value = q.kw; }
@@ -64,6 +96,7 @@ onMounted(async () => {
 
 <template>
   <AppShell active="review" data-note="data/review_diff.csv">
+   <div class="rv" @keydown.esc="clearError">
     <div class="card">
       <h1>视图三 · 校订队列（标注闭环）</h1>
       <p class="dim">把语料自带拼音标注当作<b>独立第三方</b>，与引擎逐字比对，分歧进工单等词学裁定。
@@ -73,8 +106,11 @@ onMounted(async () => {
           <input id="kw" type="text" placeholder="如：长 / 绝 / ci.清.0000"
                  v-model="kwInput" @keydown.enter="doFilter"></label>
         <button id="go" @click="doFilter">筛选</button>
+        <button id="clr" class="ghost" v-if="kwInput" @click="clearKw">清空筛选</button>
         <button id="csv" class="ghost" @click="exportCsv">导出当前结果 CSV</button>
       </div>
+      <p class="dim rv-hint">点表头可排序；按 <b>Enter</b> 即筛选、<b>Esc</b> 清错误提示。
+        筛选支持任意字段（如填「长」只看该字）。</p>
       <p id="chips">
         <span v-for="kv in st.top.slice(0, 14)" :key="kv[0]" class="chip" :data-kw="kv[0]"
               @click="applyKw(kv[0])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
@@ -87,28 +123,69 @@ onMounted(async () => {
     </div>
 
     <div class="card">
-      <div class="scroll">
-        <table>
-          <thead><tr>
-            <th v-for="c in COLS" :key="c" :data-key="c" style="cursor:pointer"
-                @click="sortBy(c)">{{ c }}</th>
-          </tr></thead>
-          <tbody id="rows">
-            <tr v-for="(r, i) in slice" :key="i">
-              <td v-for="c in COLS" :key="c" :class="{ ping: c === '引擎平仄', ze: c === '语料平仄', dim: c === '证据' }">
-                <b v-if="c === '字'">{{ r[c] }}</b><template v-else>{{ r[c] }}</template>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-if="err" class="err">
+        <b class="bad">工单数据没载入</b>
+        <p>{{ err }}</p>
+        <p class="dim">可试：① 确认站点由本地服务提供（<code>python web/serve.py</code>）或页面与
+          <code>review_rows.json</code> 同目录；② 重跑 <code>python web/build_views.py</code> 生成数据；
+          ③ 按 <b>Ctrl+F5</b> 强制刷新。按 <b>Esc</b> 可清掉本条提示。</p>
       </div>
-      <div id="pager">
-        <template v-if="pages > 1">
-          <button class="ghost" @click="goPage(page - 1)">上一页</button>
-          <span class="dim">第 {{ page }}/{{ pages }}</span>
-          <button class="ghost" @click="goPage(page + 1)">下一页</button>
-        </template>
+
+      <p v-else-if="load" class="loading"><span class="spin"></span> {{ load }}</p>
+
+      <div v-else-if="emptyAll" class="empty">
+        <p><b>工单为空。</b></p>
+        <p class="dim">下一步：先跑 <code>python web/build_views.py</code> 生成
+          <code>review_diff.csv</code> / <code>review_rows.json</code>，再刷新本页。</p>
       </div>
+
+      <div v-else-if="emptyFiltered" class="empty">
+        <p><b>没有匹配「{{ kwInput }}」的工单。</b></p>
+        <p class="dim">下一步：换个字（如「长」「绝」），或点上面的 chip；也可点「清空筛选」回到全部工单。</p>
+      </div>
+
+      <template v-else>
+        <div class="scroll">
+          <table class="view-table">
+            <thead><tr>
+              <th v-for="c in COLS" :key="c" :data-key="c"
+                  class="sortable" :class="{ num: NUM_COLS[c] }"
+                  @click="sortBy(c)">{{ c }}<span class="sort-ind" v-if="sortInd(c)">{{ sortInd(c) }}</span></th>
+            </tr></thead>
+            <tbody id="rows">
+              <tr v-for="(r, i) in slice" :key="i">
+                <td v-for="c in COLS" :key="c"
+                    :class="{ ping: c === '引擎平仄', ze: c === '语料平仄', dim: c === '证据', num: NUM_COLS[c] }">
+                  <b v-if="c === '字'">{{ r[c] }}</b><template v-else>{{ r[c] }}</template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="pager">
+          <template v-if="pages > 1">
+            <button class="ghost" @click="goPage(page - 1)">上一页</button>
+            <span class="dim">第 {{ page }}/{{ pages }}</span>
+            <button class="ghost" @click="goPage(page + 1)">下一页</button>
+          </template>
+        </div>
+      </template>
     </div>
+   </div>
   </AppShell>
 </template>
+
+<style scoped>
+/* ReviewView.vue —— 校订页精修（2026-10-08）。配色沿用 core/ui.js 变量，不另起一套。 */
+.rv-hint { margin: 8px 0 0; }
+
+.loading { margin: 4px 0; color: var(--ink2); }
+.err { border-left: 4px solid var(--warn); border-radius: 6px; padding: 8px 12px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.err p { margin: 6px 0 0; }
+.empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 14px 16px;
+  background: var(--panel2); margin: 8px 0 2px; }
+.empty p { margin: 4px 0; }
+
+#pager { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+</style>

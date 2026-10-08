@@ -215,6 +215,15 @@ class QuerySpec:
         # 朝代/人名的一部分」时仍要算上它们，见 `_patch_parse`）
         self.cleared_names = []
         self.disp_group = None  # 离散度最大组：按该维度分组，取组内指标波动最大的那一组
+        # ⚠ 2026-10-08 新增（检索层预留字段，任务C）：**规则路永不产出这两个字段**，
+        #   只有大模型理解路（qlm/ask）与前端会填。因此对 1000 题（不开 LLM）**零影响**。
+        #   改前 → 无这两个字段（大模型给的 semantic、前端传的上一轮 pid 集合无处落地）。
+        #   依据（文件级）：`has_hard`/`_sql`/`search` 三处按「非空才生效」接入，见各函数注释。
+        #   例：「那里面哪个最短」→ 前端传 ctx_pids=[上一轮命中的 pid…]；「写离愁的清词」→
+        #   大模型给 semantic=["离愁","秋日"]。
+        self.semantic = []      # 语义检索**扩展词**（如 ["秋日","离愁","凄凉"]）——**不参与 SQL**，
+                                #   只并入全文检索（`route_bigram`/`route_phrase`）以**提升召回**。
+        self.ctx_pids = []      # **上一轮结果集的 pid 列表**——**参与 SQL**（`p.pid IN (…)`），是硬条件。
 
     def describe(self):
         p = []
@@ -252,9 +261,14 @@ class QuerySpec:
                 _ptxt = '句脚平仄=%s' % _v
             elif _k == 'pz':
                 _ptxt = '声律串含%s' % _v
+            elif _k == 'pz_exact':
+                # ⚠ 2026-10-08（任务B）：`pz_exact` 谓词原先落到下面的 else → 被误标成「偶数句位」
+                #   （_v 是平仄串不是 0/1）。改前行为：显示「句级算子=每一句都（偶数句位）」，
+                #   与条件不符；改后行为：显示「平仄串全等=仄仄平平仄」。仅影响【查询理解】文案。
+                _ptxt = '平仄串全等=%s' % _v
             elif _k == 'len':
                 _ptxt = '句长=%s~%s' % (_v[0], _v[1])
-            else:
+            else:                              # 只剩 parity（句位奇偶），其 _v ∈ {0,1}
                 _ptxt = '%s数句位' % ('奇' if _v == 0 else '偶')
             _optxt = {'∃': '至少有一句', '∀': '每一句都', '∄': '没有任何一句',
                       '≥k': '至少 %d 句' % _q.get('k', 0),
@@ -270,6 +284,12 @@ class QuerySpec:
             p.append('平仄串全等=%s' % self.pz_exact)
         if self.keywords:
             p.append('词面=%s' % '、'.join(self.keywords))
+        # ⚠ 2026-10-08 新增（任务C）：语义扩展词与「上一轮结果集」范围的人类可读描述。
+        #   改前 → 无；改后 → 各一行（规则路为空时不出这两行，故对 1000 题零影响）。
+        if getattr(self, 'semantic', None):
+            p.append('语义扩展=%s' % '、'.join(self.semantic))
+        if getattr(self, 'ctx_pids', None):
+            p.append('范围=上一轮结果（%d 篇）' % len(self.ctx_pids))
         lab = {'ze_min': '仄声比例≥%.1f%%', 'ze_max': '仄声比例≤%.1f%%', 'len_min': '字数≥%d',
                'len_max': '字数≤%d', 'sent_min': '句数≥%d', 'sent_max': '句数≤%d',
                'change_min': ('|变化|≥%.1f' if getattr(self, 'change_abs', False) else '变化≥%.1f'),
@@ -1353,16 +1373,38 @@ def _parse_core(conn, text, keep_names=False):
 # 由来（2026-10-02，逐题答卷审查）：引擎原本只实现「∃ 存在」语义，遇到 ∀／∄／≥k／=k／占比／
 # 条数区间／句位／交集 一律**静默丢弃**，于是答卷答的是另一个问题（639 条答非所问、863 条守卫失职）。
 # 这里把六个量词与两个谓词补上——SQL 与真值口径 `gen_q1000.scope_where()` 同源，已互相验证。
-_Q_SIMPLE = ((r'每一句都|每句都|所有句子都', '∀'),
-             (r'没有任何一句|没有任何句子|一句都不|一句也不', '∄'),
+_Q_SIMPLE = ((r'每一句都?|每句都?|所有句子都?', '∀'),
+             (r'没有任何一句|没有任何句子|一句都不|一句也不|一句也没有', '∄'),
              # ⚠ ∃ 也要显式识别：像「至少有一句**偶数句位**上」这种组合，
              #   常规解析认不出「句位」这个谓词 → 条件整条丢失（范围被放大）。
-             (r'至少有一句|至少有[一二三四五六七八九十]句', '∃'))
+             # ⚠ 2026-10-08（任务A）修：旧式第二段 `至少有[一..十]句` 把「至少有二句」
+             #   **误判成 ∃**（＝存在一句），量词被丢、语义相反（C3 实测：真值「COUNT≥2」的题
+             #   被答成「存在一句」）。现**删去**该段——「(至少)有 N 句」无论阿拉伯/中文一律
+             #   交给下方**数值量词分支**按 ≥k 解析（见 `_Q_GE`；N==1 时记 ∃，与原本等价）。
+             #   ⚠ 这里**只**保留「至少有一句」：「至少一句」（无「有」）不在此认，以免与
+             #   交集短语「且另有至少一句句脚为「X」」抢跑（见 parse_line_ops 的 `_t_scan`）。
+             #   例：「至少有两句句脚为愁」→ line_q={op:'≥k', k:2, pred:('tail','愁')}。
+             (r'至少有一句', '∃'))
 _Q_ATLEAST = re.compile(r'有([零一二三四五六七八九十百两0-9]+)句以上')
 _Q_EXACT = re.compile(r'正好有([零一二三四五六七八九十百两0-9]+)句')
 _Q_CNT_RANGE = re.compile(r'[的]?句子数在([零一二三四五六七八九十百两0-9]+)到'
                           r'([零一二三四五六七八九十百两0-9]+)句之间')
 _Q_RATIO = re.compile(r'句子占比不低于([零一二三四五六七八九十百两0-9]+)%')
+# ================================================================ 句级**数量量词**（任务A，2026-10-08）
+# 由来（`tools/understand_eval.py` C3 实测）：「至少两句句脚为愁的清词」规则路**认不出量词**，
+#   「至少两句」残留成词面（污染 FTS）、line_q 缺失 → 退化回 ∃（＝「句脚为愁」），命中 794 篇，
+#   而真值应为 COUNT(tail=愁)>=2 的 33 篇。这里把常见中文数量量词补全（中文/阿拉伯数字皆可）。
+# 映射（全部复用**既有**算子，SQL 口径与 `gen_q1000.scope_where` 一致，见 `line_ops_where`）：
+#   ≥k          ：至少 N 句 / 至少 N 个句子 / 不少于 N 句 / N 句以上（无「有」）
+#   =k          ：正好 N 句 / 恰好 N 句 / 刚好 N 句（含既有的「正好有 N 句」）
+#   条数∈[a,b]  ：N 到 M 句之间（a=N,b=M）；不超过 N 句 / N 句以下（a=0,b=N，≤k 走既有 a<=0 分支）
+_Q_NUM = r'[零一二三四五六七八九十百千万两0-9]+'
+_Q_GE = re.compile(r'(?:至少|不少于|不小于|不低于)\s*(?:有\s*)?(%s)\s*(?:个)?句' % _Q_NUM)
+_Q_GE2 = re.compile(r'(%s)\s*(?:个)?句以上' % _Q_NUM)          # 无「有」的「N 句以上」
+_Q_EQ = re.compile(r'(?:正好|恰好|刚好)\s*(?:有\s*)?(%s)\s*(?:个)?句' % _Q_NUM)
+_Q_LE = re.compile(r'(?:不超过|至多|不多于)\s*(?:有\s*)?(%s)\s*(?:个)?句' % _Q_NUM)
+_Q_LE2 = re.compile(r'(%s)\s*(?:个)?句以下' % _Q_NUM)
+_Q_RANGE2 = re.compile(r'(%s)\s*(?:到|至|~|—|-)\s*(%s)\s*(?:个)?句之间' % (_Q_NUM, _Q_NUM))
 
 
 def _pred_of(frag):
@@ -1387,7 +1429,14 @@ def _pred_of(frag):
                   r'|句脚字＝([\u4e00-\u9fff\u3400-\u4dbf])', frag)
     if m:
         return 'tail', next(g for g in m.groups() if g)
-    m = re.search(r'整句平仄串正好是「([平仄?？]+)」', frag)
+    # ⚠ 2026-10-08（任务B）：pz_exact 的措辞**从「规范式」扩展到口语式**——改前只认带引号的
+    #   「整句平仄串正好是「X」」；改后同时认（有/无引号、有无「整句」前缀）：
+    #     「整句平仄串正好是 X」「整句平仄正好是 X」「每句的平仄串完全等于 X」「平仄串恰好为 X」。
+    #   **关键约束**：只认「正好/完全/恰好/刚好 + 是/等于/为」这一组词——绝不能吞掉子串语义的
+    #   「平仄串为 X」（那是 `pz`，不是全等），否则会把「包含」误升成「全等」（范围被砍）。
+    #   例：「每一句整句平仄串正好是仄仄平平仄」（无「都」、无「」）→ ('pz_exact','仄仄平平仄')。
+    m = re.search(r'(?:整句)?平仄串?\s*(?:正好|完全|恰好|刚好)\s*(?:是|等于|为)\s*'
+                  r'[「『]?([平仄?？]{3,})[」』]?', frag)
     if m:
         return 'pz_exact', m.group(1)          # 全等（与子串语义不同）
     m = re.search(r'声律模式是「([平仄?？]+)」|平仄串为([平仄?？]+)', frag)
@@ -1403,6 +1452,18 @@ def _pred_of(frag):
     return None
 
 
+# ⚠ 2026-10-08（任务A）：量词谓词的「同小句」片段提取。**必须按标点截断**，否则跨小句取会误抓：
+#   篇级问句「…五到八句之间，至少有一句句脚为愁…」里，若从「五到八句之间」之后取 28 字，会越过
+#   「，」抓到下一小句的「句脚为愁」，凭空给**篇级区间**造出一条句级条件（→ 双重约束/范围变窄）。
+def _q_frag_after(t, pos, n=28):
+    """量词**之后**同一小句的片段（到 ，。？；！ 或 n 字为止）。"""
+    return re.split(r'[，。？；！,;!?]', (t or '')[pos:pos + n], 1)[0]
+
+
+def _q_frag_before(t, pos, n=32):
+    """量词**之前**同一小句的片段（谓词在前的量词用，如区间「N到M句之间」）。"""
+    _seg = re.split(r'[，。？；！,;!?]', (t or '')[max(0, pos - n):pos])
+    return _seg[-1] if _seg else ''
 
 
 # 算子短语「挖空」：先把这些片段从文本里抹成空格，再交给**常规解析**。
@@ -1413,13 +1474,26 @@ _MASK_RXS = (
     # ⚠ 顺序要紧：先挖**长而完整**的短语（含谓词），再挖短算子词，
     #   否则残留的谓词会被常规解析当成 ∃ 条件，与 ∄/∀ 等冲突（实测：∄下 ∧ ∃下 = 空集）。
     re.compile(r'满足「.+」的句子(?:数在[^，。？]{0,24}句之间|占比不低于[^，。？]{0,12}%)'),
-    re.compile(r'(?:每一句都|每句都|所有句子都|没有任何一句|没有任何句子'
-               r'|一句都不|一句也不|至少有一句|至少有一句)[^，。？]{0,26}'),
+    # ⚠ 2026-10-08（任务A/B）：∀/∄/∃ 的挖空**放宽到口语措辞**——「每一句」（无「都」）、「每句」
+    #   （无「都」）、「一句也没有」也一并挖空（与 `_Q_SIMPLE` 的识别保持同一措辞集）；仍保留
+    #   `[^，。？]{0,26}` 吃掉紧随谓词（避免残留谓词被常规解析当 ∃，与 ∄/∀ 打架）。
+    re.compile(r'(?:每一句都?|每句都?|所有句子都?|没有任何一句|没有任何句子'
+               r'|一句都不|一句也不|一句也没有|至少有一句)[^，。？]{0,26}'),
     _Q_EXACT, _Q_ATLEAST, _Q_CNT_RANGE, _Q_RATIO,
+    # ⚠ 交集短语必须**早于**下面的 `_Q_GE` 挖空：否则 `_Q_GE` 会先把「至少一句」单独抹掉，
+    #   致使本行的整条交集短语匹配失败、残留「句脚为「X」」进常规解析（多余 ∃，虽与 tail_each
+    #   重复无害，但顺序上应保持与改前一致）。
+    re.compile(r'且另有至少一句句脚为「[\u4e00-\u9fff\u3400-\u4dbf]」'),
+    # ⚠ 2026-10-08（任务A）新增：中文数量量词的**量词短语**（只挖量词，谓词留给常规解析，
+    #   与既有 `_Q_ATLEAST`/`_Q_EXACT`/`_Q_CNT_RANGE` 同法；句脚族谓词随后由 `_sql` 去重）。
+    #   ⚠「N到M句之间」(`_Q_RANGE2`) **不在此处**——它与**篇级**句数区间同形（见 `_mask_ops`）。
+    _Q_GE, _Q_GE2, _Q_EQ, _Q_LE, _Q_LE2,
     # 句长区间：它是**句级**谓词，不挖掉会被当成**篇级**字数（5~9 字）→ 与句级条件打架
     re.compile(r'句长在[零一二三四五六七八九十百两0-9]+到[零一二三四五六七八九十百两0-9]+字之间'),
-    re.compile(r'且另有至少一句句脚为「[\u4e00-\u9fff\u3400-\u4dbf]」'),
-    re.compile(r'整句平仄串正好是「[平仄?？]+」'),
+    # ⚠ 2026-10-08（任务B）：pz_exact 的挖空同样放宽到口语式（无引号/无「整句」前缀），
+    #   否则口语式会残留成词面（实测 C7：改前残留「串正好」→ 词面污染）。
+    re.compile(r'(?:整句)?平仄串?\s*(?:正好|完全|恰好|刚好)\s*(?:是|等于|为)\s*'
+               r'[「『]?[平仄?？]{3,}[」』]?'),
     re.compile(r'[奇偶]数句位'),
 )
 
@@ -1428,6 +1502,14 @@ def _mask_ops(text):
     t = text or ''
     for rx in _MASK_RXS:
         t = rx.sub(lambda m: ' ' * len(m.group(0)), t)
+    # ⚠ 2026-10-08（任务A）：「N到M句之间」是**篇级/句级同形**短语（题库把**篇级**句数区间也写成
+    #   「五到八句之间」，见 gen_q1000.py:206）——**不能无条件挖空**，否则篇级 `sent_min/sent_max`
+    #   整条丢失（范围变宽 → 一批假 E_SCOPE）。故**条件挖空**：只有当同一小句里**紧邻其前**存在
+    #   句级谓词（「…的句子N到M句之间」）时才按句级挖掉；否则原样留给常规数值解析当**篇级句数**。
+    def _range_if_line(m, _t=t):
+        return (' ' * len(m.group(0))
+                if _pred_of(_q_frag_before(_t, m.start())) else m.group(0))
+    t = _Q_RANGE2.sub(_range_if_line, t)
     return t
 
 
@@ -1444,14 +1526,26 @@ def parse_line_ops(text, spec):
     for m in re.finditer(r'且另有至少一句句脚为「([\u4e00-\u9fff\u3400-\u4dbf])」', t):
         if m.group(1) not in spec.tail_each:
             spec.tail_each.append(m.group(1))
+    # ⚠ 2026-10-08（任务A）：**量词扫描前，先把交集短语抹掉**（`_t_scan`，与 `t` 等长、位置对齐）。
+    #   交集短语「且另有至少一句句脚为「X」」里的「至少一句」是**交集表达**，不是主量词。若让量词
+    #   扫描看到它，会把真正的主量词**覆盖**掉：`_Q_SIMPLE`∃/`_Q_GE` 会先命中它并置 line_q=∃，
+    #   使随后「占比不低于N%」「句子数在N到M句之间」等分支被跳过（实测 Q 类：占比+交集题会被
+    #   静默降级成 ∃）。抹掉后量词扫描只看真正的主量词；tail_each 已在上面单独记好。
+    _t_scan = t
+    for _m in re.finditer(r'且另有至少一句句脚为「[\u4e00-\u9fff\u3400-\u4dbf]」', t):
+        _t_scan = _t_scan[:_m.start()] + ' ' * (_m.end() - _m.start()) + _t_scan[_m.end():]
     # 平仄串全等
-    m = re.search(r'整句平仄串正好是「([平仄?？]+)」', t)
+    # ⚠ 2026-10-08（任务B）：同 `_pred_of`，措辞放宽到口语式（无引号/无「整句」前缀）。**无量化词**时
+    #   由此直接落成 ∃ 全等（`spec.pz_exact`）；**有** ∀/∄/数量词时由上面的量词分支落成 `line_q`，
+    #   二者若同时命中，`_sql` 第 1604 行会去重，不会叠加成自相矛盾（∃ 全等 ∧ ∄ 全等 = 空集）。
+    m = re.search(r'(?:整句)?平仄串?\s*(?:正好|完全|恰好|刚好)\s*(?:是|等于|为)\s*'
+                  r'[「『]?([平仄?？]{3,})[」』]?', t)
     if m:
         spec.pz_exact = m.group(1)
         spec.pz = None                      # 全等与子串互斥
-    # 量词 + 谓词
+    # 量词 + 谓词（在 `_t_scan` 上搜——已抹掉交集短语；谓词仍从原 `t` 取，位置对齐）
     for pat, op in _Q_SIMPLE:
-        m = re.search(r'(?:%s)(?P<frag>[^，。？]{0,28})' % pat, t)
+        m = re.search(r'(?:%s)(?P<frag>[^，。？]{0,28})' % pat, _t_scan)
         if m:
             pr = _pred_of(m.group('frag'))
             if pr:
@@ -1476,6 +1570,46 @@ def parse_line_ops(text, spec):
                 spec.line_q = {'op': '条数∈[a,b]', 'pred': pr,
                                'ka': int(cn_num(m.group(1)) or 0),
                                'kb': int(cn_num(m.group(2)) or 0)}
+
+    # ⚠ 2026-10-08（任务A）：**中文数量量词**（至少N句／(至少)有N句以上／正好N句／不超过N句／
+    #   N句以下／N到M句之间）。谓词取量词**同一小句**内的片段（谓词在后取后、区间取前）——
+    #   跨小句取会误抓（见 `_q_frag_after` 注释：篇级「五到八句之间，至少有一句句脚为愁」）。
+    #   这些分支只在「前面 5 类都未认出量词」时启用（`line_q is None`），且**不改动**既有
+    #   「有N句以上」「正好有N句」「句子数在N到M句之间」的 SQL 口径（它们更早匹配、结果逐字不变）。
+    if spec.line_q is None:                      # 区间：N 到 M 句之间 → 条数∈[N,M]（谓词在前）
+        m = _Q_RANGE2.search(_t_scan)
+        if m:
+            pr = _pred_of(_q_frag_before(t, m.start()))
+            if pr:
+                spec.line_q = {'op': '条数∈[a,b]', 'pred': pr,
+                               'ka': int(cn_num(m.group(1)) or 0),
+                               'kb': int(cn_num(m.group(2)) or 0)}
+    if spec.line_q is None:                      # ≥k：至少 N 句 / N 句以上
+        for rx in (_Q_GE, _Q_GE2):
+            m = rx.search(_t_scan)
+            if not m:
+                continue
+            pr = _pred_of(_q_frag_after(t, m.end()))
+            if pr:
+                _k = int(cn_num(m.group(1)) or 0)
+                # k<=1（「至少一句」）与 ∃ 语义等价；为**不改**既有「至少有一句」的表述，记 ∃。
+                spec.line_q = ({'op': '≥k', 'pred': pr, 'k': _k} if _k >= 2
+                               else {'op': '∃', 'pred': pr})
+                break
+    if spec.line_q is None:                      # =k：正好 / 恰好 / 刚好 N 句
+        m = _Q_EQ.search(_t_scan)
+        if m:
+            pr = _pred_of(_q_frag_after(t, m.end()))
+            if pr:
+                spec.line_q = {'op': '=k', 'pred': pr, 'k': int(cn_num(m.group(1)) or 0)}
+    if spec.line_q is None:                      # ≤k：不超过 N 句 / N 句以下 → 条数∈[0,k]
+        m = _Q_LE.search(_t_scan) or _Q_LE2.search(_t_scan)
+        if m:
+            pr = _pred_of(_q_frag_after(t, m.end()))
+            if pr:
+                # 复用「条数∈[a,b]」（a==0 走 `line_ops_where` 的 a<=0 分支，缺陷2 已实现）
+                spec.line_q = {'op': '条数∈[a,b]', 'pred': pr, 'ka': 0,
+                               'kb': int(cn_num(m.group(1)) or 0)}
 
     # 一致性：声情标注为 X 但实测前后段相反（声情×派生量 的矛盾面）
     m = re.search(r'声情标注为(后段上升|后段下降|前后持平)但实测前后段相反', t)
@@ -1546,23 +1680,55 @@ def line_ops_where(spec):
             nar = _pred_sql(_k, _v)[1]
             w.append('p.pid NOT IN (SELECT l.pid FROM lines l WHERE %s)' % neg)
             a += nar
+            # ⚠ 2026-10-08（缺陷1）：这一句 = 「至少有一句」，即把**空篇（0 句）排除在 ∀ 之外**。
+            #   口径已与两条独立来源核对一致，故**刻意保留**（而不是删掉）：
+            #     ① 真值口径 `tools/gen_q1000.py:scope_where` 的 ∀ 分支（第 262 行）有**同一句**
+            #        `w.append('p.pid IN (SELECT pid FROM lines)')`——真值同样把空篇排除；
+            #     ② 检索 SQL（本函数）与真值由此逐题相等（verify_1000 ① 条件理解一致性）。
+            #   而 `ask.py:1615-1621` 的「平凡满足」注释：其计数声明是「与真值口径一致」，
+            #   触发场景实为 **∄**（该注释举的 Q0008 就是 `∄｜句位奇偶`），并非 ∀。
+            #   改前行为：SQL 排除空篇（对），但 Python 复核 `n == tot`（0==0）判空篇**满足**（错）→ 两路打架。
+            #   改后行为：两路统一为「∀ 要求篇内至少一句且每句都满足」，空篇不计。
+            #   全库空篇 = `SELECT COUNT(*) FROM poems WHERE sent_n=0` = 144（元曲残片，且 lines 表无行）。
             w.append('p.pid IN (SELECT l.pid FROM lines l)')
         elif op == '∄':
             w.append('p.pid NOT IN (SELECT l.pid FROM lines l WHERE %s)' % expr)
             a += ar
         elif op in ('≥k', '=k'):
-            cmp_ = '>=' if op == '≥k' else '='
-            w.append('p.pid IN (SELECT l.pid FROM lines l WHERE %s GROUP BY l.pid '
-                     'HAVING COUNT(*) %s ?)' % (expr, cmp_))
-            a += ar + [lq['k']]
+            # ⚠ 2026-10-08（缺陷2）：`GROUP BY l.pid HAVING COUNT(*) …` 只可能产出「至少有一句进入
+            #   GROUP BY」的篇 → 当 k==0 时**漏掉全部「0 命中」篇**（含 144 个空篇）。
+            #   改前行为：`=0` 返回空集（真值是「所有不含该谓词的篇」）；`≥0` 只返回命中≥1句的篇。
+            #   改后行为：`=0` → 补集 `NOT IN (…WHERE expr)`；`≥0` → 恒真（不加此条件）。
+            #   保持 `≥1/=k(k≥1)` 的 SQL **逐字不变**（常见情形结果不变）。
+            _k = lq['k']
+            if op == '=k' and _k == 0:
+                w.append('p.pid NOT IN (SELECT l.pid FROM lines l WHERE %s)' % expr)
+                a += ar
+            elif op == '≥k' and _k == 0:
+                pass                                   # ≥0 恒真：不加任何条件
+            else:
+                cmp_ = '>=' if op == '≥k' else '='
+                w.append('p.pid IN (SELECT l.pid FROM lines l WHERE %s GROUP BY l.pid '
+                         'HAVING COUNT(*) %s ?)' % (expr, cmp_))
+                a += ar + [_k]
         elif op == '占比≥p':
             w.append('p.pid IN (SELECT l.pid FROM lines l GROUP BY l.pid HAVING '
                      'SUM(CASE WHEN %s THEN 1 ELSE 0 END) * 1.0 / COUNT(*) >= ?)' % expr)
             a += ar + [lq['ratio']]
         elif op == '条数∈[a,b]':
-            w.append('p.pid IN (SELECT l.pid FROM lines l WHERE %s GROUP BY l.pid '
-                     'HAVING COUNT(*) BETWEEN ? AND ?)' % expr)
-            a += ar + [lq['ka'], lq['kb']]
+            # ⚠ 2026-10-08（缺陷2）：同 `=k`——`BETWEEN a AND b` 也只在「有句进 GROUP BY」的篇里取，
+            #   a==0 时漏掉「0 命中」篇。改后行为：a<=0 时拆成 `(NOT EXISTS OR COUNT<=b)`（0 命中 ∪ 1..b）。
+            #   保持 a>=1 的 SQL 逐字不变。
+            _ka, _kb = lq['ka'], lq['kb']
+            if _ka <= 0:
+                w.append('(p.pid NOT IN (SELECT l.pid FROM lines l WHERE %s) OR '
+                         'p.pid IN (SELECT l.pid FROM lines l WHERE %s GROUP BY l.pid '
+                         'HAVING COUNT(*) <= ?))' % (expr, expr))
+                a += ar + ar + [_kb]
+            else:
+                w.append('p.pid IN (SELECT l.pid FROM lines l WHERE %s GROUP BY l.pid '
+                         'HAVING COUNT(*) BETWEEN ? AND ?)' % expr)
+                a += ar + [_ka, _kb]
     for t in spec.tail_each:        # 交集：每个取值都必须有**一句**
         w.append('p.pid IN (SELECT l.pid FROM lines l WHERE l.tail = ?)')
         a.append(t)
@@ -1603,6 +1769,16 @@ def _sql(spec):
 
     for attr, col in (('dynasty', 'p.dynasty'), ('author', 'p.author'), ('cipai', 'p.cipai')):
         one(col, _vals(spec, attr))
+    # ⚠ 2026-10-08 新增（任务C）：**上一轮结果集**范围（会话指代「那里面…」→ 前端传 pid 集合）。
+    #   改前 → 无此分支（前端传的上一轮 pid 无处落地）；改后 → 编译成硬条件 `p.pid IN (?,…)`。
+    #   依据（性质）：**规则路永不产出 `ctx_pids`**（初始化为 []），只有大模型路/前端会设，
+    #   故对 1000 题（规则路）恒不进入此分支 → 零影响。
+    #   例：上一轮命中 12 篇 → `ctx_pids=[p1…p12]` → 本轮所有条件都在这 12 篇内再筛。
+    #   注意：参数与 where/args **成对追加**（下方 `assert sum(where 的 '?')==len(args)` 校验）。
+    #   若 pid 集合极大（>SQLite 变量上限 999）需在上层分块，本层不静默截断。
+    if getattr(spec, 'ctx_pids', None):
+        where.append('p.pid IN (%s)' % ','.join('?' * len(spec.ctx_pids)))
+        args.extend(spec.ctx_pids)
     # ⚠ 2026-10-05 新增：**题名检索**。题名是完整标题（如「蝶恋花·清明同诸子集原白斋中」），
     #   用户给出的往往只是「题名部分」（词题），故用**子串**匹配 `LIKE %题名%` 而不是等值。
     #   多值时取并集（与其它字段一致）。走 OR 而不是 IN：每项各自的 LIKE 无法折成 IN。
@@ -1679,12 +1855,54 @@ def pz_re(pat):
     return r
 
 
-def line_satisfies(pz, tail, spec):
+def _line_pred_ok(kind, val, pz, tail, idx, han_len):
+    """单句是否满足**句级谓词**——`_pred_sql()` 的 Python 同义实现（供证据层重算）。
+
+    口径必须与 `_pred_sql()` **逐字对齐**：`parity` 用 `l.idx % 2`（idx 从 0 起，
+    `=0` 表示句位 1/3/5… 即「奇数句位」）；`len` 是 `han_len` 的**闭区间**。
+    """
+    if kind == 'tail':
+        return (tail or '') == val
+    if kind == 'tail_any':
+        return (tail or '') in set(val)
+    if kind == 'tail_pz':
+        return (pz or '')[-1:] == val
+    if kind == 'pz':
+        return bool(pz) and bool(pz_re(val).search(pz))
+    if kind == 'pz_exact':
+        return (pz or '') == val
+    if kind == 'len':
+        return han_len is not None and val[0] <= han_len <= val[1]
+    if kind == 'parity':
+        return idx is not None and (idx % 2) == val
+    return False
+
+
+def line_satisfies(pz, tail, spec, idx=None, han_len=None):
     """某一句是否满足 spec 的**行级**条件。返回命中的条件名列表。
 
-    行级条件只有三类：句脚字（`tail`，可多值）、句脚平仄（`tail_pz`）、声律模式（`pz`）。
+    行级条件：句脚字（`tail`，可多值）、句脚平仄（`tail_pz`）、声律模式（`pz`）；
+    高级句级条件：平仄串全等（`pz_exact`）、篇内交集（`tail_each`）、
+    句级算子谓词（`line_q['pred']`，含 `parity` 句位奇偶 / `len` 句长）。
     ——检索（SQL）与证据展示（选哪一句）必须用**同一份判定**，否则就会出现
     「问句脚字，答案却展示另一句」这类看起来没错、其实答非所问的错（2026-09-30 实测）。
+
+    ⚠ 2026-10-08（缺陷3）：旧版只认 tail/tail_pz/pz，**完全不认** line_q / pz_exact /
+    tail_each / parity。后果：spec 只带高级句级算子时，本函数对所有句都返回 [] →
+    `evidence.poem_block` 的命中句集合 `m_idx` 为空 → 落到「按仄声占比最高的句」补证据 →
+    **展示了一句与查询条件无关的句子**（破坏「可溯源问答」）。
+    改后行为：把这些条件都纳入判定，使证据层能指名**命中句**（`idx`/`han_len` 由
+    调用方按句传入；见 evidence.py 的调用点）。
+
+    取舍（篇级量）：
+      · `parity`（句位奇偶）可**句级**判定（看该句 idx 的奇偶），随参数 `idx` 判；
+      · `consist`（声情标注为 X 但实测前后段相反）是**篇级**声情走向，**不在这里**按句判
+        ——否则会把一整篇的每一句都误标成「命中句」。它在 `evidence.poem_block` 里作为
+        **篇级命中理由**（`poem_reasons`）表达（见 evidence.py）。
+
+    `poem_reasons` 的数据结构（`list[str]` 篇级理由，与句级 `match_reasons` 分工）在
+    `evidence.poem_block` 顶部有完整契约说明；`ask.py:_line_note` 目前只读
+    `lines[i]['match_reasons']`（句级），**尚未**读 `poem_reasons`——接入建议见交付报告。
     """
     hit = []
     if (tail or '') in _vals(spec, 'tail'):
@@ -1693,6 +1911,17 @@ def line_satisfies(pz, tail, spec):
         hit.append('句脚平仄')
     if spec.pz and pz and pz_re(spec.pz).search(pz):
         hit.append('声律模式')
+    if spec.pz_exact and (pz or '') == spec.pz_exact:
+        hit.append('平仄串全等')
+    for _v in (spec.tail_each or []):
+        if (tail or '') == _v:
+            hit.append('篇内交集·句脚字')
+    _lq = getattr(spec, 'line_q', None)
+    if _lq and _lq.get('pred') and _line_pred_ok(
+            _lq['pred'][0], _lq['pred'][1], pz, tail, idx, han_len):
+        # 句级算子谓词本身是「句级」的：满足谓词的句即命中句，与量词（∀/∃/COUNT）无关
+        # ——量词只决定「篇是否入结果集」，命中句始终是「满足谓词的那些句」。
+        hit.append('句级算子·满足句')
     return hit
 
 
@@ -1750,6 +1979,26 @@ def verify_spec_on_poem(conn, pid, spec):
         bad.append('题名不符（%s 不含 %s）' % (ti, '／'.join(_vals(spec, 'title'))))
     if spec.scene and sc != spec.scene:
         bad.append('声情不符（%s≠%s）' % (sc, spec.scene))
+    # ⚠ 2026-10-08 新增（缺陷4）：`consist` 在 `_sql()`（第 1644-1650 行）里被编译成**真实硬条件**
+    #   （`后段上升` → `p.change < 0`、`后段下降` → `p.change > 0`、其余 → `ABS(p.change) < 1`），
+    #   `has_hard()` 也把它算作硬条件；但本复核**唯独漏了它** → 「SQL 筛一次 + Python 独立复核一次」
+    #   在这个量上并不成立（改前行为）。改后行为：按 `_sql()` 的同一口径，用篇的 `change` 字段独立复算。
+    #   注意 `scene` 已被同步设为 consist 值（parse_query 第 1484 行），上面的声情复核只覆盖了
+    #   「标注」这一半，「实测相反」这一半必须靠这里。
+    if getattr(spec, 'consist', None):
+        if ch is None:
+            bad.append('一致性不符（声情标注为%s但实测前后段相反，需 change 判定，本篇 change 缺失）'
+                       % spec.consist)
+        elif spec.consist == '后段上升':
+            if not (ch < 0):
+                bad.append('一致性不符（声情标注为后段上升，要求 change<0，实测 %.1f）' % ch)
+        elif spec.consist == '后段下降':
+            if not (ch > 0):
+                bad.append('一致性不符（声情标注为后段下降，要求 change>0，实测 %.1f）' % ch)
+        else:
+            if not (abs(ch) < 1):
+                bad.append('一致性不符（声情标注为%s，要求 |change|<1，实测 %.1f）'
+                           % (spec.consist, ch))
     for key, val, op, lab in (('ze_min', zr, '>=', '仄声比例'), ('ze_max', zr, '<=', '仄声比例'),
                               ('len_min', hl, '>=', '字数'), ('len_max', hl, '<=', '字数'),
                               ('sent_min', sn, '>=', '句数'), ('sent_max', sn, '<=', '句数'),
@@ -1768,24 +2017,34 @@ def verify_spec_on_poem(conn, pid, spec):
         if not ok:
             bad.append('%s不符（%s %s %s 不成立）' % (lab, got, op, want))
     if has_line_cond(spec):
-        rows = conn.execute('SELECT pz,tail FROM lines WHERE pid=?', (pid,)).fetchall()
+        # ⚠ 2026-10-08（缺陷5）：旧版是 `SELECT pz,tail`，**没有 idx / han_len** —— 于是
+        #   `parity`（句位）与 `len`（句长）两类谓词**根本无从复核**：它们经 line_q 进了 SQL，
+        #   却在 Python 侧被 `_lines_hit` 返回 None → 整条落到 else 分支 → 没有任何兜底。
+        #   现把行数据补成 `idx,han_len,pz,tail`（只是让数据齐备，不改任何既有判定口径）。
+        rows = conn.execute('SELECT idx,han_len,pz,tail FROM lines WHERE pid=?', (pid,)).fetchall()
         _lq = spec.line_q or {}
         _pred, _op = _lq.get('pred'), _lq.get('op')
 
         def _lines_hit(kind, val):
-            # ⚠ rows 是 `SELECT pz, tail`：第一个是**平仄串**、第二个是**句脚字**。
-            #   第一版把两者写反了（句脚平仄/声律模式都拿 tail 去比）→ 恒为 0 命中，
-            #   于是「句级算子不满足（=k，满足句数 0/N）」误报（实测 Q0622/Q0674）。
+            # ⚠ rows 是 `SELECT idx, han_len, pz, tail`：第 3 个是**平仄串**、第 4 个是**句脚字**。
+            #   第一版把 pz/tail 写反了 → 恒为 0 命中，误报「句级算子不满足」（实测 Q0622/Q0674）。
             if kind == 'tail':
-                return [1 for _pz, t in rows if (t or '') == val]
+                return [1 for _i, _hl, _pz, t in rows if (t or '') == val]
             if kind == 'tail_any':
-                return [1 for _pz, t in rows if (t or '') in set(val)]
+                return [1 for _i, _hl, _pz, t in rows if (t or '') in set(val)]
             if kind == 'tail_pz':
-                return [1 for _pz, _t in rows if (_pz or '')[-1:] == val]
+                return [1 for _i, _hl, _pz, _t in rows if (_pz or '')[-1:] == val]
             if kind == 'pz':
-                return [1 for _pz, _t in rows if _pz and pz_re(val).search(_pz)]
+                return [1 for _i, _hl, _pz, _t in rows if _pz and pz_re(val).search(_pz)]
             if kind == 'pz_exact':
-                return [1 for _pz, _t in rows if (_pz or '') == val]
+                return [1 for _i, _hl, _pz, _t in rows if (_pz or '') == val]
+            # ⚠ 2026-10-08（缺陷5）：与 `_pred_sql()` **逐字同口径**——
+            #   parity：`(l.idx % 2) = ?`（idx 从 0 起，=0 即句位 1/3/5…）；len：han_len 闭区间。
+            if kind == 'parity':
+                return [1 for _i, _hl, _pz, _t in rows if _i is not None and (_i % 2) == val]
+            if kind == 'len':
+                return [1 for _i, _hl, _pz, _t in rows
+                        if _hl is not None and val[0] <= _hl <= val[1]]
             return None
 
         hit = _lines_hit(*_pred) if _pred else None
@@ -1794,31 +2053,39 @@ def verify_spec_on_poem(conn, pid, spec):
             #   「篇内满足的句数 =k/≥k/占比/条数/∀/∄」（实测 Q0390：=k 1 句 且句脚∈{瘦,去}，
             #   复核按单值 tail=瘦 判 → 误报「无句脚字为瘦的句子」，与 SQL 自相矛盾）。
             n, tot = len(hit), len(rows)
-            _okq = {'∃': n >= 1, '∀': n == tot, '∄': n == 0,
+            # ⚠ 2026-10-08 修（缺陷1）：`∀` 由 `n == tot` 改为 `tot > 0 and n == tot`。
+            #   改前行为：空篇（tot=0, n=0）→ `0 == 0` 判**满足**；而检索 SQL（line_ops_where 的
+            #   ∀ 分支）与真值口径（gen_q1000.scope_where 的 ∀ 分支）**都**加了
+            #   `pid IN (SELECT pid FROM lines)` → 排除空篇。三处里只有本复核把空篇算进去 → 打架。
+            #   改后行为：与 SQL/真值统一为「∀ 要求篇内至少一句、且每句都满足」；空篇不计。
+            #   （全库空篇 = 144 篇；`SELECT COUNT(*) FROM poems WHERE sent_n=0`。）
+            _okq = {'∃': n >= 1, '∀': (tot > 0 and n == tot), '∄': n == 0,
                     '=k': n == _lq.get('k', 0), '≥k': n >= _lq.get('k', 0),
                     '占比≥p': (tot > 0 and n * 1.0 / tot >= _lq.get('ratio', 0)),
                     '条数∈[a,b]': _lq.get('ka', 0) <= n <= _lq.get('kb', 0)}[_op]
             if not _okq:
                 bad.append('句级算子不满足（%s，满足句数 %d/%d）' % (_op, n, tot))
         else:
+            _pzs = [r[2] for r in rows]
+            _tls = [r[3] for r in rows]
             tl = _vals(spec, 'tail')
             if _pred and _pred[0] in ('tail', 'tail_any'):
                 tl = list(dict.fromkeys(list(tl) + (
                     list(_pred[1]) if _pred[0] == 'tail_any' else [_pred[1]])))
-            if tl and not any((x or '') in tl for _pz, x in rows):
+            if tl and not any((x or '') in tl for x in _tls):
                 bad.append('无句脚字为 %s 的句子' % '／'.join(tl))
-            if spec.tail_pz and not any((pz or '')[-1:] == spec.tail_pz for pz, _tl in rows):
+            if spec.tail_pz and not any((pz or '')[-1:] == spec.tail_pz for pz in _pzs):
                 bad.append('无句脚为%s的句子' % spec.tail_pz)
-            if spec.pz and not any(pz and pz_re(spec.pz).search(pz) for pz, _tl in rows):
+            if spec.pz and not any(pz and pz_re(spec.pz).search(pz) for pz in _pzs):
                 bad.append('无声律模式 %s 命中句' % spec.pz)
             # ⚠ 2026-10-06 修（外部审查 P1-12）：高级句级条件原先**不在复核范围内**
             #   （has_line_cond 漏判 → 整块被跳过）。这里补上 pz_exact 与 tail_each 的独立复核。
-            #   注：`parity`（句位奇偶）暂未纳入——其 SQL 侧的句位计数口径（idx 起算）需单独
-            #   核对，贸然复核可能引入误报；已在 DECISIONS.md 记为本轮未覆盖项。
-            if spec.pz_exact and not any((pz or '') == spec.pz_exact for pz, _tl in rows):
+            # ⚠ 2026-10-08 修（缺陷5）：原先注释里写「parity 暂未纳入复核」——本轮已补齐：
+            #   parity/len 由上面的 `_lines_hit` 处理（走 `hit is not None` 那条分支）。
+            if spec.pz_exact and not any((pz or '') == spec.pz_exact for pz in _pzs):
                 bad.append('无声律模式**全等** %s 的句子' % spec.pz_exact)
             for _v in (spec.tail_each or []):
-                if not any((t or '') == _v for _pz, t in rows):
+                if not any((t or '') == _v for t in _tls):
                     bad.append('tail_each 要求每个句脚都出现，但缺「%s」' % _v)
     return bad
 
@@ -2001,10 +2268,14 @@ def has_hard(spec):
     「没有硬条件」→ `restrict=None` → 检索**不做范围限定**，端上去的是全库融合排序前几篇
     （实测 Q0121：真值 2 篇，却展示 3 篇、还声称「全库仅此 2 篇」）。
     """
+    # ⚠ 2026-10-08（任务C）：`ctx_pids`（上一轮结果集）是**硬条件**（`_sql` 编译成 `p.pid IN (…)`），
+    #   故必须计入——否则「那里面哪个最短」这类**只带范围**的追问会被判成「无硬条件」而全库排序。
+    #   规则路 ctx_pids 恒为空 → 对 1000 题零影响。
     return bool(_vals(spec, 'dynasty') or _vals(spec, 'author') or _vals(spec, 'cipai')
                 or _vals(spec, 'title')
                 or spec.scene or spec.pz or spec.pz_exact or _vals(spec, 'tail')
-                or spec.tail_pz or spec.tail_each or spec.line_q or spec.consist or spec.rng)
+                or spec.tail_pz or spec.tail_each or spec.line_q or spec.consist or spec.rng
+                or getattr(spec, 'ctx_pids', None))
 
 
 def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=False):
@@ -2033,8 +2304,14 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
 
     # 审查 B6：旧写法 `isinstance(query, str)` 在 ask.py 主路径（传的是 QuerySpec）下恒为 False，
     # 于是权重最高（0.40）的二字组路**永远为空**。判据改成「有没有原始问句」：
-    lex = route_bigram(conn, spec.raw) if spec.raw else {}
-    ft = route_phrase(conn, spec.keywords) if spec.keywords else {}
+    # ⚠ 2026-10-08（任务C）：**语义扩展词 `semantic` 并入全文检索**（提升召回）——**不改任何 SQL
+    #   硬条件**（`_sql` 完全不看 semantic），有硬条件时候选仍会被 `restrict` 收窄，故不影响
+    #   硬条件题的结果集；只在**无硬条件**的语义题上补充召回。规则路 semantic 恒为空 → 1000 题零影响。
+    _sem = [w for w in (getattr(spec, 'semantic', None) or []) if w]
+    _lex_txt = ((spec.raw or '') + ' ' + ' '.join(_sem)).strip() if _sem else (spec.raw or '')
+    _ft_kws = list(dict.fromkeys(list(spec.keywords or []) + _sem)) if _sem else (spec.keywords or [])
+    lex = route_bigram(conn, _lex_txt) if _lex_txt else {}
+    ft = route_phrase(conn, _ft_kws) if _ft_kws else {}
     # 数值路只在用户明确给了数值条件时参与（否则会把「满足 1=1 的前 N 篇」灌进来）
     num = route_numeric(conn, where, args) if spec.rng else {}
     pzs = route_pz(conn, spec.pz) if spec.pz else {}

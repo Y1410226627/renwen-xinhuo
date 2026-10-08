@@ -8,6 +8,12 @@
  * 与旧版的差异只在「结构写法」：21 个检索字段与 11 个排序项改为**配置数组驱动渲染**
  * （旧版是一百多行手写 <label>），这是本次「降低维护成本」的核心改进之一。
  * 判定表、分页语义、逐字解析渲染全部复用 core/parse.js 的纯函数（字符串契约不变）。
+ *
+ * ⚠ 2026-10-08 精修（本轮交付）：① 加载/错误/空态各有明确文案（三态互斥，不再出现空白或永远转圈）；
+ *   ② 结果表可点列头**对当前页**排序（纯前端，明确标注「仅当前页」，不动后端分页/排序语义）；
+ *   ③ 每行加「复制 pid」、页头加「复制条件摘要」；④ 输入框 Enter 即检索、Esc 清错误；
+ *   ⑤ CSV 顶部加一行「条件摘要 + 命中数 + 范围 + 生成时间」元信息；
+ *   ⑥ 条件写入 URL（history.replaceState，保留既有 ?pid=，file:// 下自动跳过）——刷新不丢条件。
  */
 import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { ParseApp, UI } from '../core/index.mjs';
@@ -68,6 +74,108 @@ const cnt = ref(0);
 const lastHits = ref([]);        // 供导出 CSV
 let lastCond = {};
 
+/* ⚠ 2026-10-08 精修（本轮交付）——把「状态」显式化，空态/加载态/错误态各有明确文案，
+ *   不再让错误挤在成功元信息行里、也不出现「永远转圈」：
+ *     · loadMsg 有值 → 加载态（带 spinner + 在做什么）；
+ *     · errMsg  有值 → 错误态（原因 + 三步处置，Esc 可清）；
+ *     · searched && 无加载无错误 && total=0 → 空态（给下一步提示，而不是一张空表）。
+ *   三个 ref 互斥渲染，见模板。 */
+const loadMsg = ref('');
+const errMsg = ref('');
+const searched = ref(false);     // 是否已跑过至少一次检索（避免首屏未跑就报「空态」）
+
+/* 前端排序（仅排**当前页**已渲染的行，不改后端、不影响 /api/search 的分页与排序语义）：
+ *   点列头在 升/降 间切换；列头右侧箭头如实标注方向；页面上另有一句「本页已排序」的提示，
+ *   不把「本页排序」伪装成「全库排序」。 */
+const sortKey = ref('');
+const sortDir = ref('asc');
+const COLS_KEYS = ['author', 'title', 'cipai', 'sent', 'len', 'ze', 'scene'];
+function cellOf(it, k) {
+  const r = it.row, m = it.info.metrics;
+  if (k === 'author') { return r[2]; }
+  if (k === 'title') { return r[4]; }
+  if (k === 'cipai') { return r[3]; }
+  if (k === 'scene') { return m.scene; }
+  if (k === 'sent') { return m.sent_n; }
+  if (k === 'len') { return m.han_len; }
+  if (k === 'ze') { return m.ze_ratio; }
+  return '';
+}
+const sortedRows = computed(() => {
+  const base = rows.value.slice();
+  const k = sortKey.value;
+  if (!k) { return base; }
+  const sign = sortDir.value === 'desc' ? -1 : 1;
+  return base.sort((a, b) => {
+    const x = cellOf(a, k), y = cellOf(b, k);
+    if (typeof x === 'number' && typeof y === 'number') {
+      return sign * (x - y) || (a.row[0] < b.row[0] ? -1 : a.row[0] > b.row[0] ? 1 : 0);
+    }
+    const sx = String(x), sy = String(y);
+    return sign * (sx < sy ? -1 : sx > sy ? 1 : 0);
+  });
+});
+const sortLabel = computed(() => {
+  if (!sortKey.value) { return ''; }
+  const names = { author: '词人', title: '题名', cipai: '词牌', sent: '句数', len: '字数', ze: '仄比', scene: '声情' };
+  return `本页已按「${names[sortKey.value] || sortKey.value}」${sortDir.value === 'asc' ? '升序' : '降序'}排列`;
+});
+function clickSort(k) {
+  if (COLS_KEYS.indexOf(k) < 0) { return; }
+  if (sortKey.value === k) { sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'; }
+  else { sortKey.value = k; sortDir.value = 'asc'; }
+}
+function sortInd(k) { return sortKey.value === k ? (sortDir.value === 'asc' ? '▲' : '▼') : ''; }
+
+/* 空态：跑过检索、没在加载、没有错误、命中又为 0 —— 才提示「下一步怎么做」。 */
+const noHit = computed(() => searched.value && !loadMsg.value && !errMsg.value && total.value === 0);
+
+/* 复制到剪贴板：优先 navigator.clipboard（https/localhost），退回 textarea + execCommand
+ *   （file:// 双击打开时 clipboard 常不可用）。两条路都失败才 toast 报错。 */
+async function copyText(text, okMsg) {
+  const t = String(text || '');
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(t);
+      UI.toast(okMsg || '已复制');
+      return;
+    }
+  } catch (e) { /* 退回下面的兜底 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    UI.toast(ok ? (okMsg || '已复制') : '复制失败：请手动选择文本');
+  } catch (e2) { UI.toast('复制失败：请手动选择文本'); }
+}
+function copyPid(pid) { copyText(pid, `已复制 pid：${pid}`); }
+function copyCond() {
+  const lines = ['词律探微 · 检索条件摘要',
+    '条件：' + ParseApp.condText(lastCond),
+    `命中：${total.value} 篇`,
+    '说明：数字由本地引擎（同一套确定性口径）逐字算出，可按此条件复算。'];
+  copyText(lines.join('\n'), '已复制条件摘要');
+}
+function clearError() { if (errMsg.value) { errMsg.value = ''; } }
+
+/* ⚠ 2026-10-06 新增（外部审查 P1，本轮第 1/2 项）：把 `/api/nl2query` 的「理解结果」
+   真正接到检索表单上（补上这一环，第 1/2 项才是端到端可用的）：
+     · 改前 → 前端**根本没有**调用 nl2query 的地方（api.js 里导出了却无人用），
+       理解出的 authorMode/cipaiMode（exact 语义）与 agg/pair/order_by（跨篇意图）
+       没有任何路径进入 /api/search，被静默丢掉。
+     · 改后 → 在线模式给一个「用自然语言理解」输入框：调用 nl2query → 回填表单 →
+       把模式与意图随检索一起传给 /api/search → 服务端回 intent 后在本页如实提示。 */
+const nlq = ref('');             // 自然语言理解输入框（在线）
+const nlSource = ref('');        // 理解来源（规则／大模型）
+const nlNote = ref('');          // 理解注记（如实披露 dropped/unparsed/unsupported）
+const intentHint = ref('');      // /api/search 回传的「本页不执行这类意图」提示
+/* nl2query 回填的**匹配语义**与**跨篇意图**：表单里没有对应输入控件，单独保存并随检索传递
+   （authorMode/cipaiMode → build_where 的 exact 语义；agg/pair/order_by → 服务端 intent 告知）。 */
+const modes = reactive({ author: '', cipai: '' });
+const nlIntent = reactive({ agg: null, pair: null, order_by: '' });
+
 /* ---------- 判据：离线数据（由构建时注入 window.__PACK__） ---------- */
 function readPack() {
   if (typeof window !== 'undefined' && window.__PACK__) {
@@ -92,6 +200,15 @@ function readCond() {
     else if (f.id === 'size') { /* 页长不进条件 */ }
     else { o[f.id] = s; }
   });
+  /* ⚠ 本轮第 1/2 项：把 nl2query 回填的匹配语义与跨篇意图一并带上。
+     改前 → 这两类信息从不进入检索参数：authorMode/cipaiMode 丢失致服务端退回 contains，
+     agg/pair/order_by 丢失致跨篇意图被静默忽略。改后 → 随 /api/search 传递。 */
+  if (modes.author) { o.authorMode = modes.author; }
+  if (modes.cipai) { o.cipaiMode = modes.cipai; }
+  /* agg/pair 是对象，走 GET 查询串须先 JSON 化（服务端 _intent_val 会再解析回来）。 */
+  if (nlIntent.agg) { o.agg = JSON.stringify(nlIntent.agg); }
+  if (nlIntent.pair) { o.pair = JSON.stringify(nlIntent.pair); }
+  if (nlIntent.order_by) { o.order_by = nlIntent.order_by; }
   o.dynasty = o.dynasty || '清';
   return o;
 }
@@ -110,6 +227,7 @@ const PZ_OK = ParseApp.PZ_OK;
 /* ---------- 渲染（在线/离线统一入口） ---------- */
 function paint(res, c, alreadyPaged) {
   lastCond = c;
+  loadMsg.value = ''; errMsg.value = '';
   const pg = ParseApp.pageSlice(res, page.value, size.value, !!alreadyPaged);
   page.value = pg.page; pages.value = pg.pages; total.value = pg.total;
   lastHits.value = res.hits || [];
@@ -123,24 +241,60 @@ function paint(res, c, alreadyPaged) {
       + `<span class="dim">第 ${pg.page} / ${pg.pages} 页</span> <button class="ghost" data-go="${pg.page + 1}">下一页</button> `
       + `<button class="ghost" data-go="${pg.pages}">末页</button>`
     : '';
+  searched.value = true;
+  syncUrl();
+}
+
+/* 深链：把当前条件写进 URL（`history.replaceState`，不新增历史、不刷新页面），
+ *   这样刷新后 FIELDS 里的条件不丢、链接可直接分享。
+ *   低风险保证：
+ *     · 只写**表单里看得见的 FIELDS**，不写 nl2query 的内部意图（agg/pair 等）；
+ *     · **保留既有 `?pid=`**，不破坏「深链直接定位某篇」的老行为；
+ *     · file:// 下 replaceState 常被浏览器禁用 → 直接跳过；任何异常一律吞掉，绝不影响检索。 */
+function syncUrl() {
+  if (typeof window === 'undefined' || !window.history || !window.location) { return; }
+  if (window.location.protocol === 'file:') { return; }
+  try {
+    const p = new URLSearchParams();
+    FIELDS.forEach((f) => {
+      if (f.id === 'size') { return; }         // size 单独处理（下面一并写入）
+      const v = cond[f.id];
+      const s = (v === null || v === undefined) ? '' : String(v).trim();
+      if (s !== '') { p.set(f.id, s); }
+    });
+    if (String(cond.size || '').trim() !== '') { p.set('size', String(cond.size).trim()); }
+    const q0 = UI.query();
+    if (q0.pid) { p.set('pid', q0.pid); }
+    const qs = p.toString();
+    window.history.replaceState(null, '', window.location.pathname + (qs ? ('?' + qs) : ''));
+  } catch (e) { /* 受限环境（file://、旧浏览器、隐私模式）：忽略，检索照常 */ }
 }
 
 async function run(p) {
   page.value = p || 1;
   const c = readCond();
+  errMsg.value = '';
   /* 声律模式含非法字符：明确报错并中止（不静默替换成通配符），与 web/serve.py 的
      400 INVALID_QUERY 同口径。 */
   if (c.pz && !PZ_OK.test(String(c.pz).trim())) {
-    metaHtml.value = '<span class="bad">声律模式含非法字符：只允许「平」「仄」「?」「？」</span>';
+    errMsg.value = '声律模式含非法字符：只允许「平」「仄」「?」「？」。请清掉该字段里的其它字符后重试。';
+    loadMsg.value = '';
     rows.value = []; total.value = 0; pages.value = 1; facets.value = null;
-    pagerHtml.value = ''; lastHits.value = [];
+    pagerHtml.value = ''; lastHits.value = []; intentHint.value = ''; searched.value = true;
     return;
   }
   if (online) {
-    metaHtml.value = '<span class="spin"></span> 正在向本地引擎检索…';
+    loadMsg.value = '正在向本地引擎检索…（条件已发出，等库里的行级数据返回）';
     try {
       const j = await api.search(c, page.value, size.value);
-      if (j.error) { metaHtml.value = `<span class="bad">出错：${UI.esc(j.error)}</span>`; return; }
+      if (j.error) {
+        loadMsg.value = '';
+        errMsg.value = `本地引擎返回错误：${j.error}`;
+        intentHint.value = '';
+        rows.value = []; total.value = 0; pages.value = 1; facets.value = null;
+        pagerHtml.value = ''; lastHits.value = []; searched.value = true;
+        return;
+      }
       /* 行对象与离线统一成 [pid,dynasty,author,cipai,title,raw]；指标直接用库里的 */
       const hits = (j.rows || []).map((r) => ({
         row: [r.pid, r.dynasty, r.author, r.cipai, r.title, r.raw || ''],
@@ -148,19 +302,72 @@ async function run(p) {
       }));
       paint({ total: j.total, hits, facets: j.facets, ms: j.ms }, c, true);
       whereSql.value = j.where || ''; orderBy.value = j.order_by || '';
+      /* ⚠ 本轮第 2 项：/api/search 识别到「本页不执行」的跨篇意图时，如实告知用户，
+         而不是把普通列表当成答案。改前无此提示 → 用户以为分组统计题被回答了。 */
+      intentHint.value = (j.intent && j.intent.unsupported_by_search) ? (j.intent.hint || '') : '';
     } catch (e) {
-      metaHtml.value = `<span class="bad">出错：${UI.esc(e)}</span>`;
+      loadMsg.value = '';
+      errMsg.value = String(e);
+      intentHint.value = '';
+      rows.value = []; total.value = 0; pages.value = 1; facets.value = null;
+      pagerHtml.value = ''; lastHits.value = []; searched.value = true;
     }
     return;
   }
   const pack = (typeof window !== 'undefined' && window.__PACK__) ? window.__PACK__ : null;
-  if (!pack) { metaHtml.value = '<span class="bad">离线数据未注入</span>'; return; }
+  if (!pack) {
+    loadMsg.value = '';
+    errMsg.value = '离线数据未注入（页面里找不到 window.__PACK__）。本页需要数据包才能本地自算。';
+    searched.value = true;
+    return;
+  }
+  loadMsg.value = '正在浏览器本地按同一套口径自算…';
   paint(ParseApp.searchOffline(pack.rows, c), c, false);
-  whereSql.value = ''; orderBy.value = '';
+  whereSql.value = ''; orderBy.value = ''; intentHint.value = '';
+}
+
+/* ⚠ 本轮第 1/2 项：把一句自然语言交给 /api/nl2query 理解，回填到表单（含精确匹配语义），
+   再把跨篇意图（agg/pair/order_by）交给 /api/search 识别并如实提示。
+   「可人工修改」：回填后用户仍可改任何表单项再点「检索」。 */
+async function understand() {
+  const text = nlq.value.trim();
+  if (!text) { UI.toast('先写一句问题'); return; }
+  errMsg.value = '';
+  loadMsg.value = '正在理解问句…（把一句话转成可执行的检索条件）';
+  try {
+    const j = await api.nl2query(text, 1);
+    const c = j.cond || {};
+    FIELDS.forEach((f) => {
+      if (f.id === 'size') { return; }
+      const v = c[f.id];
+      if (v !== undefined && v !== null && v !== '') { cond[f.id] = v; }
+    });
+    /* 匹配语义（exact/contains/prefix）与跨篇意图：表单无对应控件，单独保存并随检索传递。 */
+    modes.author = c.authorMode || '';
+    modes.cipai = c.cipaiMode || '';
+    nlIntent.agg = j.agg || null;
+    nlIntent.pair = j.pair || null;
+    nlIntent.order_by = j.order_by || '';
+    nlSource.value = j.source ? ('理解来源：' + j.source) : '';
+    const flags = [];
+    if (j.dropped && j.dropped.length) { flags.push('落不到库：' + j.dropped.join('、')); }
+    if (j.unparsed && j.unparsed.length) { flags.push('未听懂：' + j.unparsed.join('、')); }
+    if (j.unsupported) { flags.push('语料外：' + String(j.unsupported)); }
+    nlNote.value = flags.join('　');
+    loadMsg.value = '';
+    run(1);
+  } catch (e) {
+    loadMsg.value = '';
+    errMsg.value = `理解失败：${e}`;
+  }
 }
 
 function resetAll() {
   FIELDS.forEach((f) => { if (f.id !== 'size') { cond[f.id] = f.def !== undefined ? f.def : ''; } });
+  /* 清空时把理解得到的模式与意图也一并清掉，避免「残留的 exact/agg」影响下一次检索。 */
+  modes.author = ''; modes.cipai = '';
+  nlIntent.agg = null; nlIntent.pair = null; nlIntent.order_by = '';
+  nlq.value = ''; nlSource.value = ''; nlNote.value = ''; intentHint.value = '';
   run(1);
 }
 
@@ -216,19 +423,33 @@ const csvScope = computed(() => (online && lastHits.value.length < total.value) 
 const csvLabel = computed(() => `导出 CSV（${csvScope.value} ${lastHits.value.length} 篇）`);
 
 function exportCsv() {
-  const out = [['导出范围', 'pid', '朝代', '词人', '词牌', '题名', '句数', '字数', '平', '仄', '仄声比例%', '声情', '变化值', '阈值', '原文']];
+  const nRows = lastHits.value.length;
+  if (!nRows) { UI.toast('没有可导出的结果'); return; }
+  const header = ['导出范围', 'pid', '朝代', '词人', '词牌', '题名', '句数', '字数', '平', '仄', '仄声比例%', '声情', '变化值', '阈值', '原文'];
+  /* ⚠ 本轮交付（结果导出增强）：CSV 顶部加**一行元信息**——条件摘要 + 命中数 + 导出范围 +
+     生成时间。这样把表单独存一份时，脱离页面也能看清「这批数据是怎么筛出来的、覆盖多少」。
+     既有「导出范围」列保留（范围已在按钮文案与每行首列如实标注）。 */
+  const meta = ['# 导出信息',
+    '范围=' + csvScope.value, '命中=' + total.value, '本文件行数=' + nRows,
+    '条件=' + ParseApp.condText(lastCond),
+    '生成=' + new Date().toLocaleString()];
+  const out = [meta, header];
   lastHits.value.forEach((it) => {
     const r = it.row, m = it.info.metrics;
     out.push([csvScope.value, r[0], r[1], r[2], r[3], r[4], m.sent_n, m.han_len, m.ping, m.ze, m.ze_ratio, m.scene, m.change, m.threshold, r[5]]);
   });
-  if (out.length === 1) { UI.toast('没有可导出的结果'); return; }
   UI.download('词律探微_检索结果.csv', UI.csvText(out));
-  UI.toast(`已导出 ${csvScope.value} ${out.length - 1} 篇`);
+  UI.toast(`已导出 ${csvScope.value} ${nRows} 篇（含条件摘要）`);
 }
 
 /* 分面 → 点击即筛 */
 function applyFacet(pairs) {
-  pairs.forEach(([f, v]) => { if (cond[f] !== undefined) { cond[f] = v; } });
+  pairs.forEach(([f, v]) => {
+    if (cond[f] !== undefined) { cond[f] = v; }
+    /* 手动点分面改词人/词牌 → 退回默认 contains 语义（不沿用 nl2query 的 exact）。 */
+    if (f === 'author') { modes.author = ''; }
+    if (f === 'cipai') { modes.cipai = ''; }
+  });
   run(1);
 }
 function goPage(p) { run(p); window.scrollTo(0, 0); }
@@ -255,32 +476,72 @@ onMounted(() => {
 <template>
   <AppShell :active="online ? 'browse' : 'parse'" :online="online"
             :data-note="online ? '本地引擎（data/corpus.db）' : 'data/web_poems.json'" :data-n="cnt">
+   <div class="pv" @keydown.esc="clearError">
     <div class="card">
       <h1>{{ online ? '多条件检索（在线 · 由 SQLite 查）' : '逐字解析与检索（离线 · 浏览器本地算）' }}</h1>
       <p class="dim">条件之间是「且」。{{ online
         ? '本页把条件发给本地服务，由库里的行级数据（含 lines 表）检索；数字与引擎逐字段一致。'
         : '本页数据内嵌在网页里，无需服务；判定规则与服务端同一张表。' }}
         <span v-if="!online">共 <b id="cnt">{{ cnt }}</b> 篇。</span></p>
-      <div class="row">
+      <div class="row pv-form">
         <label v-for="f in FIELDS" :key="f.id" class="f" :style="f.wide ? 'flex:1 1 240px' : ''">
           {{ f.label }}
-          <select v-if="f.type === 'select'" :id="f.id" v-model="cond[f.id]">
+          <select v-if="f.type === 'select'" :id="f.id" v-model="cond[f.id]"
+                  @keydown.enter="run(1)">
             <option v-for="o in f.opts" :key="o[0]" :value="o[0]">{{ o[1] }}</option>
           </select>
           <input v-else-if="f.type === 'number'" :id="f.id" type="number"
-                 :step="f.step || '1'" v-model="cond[f.id]">
+                 :step="f.step || '1'" v-model="cond[f.id]" @keydown.enter="run(1)">
           <input v-else :id="f.id" type="text" :placeholder="f.ph || ''" v-model="cond[f.id]"
                  @keydown.enter="run(1)">
         </label>
         <button id="go" @click="run(1)">检索</button>
         <button id="reset" class="ghost" @click="resetAll">清空</button>
+        <button id="copycond" class="ghost" title="把当前条件与命中数复制成一段文本，便于写论文时引用"
+                @click="copyCond">复制条件摘要</button>
         <button id="csv" class="ghost" @click="exportCsv">{{ csvLabel }}</button>
+      </div>
+      <p class="dim pv-hint">在任一输入框按 <b>Enter</b> 即检索；按 <b>Esc</b> 清错误提示。
+        点表头可对<b>当前页</b>排序（不改后端查询）。</p>
+      <!-- ⚠ 本轮第 1/2 项：自然语言理解入口（仅在线；离线无后端）。理解 → 回填 → 检索。 -->
+      <div v-if="online" class="row" style="margin-top:8px">
+        <label class="f" style="flex:1 1 320px">用自然语言理解
+          <input id="nlq" type="text" v-model="nlq"
+                 placeholder="如：哪个词人的词最多（先理解成条件回填，再检索；可人工改）"
+                 @keydown.enter="understand">
+        </label>
+        <button id="nlgo" @click="understand">理解并填条件</button>
+        <span v-if="nlSource" class="dim" style="flex:1 1 100%">
+          {{ nlSource }}<template v-if="nlNote">　{{ nlNote }}</template>
+        </span>
       </div>
     </div>
 
     <div class="card tight">
-      <div id="meta" v-html="metaHtml"></div>
+      <!-- 三态互斥：加载 / 错误 / 结果（含空态），任一时刻只出现一种，绝不「永远转圈」。 -->
+      <div v-if="loadMsg" id="load" class="loading"><span class="spin"></span> {{ loadMsg }}</div>
+
+      <div v-else-if="errMsg" id="err" class="err">
+        <b class="bad">这一步没走通</b>
+        <p>{{ errMsg }}</p>
+        <p class="dim">可试：① 确认本地服务在运行（<code>python web/serve.py</code>）；
+          ② 按 <b>Ctrl+F5</b> 强制刷新，排除旧页面缓存；
+          ③ 放宽条件、或改用离线页 <code>parse.html</code> 复算。按 <b>Esc</b> 可清掉本条提示。</p>
+      </div>
+
+      <template v-else>
+        <div id="meta" v-html="metaHtml"></div>
+        <div v-if="noHit" id="empty" class="empty">
+          <p><b>没有命中的篇目。</b></p>
+          <p class="dim">下一步：① 放宽一个条件（如把「仄比 ≥」调低、清掉句脚字）；
+            ② 点下面的分面 chip 换个词人／词牌；③ 或点「清空」回到全库，再逐步加条件
+            —— 条件之间是「且」，越多越严。</p>
+        </div>
+      </template>
+
       <div v-if="online && whereSql" class="dim">SQL 条件：{{ whereSql }}；ORDER BY {{ orderBy }}</div>
+      <!-- ⚠ 本轮第 2 项：这类意图本页不执行，如实告知并引导去问答页（不再静默当普通列表）。 -->
+      <div v-if="intentHint" id="intentHint" class="bad" style="margin-top:6px">{{ intentHint }}</div>
       <div id="facets" v-if="facets">
         <div class="grid">
           <div><h3>词人 TOP</h3>
@@ -308,20 +569,35 @@ onMounted(() => {
     </div>
 
     <div class="card">
+      <div v-if="sortLabel" class="dim pv-sorthint">
+        {{ sortLabel }}（仅当前页；如需全库排序请用上方「排序」下拉后再检索）</div>
       <div class="scroll">
-        <table>
-          <thead><tr><th>#</th><th>词人</th><th>题名</th><th>词牌</th><th>句数</th><th>字数</th><th>仄比</th><th>声情</th><th>操作</th></tr></thead>
+        <table class="view-table">
+          <thead><tr>
+            <th>#</th>
+            <th class="sortable" @click="clickSort('author')">词人<span class="sort-ind" v-if="sortInd('author')">{{ sortInd('author') }}</span></th>
+            <th class="sortable" @click="clickSort('title')">题名<span class="sort-ind" v-if="sortInd('title')">{{ sortInd('title') }}</span></th>
+            <th class="sortable" @click="clickSort('cipai')">词牌<span class="sort-ind" v-if="sortInd('cipai')">{{ sortInd('cipai') }}</span></th>
+            <th class="sortable num" @click="clickSort('sent')">句数<span class="sort-ind" v-if="sortInd('sent')">{{ sortInd('sent') }}</span></th>
+            <th class="sortable num" @click="clickSort('len')">字数<span class="sort-ind" v-if="sortInd('len')">{{ sortInd('len') }}</span></th>
+            <th class="sortable num" @click="clickSort('ze')">仄比<span class="sort-ind" v-if="sortInd('ze')">{{ sortInd('ze') }}</span></th>
+            <th class="sortable" @click="clickSort('scene')">声情<span class="sort-ind" v-if="sortInd('scene')">{{ sortInd('scene') }}</span></th>
+            <th>操作</th>
+          </tr></thead>
           <tbody id="rows">
-            <tr v-for="(it, i) in rows" :key="i">
+            <tr v-for="(it, i) in sortedRows" :key="i">
               <td class="dim">{{ (page - 1) * size + i + 1 }}</td>
               <td v-html="ParseApp.highlight(it.row[2], lastCond.q)"></td>
               <td v-html="ParseApp.highlight(it.row[4], lastCond.q)"></td>
               <td class="dim" v-html="ParseApp.highlight(it.row[3], lastCond.q)"></td>
-              <td>{{ it.info.metrics.sent_n }}</td>
-              <td>{{ it.info.metrics.han_len }}</td>
-              <td>{{ it.info.metrics.ze_ratio }}%</td>
+              <td class="num">{{ it.info.metrics.sent_n }}</td>
+              <td class="num">{{ it.info.metrics.han_len }}</td>
+              <td class="num">{{ it.info.metrics.ze_ratio }}%</td>
               <td class="dim">{{ it.info.metrics.scene }}</td>
-              <td><button class="ghost" :data-pid="it.row[0]" @click="showDetail(it.row[0])">逐字解析</button></td>
+              <td class="op">
+                <button class="ghost" :data-pid="it.row[0]" @click="showDetail(it.row[0])">逐字解析</button>
+                <button class="ghost" title="复制本篇 pid，便于在别处引用" @click="copyPid(it.row[0])">复制 pid</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -333,5 +609,43 @@ onMounted(() => {
       <h2>逐字解析</h2>
       <div id="detail" v-html="detailHtml"></div>
     </div>
+   </div>
   </AppShell>
 </template>
+
+<style scoped>
+/* ParseView.vue —— 检索页精修（2026-10-08）。配色沿用 core/ui.js 变量，不另起一套。
+ * 这里只放**模板渲染**部分的样式；v-html 注入的 #detail 内部另有非 scoped 块（见下）。 */
+
+.pv-form { margin-top: 6px; }
+.pv-hint { margin: 10px 0 0; }
+.pv-sorthint { margin: 0 0 6px; }
+
+/* 加载 / 错误 / 空态：三种状态各有明确文案与不刺眼的配色 */
+.loading { margin: 4px 0; color: var(--ink2); }
+.err { border-left: 4px solid var(--warn); border-radius: 6px; padding: 8px 12px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.err p { margin: 6px 0 0; }
+.empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 14px 16px;
+  background: var(--panel2); margin: 8px 0 2px; }
+.empty p { margin: 4px 0; }
+
+/* 表格操作列不换行，两个按钮间距一致 */
+.pv .op { white-space: nowrap; }
+.pv .op button { margin-right: 4px; }
+
+@media (max-width: 640px) {
+  .pv .op button { margin: 2px 4px 2px 0; }
+}
+</style>
+
+<style>
+/* 逐字解析面板（#detail）由 core/parse.js 的 detailHtml 经 v-html 注入，
+   scoped 样式覆盖不到其子元素，故用**非 scoped**；前缀 `.pv` 收口，只在本页生效，
+   不外溢到其它视图（其它视图没有 .pv 容器）。 */
+.pv #detail h2 { font-size: 16px; margin: 2px 0 6px; }
+.pv #detail p { margin: 4px 0 8px; color: var(--ink2); font-size: 13px; }
+.pv #detail table { font-size: 13px; }
+.pv #detail td, .pv #detail th { padding: 4px 8px; }
+.pv #detail td:first-child, .pv #detail th:first-child { text-align: right; width: 3em; }
+</style>

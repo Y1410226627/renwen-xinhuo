@@ -1635,3 +1635,30 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 
 **未做**：「承上一轮」的多轮指代补全（从 ctx 摘要取上一轮 pid 直接锁定篇目）——属多轮理解
 增强，需独立设计（ctx 格式、歧义处理），见 `DECISIONS.md` D23「未做」节。
+
+## 48. 2026-10-08：第二轮外部审查（架构 + 22 项）—— 七条战线并行
+
+**架构诊断的病根**（《关于为什么总是答非所问》）：**两个解析器都在理解整句话，`ask.py` 当裁判**，
+且没有稳定的语义中间表示 → 大模型听懂了也可能被规则覆盖；每来一个新问法就加一层例外。
+
+**本轮做法：先隔离风险，再按文件边界并行七条战线**（`solver.py` 不导入 `ask/retrieve`
+→ 问答层/前端层改动**不可能**影响交付答案哈希）。
+
+| 战线 | 关键改动 |
+| --- | --- |
+| 1 确定性执行 | `∀` 空篇语义两路统一；`=0/≥0/[0,N]` 改**补集**（原 `GROUP BY` 漏掉 0 命中篇）；证据层认全高级句级算子；补 `consist`/`parity` 独立复核。**49 组 SQL↔Python 全相等** |
+| 2 接口契约/并发 | `authorMode/cipaiMode` 接线；`/api/search` 新增 `intent` **如实告知**不执行 agg/pair/order；`cond_text` 默认清；**去掉压在网络/只读查询上的全局锁**；SSE 拆首帧/空闲超时与非 2xx 错误；`.d.ts` 5 处对齐 |
+| 3 安全/线程安全 | `llm.py` 的 `last_error`→`threading.local()`、`calls`/`_cache` 加锁（交错用例：15/16 串号 → **0/16**）；`safety.py` 配置损坏**不再 fail-open**（暴露 `degraded`）；`answer_reason` 新增 `SAFETY_BLOCKED` |
+| 4 **测试盲区** | 新增 `tools/omission_check.py`（**遗漏集测试**，首跑抓到 **6 类**逃过既有全部门禁的不一致）+ `tools/understand_eval.py`（**LLM 理解回归**，mock+live，发现 **5 类 schema 缺口**与 3 个真实误答风险） |
+| 5 句级算子/语义检索 | 补全中文数量量词（21 例）；`pz_exact` 口语措辞；新增 `semantic`（扩展召回，不进 SQL）与 `ctx_pids`（硬条件）。**修掉 3 个回归陷阱**（`至少一句` 抢跑、`N到M句之间` 篇级/句级同形、掩码顺序） |
+| 6 **架构层** | 新增 `solve/queryast.py`（AST 四件套 + **17 条往返等价自检**）；`qlm.py` schema **+7 字段**（`titles/pz_exact/tail_each/line_ops/parity/consist/semantic`）+ 逐项落地校验；`ask._absorb_model_extras`（**纯加法**吸收模型补充、不覆盖规则路）；`understanding_status`；**多轮结果集闭环**；**理解失败不再退化成模糊搜索** |
+| 7 前端 | `ctx_pids` 端到端透传（特性探测兜底）；回答分段（结论/证据/**理解详情**）+ 语义缺口醒目提示；5 视图视觉语言统一 + 三态文案 + 表格排序/复制/深链/键盘 |
+
+**验收**：`selftest` 235/235 ｜ `regress` 双集**逐字节不变** ｜ **`verify_1000` 1000/1000、
+条件理解不一致 0 题**（1021 秒）｜ `omission_check` **0 类不一致** ｜ `invariant_check` 1,731,388 项 0 违反
+｜ `check-core`/`ssr-smoke`/`test_ui`/`test_render`/`verify_views`/`test_api` **全 0 不符** ｜ `check-types` **0 错误**。
+
+**唯一保留的 FAIL**：`understand_eval` C8 —— 它记录「模型 schema 自身无会话指针字段」这一**事实**
+（脚本里有意硬编码 `lambda s: False`）；该语义已由 `ctx_pids` 参数通路承载并实测闭合。
+
+详见 `DECISIONS.md` D24。

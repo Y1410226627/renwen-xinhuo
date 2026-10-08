@@ -123,15 +123,42 @@ export interface ParseHit {
   [k: string]: unknown;
 }
 
+/** 分面元组：`[取值, 计数]`。
+ *
+ * ⚠ 2026-10-06 修（外部审查 P1，本轮第 8 项）：`facets` 的真实形态是**数组元组**
+ *   （如 `[['纳兰性德', 123], ...]`），不是 `{v, n}[]`——见 core/parse.js 的 `top()`
+ *   （`Object.keys(...).map(k => [k, m[k]])`）与 web/serve.py 的 `q_search`（`[[v, c], ...]`）。
+ *   旧声明 `{v, n}[]` 会让 `kv[0] / kv[1]` 这类真实用法类型报错或被误读。 */
+export type Facet = [string, number];
+
+/** 一次检索的分面统计（在线：/api/search；离线：searchOffline）。四维为元组数组，
+ *  `ratio` 为「区间名 → 计数」的对象（与 serve.py 的 RATIO_BUCKETS 同键）。 */
+export interface SearchFacets {
+  author: Facet[];
+  cipai: Facet[];
+  tail: Facet[];
+  scene: Facet[];
+  ratio: Record<string, number>;
+}
+
 export interface SearchResult {
   /** 命中篇数。 */
   total: number;
   /** 当前页命中。 */
   hits: ParseHit[];
   /** 分面统计。 */
-  facets: Record<string, Array<{ v: string; n: number }>>;
+  facets: SearchFacets;
   /** 耗时（毫秒）。 */
   ms: number;
+  /** ⚠ 本轮第 2 项：/api/search 对 nl2query 的跨篇意图（agg/pair/order_by）的**如实告知**。
+   *  离线 searchOffline 不产出该字段，故可选。 */
+  intent?: {
+    agg?: unknown;
+    pair?: unknown;
+    order_by?: string | null;
+    unsupported_by_search: boolean;
+    hint: string;
+  };
 }
 
 export interface PageSlice {
@@ -142,8 +169,14 @@ export interface PageSlice {
 }
 
 export interface ParseApi {
-  /** 载入全库数据（离线视图用）。 */
-  setData(rows: ParseHit[], tmap?: Record<string, unknown>): void;
+  /** 载入全库数据（离线视图用）。
+   *
+   * ⚠ 2026-10-06 修（外部审查 P1，本轮第 8 项）：实现收的是**一个对象**
+   *   `{ rows, tonemap }`（见 core/parse.js 的 `setData(pack)`：读 `pack.rows` 与
+   *   `pack.tonemap[0]/[1]`；pack 由 build_views.py 生成 `window.__PACK__`）。
+   *   旧声明 `setData(rows: ParseHit[], tmap?)` 与实现不符，会让真实调用
+   *   `ParseApp.setData(window.__PACK__)` 类型报错。返回值为载入篇数。 */
+  setData(pack: { rows: ParseHit[]; tonemap: [string[], string[]] }): number;
   /** 载入服务端结果（在线模式用）。 */
   setLive(res: SearchResult): void;
   /** 当前是否为在线模式。 */
@@ -168,8 +201,8 @@ export interface ParseApi {
   detailHtml(pid: string, cond?: Record<string, unknown>): string;
   /** 渲染列表行 HTML。 */
   listRow(row: ParseHit, no: number, cond?: Record<string, unknown>): string;
-  /** 分面统计。 */
-  facets(hits: ParseHit[]): Record<string, Array<{ v: string; n: number }>>;
+  /** 分面统计（返回四维元组数组 + ratio 对象，见 SearchFacets）。 */
+  facets(hits: ParseHit[]): SearchFacets;
   /** 条件描述文本。 */
   condText(cond: Record<string, unknown>): string;
   /** 关键词高亮。 */

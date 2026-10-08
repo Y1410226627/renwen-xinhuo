@@ -5,6 +5,12 @@
  * 布局算法与 build_views.py 的 Python 版**逐式对应**（行高 24px、字号 15px、两列 XA/XC），
  * 因为它已解决「同心圆标签挤成一团」的老毛病，且**无随机数**、任何机器上排版一致。
  * 交互：关键词筛选（高亮匹配节点与连线）、悬停节点高亮其连线并显示共有篇数。
+ *
+ * ⚠ 2026-10-08 精修（本轮交付）：
+ *   ① 补齐三态——**加载态**（明确在载什么）/ **错误态**（fetch 失败给原因 + 三步处置）/
+ *      **空态**（数据里没有节点时明说，而不是留一片空白）；
+ *   ② 顶部「图谱说明」与筛选控件分区、图例更紧凑；
+ *   ③ 配色沿用 core/ui.js 变量，节点异色与字号契约不变（门禁依赖）。
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import AppShell from '../components/AppShell.vue';
@@ -13,6 +19,9 @@ const graph = ref(null);
 const kw = ref('');
 const hover = ref('');
 const tip = ref({ on: false, text: '', x: 0, y: 0 });
+/* 三态：load 有值 = 加载中；err 有值 = 出错；两者皆空且 graph 为空 = 空态。 */
+const load = ref('');
+const err = ref('');
 
 /* ---- 布局常量：与 build_views.py 一致 ---- */
 const W = 1180, ROW = 24.0, TOP = 74.0, XA = 250.0, XC = W - 250.0;
@@ -47,6 +56,16 @@ const layout = computed(() => {
   return { W, H, nodes, paths, nAu: au.length, nCp: cp.length, nEdge: edges.length };
 });
 
+const hasNodes = computed(() => !!(layout.value && layout.value.nodes.length));
+/* 命中关键词的节点数（筛选时给一句「命中几个」的反馈，而不是只把其余调暗） */
+const matchedN = computed(() => {
+  const l = layout.value;
+  if (!l) { return 0; }
+  const k = kw.value.trim();
+  if (!k) { return l.nodes.length; }
+  return l.nodes.filter((n) => n.k.indexOf(k) >= 0).length;
+});
+
 function nodeOpacity(n) {
   const k = kw.value.trim();
   if (k && n.k.indexOf(k) < 0) { return 0.10; }
@@ -71,16 +90,25 @@ function onLeave() { hover.value = ''; tip.value.on = false; }
 function clearKw() { kw.value = ''; }
 
 onMounted(async () => {
+  load.value = '正在载入 graph.json（词人／词牌／边，构建时已算好）…';
   try {
     const base = (typeof window !== 'undefined' && window.__API_BASE__ === '') ? '' : '../';
     const r = await fetch(base + 'graph.json');
+    if (!r.ok) { throw new Error('HTTP ' + r.status); }
     graph.value = await r.json();
+    load.value = '';
   } catch (e) {
     /* 离线双击时 graph.json 与页面同目录 → 直接试同级 */
     try {
       const r2 = await fetch('graph.json');
+      if (!r2.ok) { throw new Error('HTTP ' + r2.status); }
       graph.value = await r2.json();
-    } catch (e2) { graph.value = null; }
+      load.value = '';
+    } catch (e2) {
+      graph.value = null;
+      load.value = '';
+      err.value = String(e2 && e2.message ? e2.message : e2);
+    }
   }
 });
 onUnmounted(() => { tip.value.on = false; });
@@ -99,16 +127,27 @@ onUnmounted(() => { tip.value.on = false; });
         <span><u></u>线宽＝共有篇数</span>
         <span>圆大小＝篇数多少（右侧数字）</span>
       </div>
-      <div class="row">
+      <div class="row gv-ctrl">
         <label class="f">只看包含
           <input id="gq" type="text" placeholder="如：纳兰 / 浣溪沙" v-model="kw"></label>
         <button id="gclr" class="ghost" @click="clearKw">清空</button>
-        <span class="dim" id="gmeta">悬停节点可高亮其连线、看篇数</span>
+        <span class="dim" id="gmeta">
+          <template v-if="hasNodes && kw.trim()">命中 {{ matchedN }} / {{ layout.nodes.length }} 个节点</template>
+          <template v-else>悬停节点可高亮其连线、看篇数</template>
+        </span>
       </div>
     </div>
 
     <div class="card">
-      <svg v-if="layout" id="g" class="chart" xmlns="http://www.w3.org/2000/svg"
+      <div v-if="err" class="err">
+        <b class="bad">图谱数据没载入</b>
+        <p>{{ err }}</p>
+        <p class="dim">可试：① 确认 <code>data/vue/graph.json</code> 存在（先跑
+          <code>python web/build_views.py</code>）；② 从本地服务打开本页
+          （<code>python web/serve.py</code>）；③ 按 <b>Ctrl+F5</b> 强制刷新，排除旧页面缓存。</p>
+      </div>
+      <p v-else-if="load" class="loading"><span class="spin"></span> {{ load }}</p>
+      <svg v-else-if="hasNodes" id="g" class="chart" xmlns="http://www.w3.org/2000/svg"
            :viewBox="`0 0 ${layout.W} ${layout.H}`" :width="layout.W" :height="layout.H"
            font-family="Microsoft YaHei,serif">
         <path v-for="(e, i) in layout.paths" :key="'e' + i" class="ed"
@@ -126,9 +165,29 @@ onUnmounted(() => { tip.value.on = false; });
         <text :x="XA" y="30" text-anchor="middle" font-size="16">词律探微 · 清代词人 ↔ 词牌 二部图（作数前 {{ layout.nAu }}）</text>
         <text :x="XA" y="52" text-anchor="middle" font-size="13" fill="#6b7a88">左：词人　右：词牌　线：二者共有的篇数（越粗越多）</text>
       </svg>
-      <p v-else class="dim"><span class="spin"></span> 正在载入 graph.json…</p>
+      <div v-else class="empty">
+        <p><b>图谱里没有可显示的节点。</b></p>
+        <p class="dim">多半是 graph.json 里词人／词牌／边为空。下一步：先跑
+          <code>python web/build_views.py</code> 重新聚合数据，再刷新本页。</p>
+      </div>
     </div>
 
     <div class="tip" :class="{ on: tip.on }" :style="{ left: tip.x + 'px', top: tip.y + 'px' }">{{ tip.text }}</div>
   </AppShell>
 </template>
+
+<style scoped>
+/* GraphView.vue —— 图谱页精修（2026-10-08）。配色沿用 core/ui.js 变量，不另起一套。 */
+.gv-ctrl { align-items: center; }
+.gv-ctrl #gmeta { margin-left: 4px; }
+
+.loading { margin: 4px 0; color: var(--ink2); }
+.err { border-left: 4px solid var(--warn); border-radius: 6px; padding: 8px 12px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.err p { margin: 6px 0 0; }
+.empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 14px 16px;
+  background: var(--panel2); margin: 8px 0 2px; }
+.empty p { margin: 4px 0; }
+
+.legend { margin: 6px 0; }
+</style>

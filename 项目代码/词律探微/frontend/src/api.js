@@ -46,6 +46,16 @@ async function withTimeout(ms, label, fn) {
   }
 }
 
+/* 多轮「结果集」通路（2026-10-08）：`ctx_pids` = 上一轮命中的 pid 集合。
+ *
+ * 前端用数组更自然，HTTP 只认逗号串——这里统一成字符串；空数组/空串**不发送**
+ * （getJson/askStream 会过滤空值），避免把检索范围锁死成空集。 */
+function normCtxPids(opt) {
+  const o = Object.assign({}, opt);
+  if (Array.isArray(o.ctx_pids)) { o.ctx_pids = o.ctx_pids.join(','); }
+  return o;
+}
+
 export async function getJson(path, params) {
   const b = base();
   if (b === null) { throw new Error('离线模式：没有本地服务，无法调用 ' + path); }
@@ -67,7 +77,7 @@ export async function getJson(path, params) {
 export const api = {
   llm: () => getJson('/api/llm'),
   examples: () => getJson('/api/examples'),
-  ask: (q, opt = {}) => getJson('/api/ask', Object.assign({ q }, opt)),
+  ask: (q, opt = {}) => getJson('/api/ask', Object.assign({ q }, normCtxPids(opt))),
   search: (cond, page, size) => getJson('/api/search', Object.assign({}, cond, { page, size })),
   parse: (pid) => getJson('/api/parse', { pid }),
   rand: (dyn) => getJson('/api/rand', { dyn }),
@@ -78,7 +88,7 @@ export const api = {
   askStream(q, opt = {}, onFrame) {
     const b = base();
     if (b === null) { return Promise.reject(new Error('离线模式：无法调用流式接口')); }
-    const params = Object.assign({ q, topk: 3 }, opt);
+    const params = Object.assign({ q, topk: 3 }, normCtxPids(opt));
     const qs = Object.keys(params)
       .filter((k) => params[k] !== '' && params[k] !== null && params[k] !== undefined)
       .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
@@ -87,6 +97,11 @@ export const api = {
        收到首帧后改为**空闲** 60 秒 —— 大模型流式长回答不会被误杀。 */
     const ctrl = new AbortController();
     let hit = false;
+    /* ⚠ 2026-10-06 修（外部审查 P1，本轮第 6 项）：记录「是否已收到首帧」。
+       改前 → 无论何时超时都报「流式问答（首帧）20 秒无响应」——但那可能发生在**已收到
+         status/engine 帧之后**（是后段空闲 60 秒超时），提示误导排查方向。
+       改后 → 用 gotFrame 区分两种文案（见 catch 分支）。 */
+    let gotFrame = false;
     let timer = null;
     const arm = (ms) => {
       if (timer) { clearTimeout(timer); }
@@ -94,12 +109,29 @@ export const api = {
     };
     arm(STREAM_FIRST_MS);
     return fetch(b + '/api/ask_stream?' + qs, { signal: ctrl.signal }).then((r) => {
-      if (!r.ok || !r.body || !r.body.getReader) { throw new Error('该浏览器不支持流式'); }
+      /* ⚠ 2026-10-06 修（外部审查 P1，本轮第 7 项）：把三件事**拆开**，不再混成一句
+         「该浏览器不支持流式」——
+         改前 → `if (!r.ok || !r.body || !r.body.getReader) throw new Error('该浏览器不支持流式')`：
+           HTTP 错误（后端 bug）、服务端无响应体、浏览器能力不足三种情况都被错怪到浏览器。
+         改后 → 三种各自明确（HTTP 带状态码 / body 为空 / 无 getReader 才是浏览器不支持）。 */
+      if (!r.ok) {
+        throw new Error('流式问答失败：服务端返回 HTTP ' + r.status
+          + '——这是服务端错误（请查看服务端日志；若刚更新过代码，请重跑 python web/serve.py）。');
+      }
+      if (!r.body) {
+        throw new Error('流式问答失败：服务端没有返回响应体（body 为空）——'
+          + '请确认访问的是本地服务（python web/serve.py），而不是静态文件或旧缓存页面。');
+      }
+      if (typeof r.body.getReader !== 'function') {
+        throw new Error('该浏览器不支持流式读取（ReadableStream.getReader 不可用）；'
+          + '可改用「非流式」提问，数字与证据不降级。');
+      }
       const rd = r.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
       const pump = () => rd.read().then((x) => {
         if (x.done) { return; }
+        gotFrame = true;          // 收到首帧（任意一帧字节）→ 之后超时按「空闲」语义报错
         arm(STREAM_IDLE_MS);
         buf += dec.decode(x.value, { stream: true });
         const parts = buf.split('\n\n');
@@ -117,6 +149,8 @@ export const api = {
       return pump();
     }).catch((e) => {
       if (hit || (e && e.name === 'AbortError')) {
+        /* ⚠ 本轮第 6 项：区分「首帧超时」与「收到首帧后的空闲超时」，不再一律报首帧。 */
+        if (gotFrame) { throw new Error(timeoutMsg('流式问答（空闲）', STREAM_IDLE_MS)); }
         throw new Error(timeoutMsg('流式问答（首帧）', STREAM_FIRST_MS));
       }
       if (e instanceof TypeError) { throw new Error(netMsg('流式问答', e.message || '连接失败')); }

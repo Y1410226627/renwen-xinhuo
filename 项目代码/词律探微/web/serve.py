@@ -12,11 +12,18 @@
     GET /graph.html /review.html /index.html
 
 接口（全部返回 JSON，字段即文档）：
-    /api/ask?q=...&topk=3&parse=1&narrate=1&argument=1&ctx=...   真实引擎作答（检索→证据块→护栏）
-                （ctx＝上一轮「问句+解析」摘要，用于多轮指代补全；只在 parse=1 时生效）
+    /api/ask?q=...&topk=3&parse=1&narrate=1&argument=1&ctx=...[&ctx_pids=p1,p2,...]
+                真实引擎作答（检索→证据块→护栏）
+                （ctx＝上一轮「问句+解析」摘要；ctx_pids＝上一轮**命中的篇 id 集合**
+                  （逗号分隔或重复参数），用于把「那里面……」的指代落到**真实结果集**上；
+                  两者都只在 parse=1 时生效。返回体附 `ctx_pids.{received,consumed}`
+                  如实回告服务端收到了几个 id、后端理解层是否已消费）
     /api/search?q=&author=&cipai=&tail=&tailPz=&pz=&minZe=&maxZe=&minLen=&maxLen=&minSent=
                 &maxSent=&minLong=&changeMin=&changeMax=&thrMin=&thrMax=&scene=&dynasty=
-                &sort=&page=&size=                      结构化检索（含分面统计与 SQL 回显）
+                &authorMode=&cipaiMode=&sort=&page=&size=&agg=&pair=&order_by=
+                结构化检索（含分面统计与 SQL 回显）。authorMode/cipaiMode 取 contains|exact|prefix；
+                agg/pair/order_by 是 nl2query 的**跨篇意图**，本端点**不执行**，只在回包 `intent`
+                里如实告知（unsupported_by_search + hint），由前端引导去问答页。
     /api/nl2query?q=...                                  大模型把问句听成**结构化条件**（可人工改后再检索）
     /api/summarize?<同 /api/search 的条件>&llm=1          把检索结果写成一段话（数字仍由引擎给，过四道护栏）
     /api/compare?group_by=dynasty&values=宋,清&metric=ze_ratio   分组对比（两种口径都给）
@@ -106,7 +113,19 @@ RATIO_BUCKETS = [('0–25%', 0, 25), ('25–40%', 25, 40), ('40–50%', 40, 50),
 # 的清单 → 条件被**静默丢掉**（tailPz=平 返回全库 26742 篇，看着还像「有结果」）。
 SEARCH_PARAMS = ('q', 'author', 'cipai', 'tail', 'tailPz', 'pz', 'minZe', 'maxZe', 'minLen',
                  'maxLen', 'minSent', 'maxSent', 'minLong', 'changeMin', 'changeMax',
-                 'thrMin', 'thrMax', 'scene', 'sort', 'page', 'size', 'dynasty')
+                 'thrMin', 'thrMax', 'scene', 'sort', 'page', 'size', 'dynasty',
+                 # ⚠ 2026-10-06 修（外部审查 P1，本轮第 1/2 项）：
+                 #   改前 → 清单里**没有**这两对键：/api/search 用
+                 #     `params = {k: g(k) for k in SEARCH_PARAMS}` 过滤，
+                 #   · authorMode/cipaiMode：q_nl2query 回填的 `exact` 语义被**静默丢弃**，
+                 #     服务端退回 contains，与 Ask 链的结构化等值语义不一致；
+                 #   · agg/pair/order_by：nl2query 理解出的**跨篇意图**被静默吃掉，
+                 #     用户看到普通列表却以为问题被回答了。
+                 #   改后 → 收进清单：
+                 #   · authorMode/cipaiMode 直接接给 build_where（它已支持 exact/contains/prefix）；
+                 #   · agg/pair/order_by **不执行**（那是 ask.answer 的职责），只用于 q_search 的
+                 #     intent 字段**如实告知**（见 search_intent()）。
+                 'authorMode', 'cipaiMode', 'agg', 'pair', 'order_by')
 SEARCH_FIELDS = ('pid', 'dynasty', 'author', 'cipai', 'title', 'sent_n', 'han_len', 'ping',
                  'ze', 'ze_ratio', 'change', 'scene', 'longest_len', 'threshold', 'raw')
 
@@ -274,10 +293,21 @@ def build_where(p, conn=None):
 
 
 def cond_text(p):
-    """把条件写成人话（回答里要如实显示「我到底按什么查的」）。"""
+    """把条件写成人话（回答里要如实显示「我到底按什么查的」）。
+
+    ⚠ 2026-10-06 修（外部审查 P2，本轮第 3 项）：
+      改前 → `if dynasty and dynasty != '清'` 只在**非清**时才写朝代；dynasty 为空或 '清' 时
+        一个朝代字样都不写，末尾回退成「（无条件：全库）」。
+        但 `build_where` 对空 dynasty 会默认补 `p.dynasty='清'`（见 `_multi('dynasty', '清')`，
+        第 235 行），即 `q_search(conn, {})` 实际**只搜清词**。于是「解释口径（全库）」与
+        「执行口径（仅清）」不符，会污染 /api/search、/api/summarize、调试日志与 LLM facts。
+      改后 → 始终如实写出检索范围：未显式给 dynasty 写「朝代=清（默认）」，显式给就照实写。
+      依据：`build_where` 的默认范围**恒为清**，当前不存在「跨全库」的检索路径，
+        因此不再输出「全库」字样（末尾的兜底分支保留仅为防御，正常不可达）。
+    """
     parts = []
-    if (p.get('dynasty') or '').strip() and p['dynasty'].strip() != '清':
-        parts.append('朝代=%s' % p['dynasty'].strip())
+    dyn = (p.get('dynasty') or '').strip()
+    parts.append(('朝代=%s' % dyn) if dyn else '朝代=清（默认）')
     for k, label in (('q', '关键词'), ('author', '词人'), ('cipai', '词牌'), ('tail', '句脚字'),
                      ('tailPz', '句脚平仄'), ('pz', '声律模式'), ('scene', '声情')):
         if (p.get(k) or '').strip():
@@ -291,6 +321,50 @@ def cond_text(p):
             parts.append('%s∈[%s,%s]' % (label, lo if _num(lo) is not None else 0,
                                          hi if _num(hi) is not None else '∞'))
     return '　'.join(parts) or '（无条件：全库）'
+
+
+def _intent_val(v):
+    """把 HTTP 传来的意图串还原：能解析成 JSON 就还原对象，否则原样返回（None＝未给）。"""
+    s = (v or '').strip() if isinstance(v, str) else v
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except (TypeError, ValueError):
+        return s
+
+
+def search_intent(p):
+    """识别 nl2query 理解出、但 **/api/search 无权执行**的跨篇意图（分组统计/配对/排序）。
+
+    ⚠ 2026-10-06 新增（外部审查 P1，本轮第 2 项）：
+      改前 → `agg`/`pair`/`order_by` 根本没进 SEARCH_PARAMS：用户把 nl2query 的理解结果
+        回填到检索表单后，这三类意图被**静默吃掉**——「哪个词人的词最多」退化成普通列表，
+        用户看到结果还以为问题被回答了。
+      改后 → 本函数如实识别并回吐 `intent`：`unsupported_by_search=True` + `hint`，
+        前端据此提示「该问题属于分组统计/配对/排序题，请到问答页提问」。
+      **规则**：宁可明确说「这里不执行」，也不要静默忽略导致用户看到错误结果。
+      为什么不在 /api/search 里执行它们：那是 `ask.answer` 的职责（聚合链/配对链），
+        在这里重实现会引入巨大重复实现，且答案口径会与问答页分叉。
+    """
+    agg = _intent_val(p.get('agg'))
+    pair = _intent_val(p.get('pair'))
+    order_by = (p.get('order_by') or '').strip() or None
+    present = bool(agg or pair or order_by)
+    hint = ''
+    if present:
+        what = []
+        if agg:
+            what.append('分组统计/对比')
+        if pair:
+            what.append('配对')
+        if order_by:
+            what.append('按指标排序取值')
+        hint = ('本页是「多条件检索」，**不执行**%s——这类问题请到「问答页」提问（由 ask.answer '
+                '负责）。本页仍按下方结构化条件返回一份**普通列表**，仅供参考，它不是该问题的答案。'
+                % '／'.join(what))
+    return {'agg': agg, 'pair': pair, 'order_by': order_by,
+            'unsupported_by_search': present, 'hint': hint}
 
 
 def q_search(conn, p):
@@ -350,6 +424,9 @@ def q_search(conn, p):
             'stats': stats,
             'where': where, 'order_by': sort, 'cond_text': cond_text(p),
             'sorts': SORT_LABEL,
+            # ⚠ 本轮第 2 项：如实回吐「识别到的、但 /api/search 不执行」的跨篇意图。
+            #   纯附加字段（离线前端与门禁均按可选处理），零回归。
+            'intent': search_intent(p),
             'ms': int((time.time() - t0) * 1000)}
 
 
@@ -474,9 +551,17 @@ def q_summarize(conn, p, use_llm=True):
     if client is not None and client.available():
         out['llm_available'] = True
         text, why = None, '未尝试'
+        # ⚠ 2026-10-06 修（外部审查 P0，本轮第 4 项）：**网络调用不持锁**。
+        #   改前 → `for attempt in (1,2): with LOCK: text, why = _llm_summary(...)`。
+        #     `_llm_summary` 会发大模型**网络请求**（最坏 2×25 秒），整段压在全局 LOCK 上 →
+        #     期间任何人点「多条件检索」都被阻塞几十秒（ThreadingHTTPServer 形同虚设）。
+        #   改后 → _llm_summary 全程**不持锁**。
+        #   锁边界说明：本函数对数据库的访问只有上面的 `q_search(conn, p)` 与取 3 篇
+        #     `SELECT ... WHERE pid=?`（均**只读**，且连接是线程本地 get_conn()）→
+        #     读读天然可并发，无需 LOCK；纯计算（护栏/安全校验）更不需要。
+        #     若将来在此引入**写**操作，必须只在该极小片段单独持锁（不要包网络调用）。
         for attempt in (1, 2):                       # 断连/超时就再试一次（实测碰到过）
-            with LOCK:
-                text, why = _llm_summary(client, spec_text, out['facts'], blocks)
+            text, why = _llm_summary(client, spec_text, out['facts'], blocks)
             if text is not None and not why:
                 break
         out.update({'ok': bool(text is not None and not why),
@@ -534,18 +619,82 @@ def _clean_ask_result(res, client, t0):
     return res
 
 
-def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None):
+def _split_ctx_pids(raw, limit=200):
+    """把 `ctx_pids` 的原始入参归一成「去重、保序、≤limit 个」的 pid 列表。
+
+    入参形态（前端/HTTP 都可能给）：
+      · 逗号或空白分隔的字符串："p1,p2" / "p1 p2"；
+      · 重复参数（parse_qs 给了 list）：["p1,p2", "p3"]；
+      · None / 空 → []。
+    上限 200 个：多轮上下文只需「上一轮结果集」的规模信息，防超长 URL 与无关膨胀。
+    """
+    items = []
+
+    def _eat(v):
+        if v is None:
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                _eat(x)
+            return
+        items.extend([t for t in re.split(r'[,，\s]+', str(v)) if t])
+
+    _eat(raw)
+    seen, out = set(), []
+    for pid in items:
+        if pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _answer_accepts_ctx_pids():
+    """特性探测：`ask.answer` 是否已经有 `ctx_pids` 形参。
+
+    背景（多轮「结果集」通路，2026-10-08）：前端把上一轮命中的 pid 集合经 `ctx_pids` 送到
+    服务端，最终要写进 `spec.ctx_pids`。但 `ask.answer` 的该形参由**另一条战线**负责加——
+    在对方改完之前硬传会 `TypeError`。故这里做一次**特性探测**：支持才透传，不支持就
+    **一字不传**（旧行为逐字不变、不报错、不回归）。
+    """
+    try:
+        import inspect as _inspect
+        return 'ctx_pids' in _inspect.signature(ASK.answer).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+# 模块加载时探测一次（改 ask.py 后重启服务即重新探测）
+_ASK_HAS_CTX_PIDS = _answer_accepts_ctx_pids()
+
+
+def _ctx_pids_kwargs(ctx_pids):
+    """返回透传用的关键字参数：请求带了 id 且后端已支持时给 {'ctx_pids': [...]}，否则 {}。"""
+    pids = _split_ctx_pids(ctx_pids)
+    if pids and _ASK_HAS_CTX_PIDS:
+        return {'ctx_pids': pids}, pids
+    return {}, pids
+
+
+def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None,
+          ctx_pids=None):
     t0 = time.time()
     client = get_llm() if (narrate or argument or parse) else None
+    # 多轮「结果集」通路（2026-10-08）：把上一轮命中的 pid 集合透传给理解层（见 _ctx_pids_kwargs）。
+    extra, pids = _ctx_pids_kwargs(ctx_pids)
     # ⚠ 2026-10-06 修（外部审查 P1-29）：原先这里 `with LOCK:` 包住整个 ASK.answer（含 LLM，
      #   单次 1.4~5 秒）→ 所有并发问答被串行化。改用线程本地连接后无需持锁。
     res = ASK.answer(get_conn(), q, topk=topk, llm=client,
                      narrate=narrate, argument=argument, llm_parse=parse,
-                     llm_policy=policy, context=ctx)
-    return _clean_ask_result(res, client, t0)
+                     llm_policy=policy, context=ctx, **extra)
+    out = _clean_ask_result(res, client, t0)
+    out['ctx_pids'] = {'received': len(pids), 'consumed': bool(extra)}
+    return out
 
 
-def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='auto', ctx=None):
+def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='auto', ctx=None,
+                 ctx_pids=None):
     """**SSE 流式问答**：把「进度」与「大模型逐字增量」实时推给浏览器。
 
     为什么要流式：原先网页点一下要**干等 1.4~5 秒**（大模型整段写完才返回）。
@@ -568,6 +717,8 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
     rid = _uuid.uuid4().hex[:12]
     out = _queue.Queue(maxsize=256)          # 有界：断开后不再无限堆积（见上）
     cancelled = _threading.Event()
+    # 多轮「结果集」通路（2026-10-08）：与 q_ask 同一套透传与兜底（见 _ctx_pids_kwargs）。
+    extra, pids = _ctx_pids_kwargs(ctx_pids)
 
     def emit(kind, payload):
         if cancelled.is_set():
@@ -595,8 +746,11 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
                              # 答案先到：确定性结论一算完即推 engine 事件（前端立即渲染），
                              # 大模型随后只补「说明」——用户不再干等模型整段写完。
                              on_engine=lambda d: emit('engine', _clean_ask_result(dict(d),
-                                                                                 client, t0)))
-            emit('final', _clean_ask_result(res, client, t0))
+                                                                                 client, t0)),
+                             **extra)
+            fin = _clean_ask_result(res, client, t0)
+            fin['ctx_pids'] = {'received': len(pids), 'consumed': bool(extra)}
+            emit('final', fin)
         except Exception as exc:
             sys.stderr.write('[sse][%s] worker 异常：%s: %s\n' % (rid, type(exc).__name__, exc))
             emit('error', {'error': '%s: %s' % (type(exc).__name__, exc)})
@@ -770,7 +924,9 @@ class H(BaseHTTPRequestHandler):
                 topk = min(10, max(1, _num(g('topk'), int) or 3))
                 return self._send(q_ask(g('q'), topk=topk, narrate=b('narrate') or b('llm'),
                                         argument=b('argument'), parse=b('parse'),
-                                        ctx=(g('ctx') or '')[:300] or None))
+                                        ctx=(g('ctx') or '')[:300] or None,
+                                        # 多轮「结果集」：支持逗号分隔或重复参数（见 _split_ctx_pids）
+                                        ctx_pids=qs.get('ctx_pids')))
             if u.path == '/api/ask_stream':
                 # 流式问答：**不能用 _send**（那会带 Content-Length，浏览器要等整包）
                 b = lambda k: g(k).lower() in ('1', 'true', 'yes', 'on')
@@ -787,7 +943,9 @@ class H(BaseHTTPRequestHandler):
                 for frame in q_ask_stream(g('q'), topk=topk, narrate=b('narrate') or b('llm'),
                                           argument=b('argument'), parse=b('parse'),
                                           policy=g('policy') or 'auto',
-                                          ctx=(g('ctx') or '')[:300] or None):
+                                          ctx=(g('ctx') or '')[:300] or None,
+                                          # 多轮「结果集」：支持逗号分隔或重复参数
+                                          ctx_pids=qs.get('ctx_pids')):
                     self.wfile.write(frame.encode('utf-8'))
                     self.wfile.flush()
                 return
@@ -799,10 +957,15 @@ class H(BaseHTTPRequestHandler):
                     _pz_glob(params.get('pz'))
                 except ValueError as ve:
                     return self._send({'error': str(ve), 'code': 'INVALID_QUERY'}, code=400)
-                # ⚠ 2026-10-04 修（代码审查 P2-14）：本端点原先**不取锁**；2026-10-06 起连接
-                #   已改为线程本地（P1-28/29），此锁仅为临界区兜底。
-                with LOCK:
-                    return self._send(q_search(get_conn(), params))
+                # ⚠ 2026-10-06 修（外部审查 P1，本轮第 5 项）：**去掉该端点上的全局锁**。
+                #   改前 → `with LOCK: return self._send(q_search(get_conn(), params))`。
+                #   依据（先确认再改，不盲动）：
+                #     ① 连接已是**线程本地**（见 get_conn 注释），不存在「两线程共用一条连接」的竞态；
+                #     ② 检索链**全程只读**（q_search 只跑 SELECT/COUNT/GROUP BY）；
+                #     ③ 本进程**不存在并发写**（服务只读；建库在离线 build_corpus.py 里做），
+                #        故 SQLite 的并发读无需应用层串行化——该锁只会把并发搜索串行化。
+                #   保留说明：LOCK 仍留给 q_parse/q_rand 等端点作临界区兜底（本轮不在范围内，未动）。
+                return self._send(q_search(get_conn(), params))
             if u.path == '/api/nl2query':
                 return self._send(q_nl2query(get_conn(), g('q'),
                                              use_llm=g('llm', '1') not in ('0', 'false', 'no')))

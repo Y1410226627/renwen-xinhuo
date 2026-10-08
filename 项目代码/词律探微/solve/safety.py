@@ -21,6 +21,7 @@
 import json
 import os
 import re
+import sys
 
 RULES = [
     ('提示注入', [
@@ -50,6 +51,39 @@ _COMPILED = [(name, [re.compile(p, re.IGNORECASE) for p in pats]) for name, pats
 
 _EXTRA_CACHE = {'key': None, 'rules': []}
 
+# 护栏健康状态：供上层（selftest / web/test_api.py / serve 启动）**报红灯**用。
+# ⚠ 2026-10-08 修（外部审查 P0：safety_terms.json 加载失败 fail-open）——
+#   改前（原 `_load_extra` 的 `except Exception: return []`，即 llm.py 同款写法）：
+#     配置**存在但损坏**（JSON 语法错 / 顶层不是对象 / 值是非法结构）时，
+#     一律 `return []` → 被当成「没有额外规则」，**安全护栏被静默绕过**，且无人察觉。
+#   改后：区分三种情况，**不静默**——
+#     · 文件不存在 → 正常的「未配置」：state='absent'、degraded=False，记一条 warning 到内部状态
+#       （仅首次向 stderr 提示，避免每次 check() 刷屏）；
+#     · 存在但解析失败 / 结构不合法 → state='corrupt'|'invalid'、**degraded=True** + 原因，
+#       向 stderr 报警，并保留内置 RULES 继续生效（不 500），把「降级」做成**可检测状态**；
+#     · 正常 → state='ok'、degraded=False、extra_rules=N。
+#   为什么选「暴露 degraded」而非「直接抛异常」：`check()` 在请求热路径上，抛异常会让整条问答链
+#   500（内容安全护栏本身反而成了可用性事故源）；而「降级」这件事**能被 health() 检测到**即为
+#   「非静默」。上层据此报红灯即可（本文件不改 selftest/test_api/serve）。
+_HEALTH = {'state': 'unknown', 'degraded': False, 'reason': None, 'path': None, 'extra_rules': 0}
+_WARNED = {'absent': False, 'corrupt': False}
+
+
+def _warn_once(kind, msg):
+    if not _WARNED.get(kind):
+        _WARNED[kind] = True
+        sys.stderr.write('[safety] %s\n' % msg)
+
+
+def health():
+    """返回护栏健康状态快照（含 degraded 与原因）。
+
+    上层用法：`if safety.health()['degraded']: 报红灯`。
+    触发一次（按 mtime 缓存的）加载以刷新状态，无副作用。
+    """
+    _extra_rules()                     # 刷新 _HEALTH（文件未变则命中缓存，状态不变）
+    return dict(_HEALTH)
+
 
 def _extra_rules():
     """允许用 `solve/data/safety_terms.json` 追加词（{"类别": ["正则", ...]}）。"""
@@ -66,18 +100,50 @@ def _extra_rules():
     return _rules
 
 
+_SAFETY_TERMS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                  'safety_terms.json')
+
+
 def _load_extra():
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'safety_terms.json')
+    p = _SAFETY_TERMS_PATH
+    # 情况①：文件不存在 → 正常的「未配置」，允许，但记内部状态 + 首次 stderr 提示。
     if not os.path.exists(p):
+        _HEALTH.update(state='absent', degraded=False,
+                       reason='未配置附加词库（这是正常的「未配置」状态，仅用内置规则）',
+                       path=p, extra_rules=0)
+        _warn_once('absent', '未配置 %s：仅使用内置规则（正常状态）' % p)
         return []
+    # 情况②：存在但 JSON 解析失败 → **不允许静默降级**：置 degraded 并报警，内置规则仍生效。
     try:
         with open(p, encoding='utf-8-sig') as f:
             d = json.load(f)
-    except Exception:
+    except Exception as e:
+        _HEALTH.update(state='corrupt', degraded=True,
+                       reason='JSON 解析失败：%s: %s' % (type(e).__name__, e),
+                       path=p, extra_rules=0)
+        _warn_once('corrupt', '%s 存在但已损坏，护栏处于**降级**状态（仅内置规则生效）：%s' % (p, e))
         return []
+    # 情况②'：能解析但顶层不是对象。
+    if not isinstance(d, dict):
+        _HEALTH.update(state='invalid', degraded=True,
+                       reason='顶层结构不是对象（应为 {"类别": ["正则", ...]}），实为 %s'
+                              % type(d).__name__, path=p, extra_rules=0)
+        _warn_once('corrupt', '%s 顶层结构不合法（%s），护栏处于**降级**状态' % (p, type(d).__name__))
+        return []
+    # 情况②'':每个类别的值必须是「字符串列表」，且每条正则可编译。
     out = []
-    for name, pats in (d or {}).items():
-        out.append((name, [re.compile(x, re.IGNORECASE) for x in pats]))
+    try:
+        for name, pats in d.items():
+            if not isinstance(pats, list) or not all(isinstance(x, str) for x in pats):
+                raise ValueError('类别 %r 的值必须是字符串列表' % name)
+            out.append((name, [re.compile(x, re.IGNORECASE) for x in pats]))
+    except Exception as e:
+        _HEALTH.update(state='invalid', degraded=True,
+                       reason='规则结构不合法：%s' % e, path=p, extra_rules=0)
+        _warn_once('corrupt', '%s 规则结构不合法，护栏处于**降级**状态：%s' % (p, e))
+        return []
+    # 情况③：正常。
+    _HEALTH.update(state='ok', degraded=False, reason=None, path=p, extra_rules=len(out))
     return out
 
 

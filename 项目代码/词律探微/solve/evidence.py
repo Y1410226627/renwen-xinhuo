@@ -49,11 +49,42 @@ def poem_block(conn, pid, top_lines=1, spec=None):
     (pid, dyn, author, cipai, title, source, sent_n, han_len, ping, ze, ze_ratio,
      scene, change, longest_len, threshold, raw) = r
     with_cond = spec is not None and retrieve.has_line_cond(spec)
+    # ⚠ 2026-10-08 新增（缺陷3 取舍）：`consist`（声情标注为 X 但实测前后段相反）是**篇级**量，
+    #   不属于任何单句 → **不**放进 `line_satisfies`（否则会把全篇每一句都误标成「命中句」）。
+    #   这里单列为**篇级命中理由**，供上层如实说明「本篇为何入选」。判据与 `retrieve._sql()`
+    #   的 consist 编译口径一致（后段上升→change<0、后段下降→change>0、其余→|change|<1）。
+    #
+    # ── `poem_reasons` 数据结构契约（供 `ask.py` 等上层接入；2026-10-08） ──────────────────
+    #   类型：`list[str]`（有序，可空）。每一项是一条**已成立的**「本篇为何入选」的**篇级**理由，
+    #         是可直接展示给人看的中文短句，**不含**任何需要再计算的占位符（数字均已落地）。
+    #   与 `lines[i]['match_reasons']` 的分工：
+    #     · `match_reasons`（句级）：`list[str]`，挂在**具体某一句**上（`line_satisfies` 产出），
+    #       含义＝「这一句满足了问句的哪条行级条件」（如「句脚字」「平仄串全等」「句级算子·满足句」）。
+    #     · `poem_reasons`（篇级）：**不**属于任何单句的条件（如 `consist`：声情标注与实测前后段
+    #       相反，是全篇声情走向）——若塞进句级会把全篇每一句都误标成命中句，故单列于此。
+    #   产出位置：`poem_block()` 返回 dict 的 `'poem_reasons'` 键（与 `'n_match'`/`'lines'` 同级）。
+    #   当前仅 `consist` 一类会写入；将来任何「无对应单句的篇级条件」都往这里追加即可（结构不变）。
+    #   例：Q 问「…声情标注为后段下降但实测前后段相反的清词」，某篇 change=+3.2 被选中 →
+    #       `poem_reasons == ['声情标注为后段下降但实测前后段相反（篇级命中理由）']`。
+    # ──────────────────────────────────────────────────────────────────────────────────────
+    poem_reasons = []
+    _consist = getattr(spec, 'consist', None) if spec is not None else None
+    if _consist:
+        _ok_consist = (change is not None and (
+            (_consist == '后段上升' and change < 0)
+            or (_consist == '后段下降' and change > 0)
+            or (_consist not in ('后段上升', '后段下降') and abs(change) < 1)))
+        if _ok_consist:
+            poem_reasons.append('声情标注为%s但实测前后段相反（篇级命中理由）' % _consist)
     if with_cond:
         rows = conn.execute(
             'SELECT idx,text,han_len,ping,ze,pz,tail FROM lines WHERE pid=? ORDER BY idx',
             (pid,)).fetchall()
-        reasons = {r0[0]: retrieve.line_satisfies(r0[5], r0[6], spec) for r0 in rows}
+        # ⚠ 2026-10-08（缺陷3）：`line_satisfies` 现已支持高级句级条件（line_q 谓词 / pz_exact /
+        #   tail_each / parity），故传入该句的 `idx`（句位）与 `han_len`（句长）——否则句级算子
+        #   命中的句算不出来，`m_idx` 为空 → 落到「按仄声占比最高」的句，展示与问句无关的句子。
+        reasons = {r0[0]: retrieve.line_satisfies(r0[5], r0[6], spec, idx=r0[0], han_len=r0[2])
+                   for r0 in rows}
         m_idx = [r0[0] for r0 in rows if reasons[r0[0]]]
         # 多值句脚题：**每个不同的句脚先各占一个位**，再按原序补——
         # 否则同一篇里满足了 5 句、展示只取前 2 句，被问的另一个句脚就又被埋了。
@@ -85,6 +116,7 @@ def poem_block(conn, pid, top_lines=1, spec=None):
         'ze_ratio': ze_ratio, 'scene': scene, 'change': change, 'longest_len': longest_len,
         'threshold': threshold, 'raw': raw,
         'n_match': len([1 for _a, _b, _c, _d, _e, _f, _g, rs in lines if rs]) if with_cond else 0,
+        'poem_reasons': poem_reasons,
         'lines': [{'idx': i, 'seq': i + 1, 'text': t, 'han_len': hl, 'ping': p, 'ze': z, 'pz': pz,
                    'tail': tl, 'matched': bool(rs), 'match_reasons': rs}
                   for i, t, hl, p, z, pz, tl, rs in lines],
