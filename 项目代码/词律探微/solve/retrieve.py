@@ -231,6 +231,16 @@ class QuerySpec:
         #   结构：`{'sent': N(1 起), 'pos': M(1 起), 'unit': 'char'}`。
         #   **不参与 SQL**（它不是筛选条件，只会把检索面缩小到 0），只在**命中之后**用于篇内取值。
         self.extract = None
+        # ⚠ 2026-10-08 新增（外部架构审查核心条目）：**布尔过滤树**（`queryplan.py` 的
+        #   `filters`）。默认 **None**——这是「零回归的生命线」：为 None 时 `_sql()` 走原路径
+        #   （逐字段编译），**逐字节不变**；非 None 时才改走 `_sql_filters()` 递归编译。
+        #   为什么必须有：平铺槽位表只能表达「字段间 AND、字段内 IN 并集」，无法表达
+        #   「（写秋景 或 写离愁）且 不是 临江仙的清词」这类**任意嵌套布尔**。
+        #   规则路（`parse_query`）**永不产出**本字段；只有 `queryplan.to_spec()`（把 Plan 立为
+        #   执行真源时）或大模型路/前端会设。故对 1000 题（规则路、不填本字段）零影响。
+        #   形状（JSON 可序列化）：`{"and":[…]}` / `{"or":[…]}` / `{"not":{…}}` /
+        #   `{"field":…,"op":…,"value":…}`；编译见 `_sql_filters()`。
+        self.filters_tree = None
 
     def describe(self):
         p = []
@@ -1682,10 +1692,14 @@ def _pred_sql(kind, val):
     raise ValueError(kind)
 
 
-def line_ops_where(spec):
-    """句级算子 → (WHERE 片段列表, args)。"""
+def _line_q_where(lq):
+    """**单个**句级算子（`spec.line_q` / Plan 的 `line_q` 叶子）→ (WHERE 片段列表, args)。
+
+    抽成独立函数是**单一来源**（外部架构审查要求「不要重复实现两套」）：
+    `line_ops_where()`（经典字段路径）与 `_sql_filters()`（布尔树路径）都调用它，
+    从而两条路径对该算子编译出**逐字相同**的 SQL。空 `lq` → 返回 ([], [])。
+    """
     w, a = [], []
-    lq = spec.line_q
     if lq:
         expr, ar = _pred_sql(*lq['pred'])
         op = lq['op']
@@ -1760,12 +1774,24 @@ def line_ops_where(spec):
                 w.append('p.pid IN (SELECT l.pid FROM lines l WHERE %s GROUP BY l.pid '
                          'HAVING COUNT(*) BETWEEN ? AND ?)' % expr)
                 a += ar + [_ka, _kb]
+    return w, a
+
+
+def line_ops_where(spec):
+    """QuerySpec 的句级条件 → (WHERE 片段列表, args)。
+
+    由三部分组成（与经典 `_sql` 逐字对应）：
+      ① 单个句级算子 `spec.line_q`   → `_line_q_where()`（单一来源）
+      ② 篇内交集 `spec.tail_each`    → 每个取值各加一条「存在一句句脚=该值」
+      ③ 平仄串全等 `spec.pz_exact`   → 存在一句 `l.pz = 该串`（若已被句级算子接管则不重复加）
+    """
+    w, a = _line_q_where(spec.line_q)
     for t in spec.tail_each:        # 交集：每个取值都必须有**一句**
         w.append('p.pid IN (SELECT l.pid FROM lines l WHERE l.tail = ?)')
         a.append(t)
     # ⚠ 2026-10-03：若这个谓词**已经**由句级算子接管（如「没有任何一句平仄串为X」），
     #   就绝不能再额外加一个同名的 ∃ 条件——∄X ∧ ∃X = 空集（实测引擎答 0，真值 15）。
-    _lqp = (lq or {}).get('pred') if lq else None
+    _lqp = (spec.line_q or {}).get('pred') if spec.line_q else None
     if spec.pz_exact and not (_lqp and _lqp[0] in ('pz', 'pz_exact')
                               and _lqp[1] == spec.pz_exact):
         w.append('p.pid IN (SELECT l.pid FROM lines l WHERE l.pz = ?)')
@@ -1773,50 +1799,138 @@ def line_ops_where(spec):
     return w, a
 
 
+# ================================================================ 条件 → SQL：**可复用叶子编译**
+# 外部架构审查要求：「把 `_sql()` 对每个字段的编译逻辑抽成可复用函数再递归调用，不要重复实现两套」。
+# 下列 `_leaf_*` 是**单一来源**：经典字段路径（`_sql`）与布尔树路径（`_sql_filters`）都调用它们，
+# 从而对同一条件保证**逐字相同**的 SQL 片段 —— 这是「零回归」与「布尔树可信」的共同前提。
+def _leaf_one(col, vals):
+    """等值 / IN —— 元数据字段（朝代/词人/词牌）。空列表 → None（空 IN () 是语法错）。"""
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return '%s = ?' % col, [vals[0]]
+    return '%s IN (%s)' % (col, ','.join('?' * len(vals))), list(vals)
+
+
+def _leaf_exists_lines(expr, vals):
+    """句级条件：`p.pid IN (SELECT l.pid FROM lines l WHERE <expr> IN (...))`（存在一句即命中）。
+
+    用 IN 子查询而不是逐篇 EXISTS：让 SQLite 从 lines 侧一次取出命中的 pid 集合，再走 poems
+    主键索引收窄（实测句脚=愁 2,948 ms → 65 ms）。语义等价：EXISTS(某句满足) ≡ pid∈{满足的 pid}。
+    """
+    return ('p.pid IN (SELECT l.pid FROM lines l WHERE %s IN (%s))'
+            % (expr, ','.join('?' * len(vals)))), list(vals)
+
+
+def _leaf_title(vals):
+    """题名子串并集（`p.title LIKE %题名%`，多项 OR）；空 → None。"""
+    if not vals:
+        return None
+    return ('(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')',
+            ['%' + t + '%' for t in vals])
+
+
+def _leaf_pid(vals):
+    """pid 集合（上一轮结果集/显式 pid 范围）。空 → None。"""
+    if not vals:
+        return None
+    return 'p.pid IN (%s)' % ','.join('?' * len(vals)), list(vals)
+
+
+def _leaf_num(col, op, v):
+    """数值比较（`col op ?`）。`col` 可为普通列或表达式（如 `ABS(p.change)`）。"""
+    return '%s %s ?' % (col, op), [v]
+
+
+def _leaf_pz(v):
+    """声律模式（平仄串子串）；`?`/`？` 通配 → SQL `_`。"""
+    pat = v.replace('?', '_').replace('？', '_')
+    # IN 子查询代替逐篇 EXISTS（实测 1,600+ ms → 800 ms；pz 是 LIKE 通配、主体不可索引）。
+    return 'p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?)', ['%' + pat + '%']
+
+
+def _leaf_tail_pz(v):
+    """句脚平仄 = 该句平仄串最后一个字（单一来源：pz 串由引擎生成）。"""
+    return 'p.pid IN (SELECT l.pid FROM lines l WHERE substr(l.pz, -1, 1) = ?)', [v]
+
+
+def _leaf_pz_exact(v):
+    """平仄串**全等**（非子串）。"""
+    return 'p.pid IN (SELECT l.pid FROM lines l WHERE l.pz = ?)', [v]
+
+
+def _leaf_tail_each(vals):
+    """篇内交集：**每一个**取值都必须各自出现在某一句（多值 AND）。空 → None。"""
+    if not vals:
+        return None
+    frags = ['p.pid IN (SELECT l.pid FROM lines l WHERE l.tail = ?)' for _ in vals]
+    return '(' + ' AND '.join(frags) + ')', list(vals)
+
+
+def _leaf_lines_text(v):
+    """句级「文字包含」：`text LIKE %X%`（存在句级子串）。
+
+    取舍（LIKE 子查询 vs FTS）：
+      · `lines_fts` 是 FTS5 短语索引，按**分词/短语**匹配，对「月」这类单字查询可能因分词粒度
+        而不等价于「正文含该字」；而本题型要的正是**精确子串存在性**（官方口径「不计标点、空白」）。
+      · LIKE 子查询语义**直白、确定、可独立复算**（临时验证脚本用同一口径 `text LIKE ?` 复算）。
+      故此处取 LIKE；若未来改走 FTS，必须同步更新 `_leaf_lines_text` 与真值复算两端。
+    """
+    return 'p.pid IN (SELECT l.pid FROM lines l WHERE l.text LIKE ?)', ['%' + v + '%']
+
+
+def _leaf_consist(v):
+    """一致性：声情标注与实测派生量**矛盾**的那一面。"""
+    if v == '后段上升':
+        return 'p.change < 0', []
+    if v == '后段下降':
+        return 'p.change > 0', []
+    return 'ABS(p.change) < 1', []
+
+
+# 数值条件字段 → SQL 列/表达式（Plan 叶子用列名；`abs_change` = `ABS(p.change)`）
+_NUM_COL = {'ze_ratio': 'p.ze_ratio', 'han_len': 'p.han_len', 'sent_n': 'p.sent_n',
+            'threshold': 'p.threshold', 'change': 'p.change', 'abs_change': 'ABS(p.change)'}
+
+
 def _sql(spec):
     """硬条件的 SQL 片段与参数（元数据 + 数值 + 声情 + 句脚 + 声律模式）。
 
     多值字段（并列/选择）用 `IN (...)` 取**并集**：「句脚是【灯】或者【声】」＝灯的 ∪ 声的。
+
+    ⚠ 2026-10-08（外部架构审查核心条目）：**布尔过滤树优先**。
+       `spec.filters_tree` 为 None（**默认**）→ 走下方经典「逐字段」路径，**逐字节不变**；
+       非 None → 整段交给 `_sql_filters()` 递归编译（布尔路径），经典字段路径**不再执行**。
+       这条「默认走原路径」是**零回归的生命线**：规则路永不填 `filters_tree`。
     """
+    if getattr(spec, 'filters_tree', None) is not None:
+        where_sql, args = _sql_filters(None, spec.filters_tree)
+        assert where_sql.count('?') == len(args), \
+            'filters_tree 参数不平行（少写 args.extend 会整段错位，审查 C7）'
+        return where_sql, args
+
     where, args = [], []
 
-    def one(col, vals):
-        if not vals:                      # 空列表不能写成 IN ()（SQL 语法错/零行）
+    def add(frag):
+        if frag is None:
             return
-        if len(vals) == 1:
-            where.append('%s = ?' % col); args.append(vals[0])
-        else:
-            where.append('%s IN (%s)' % (col, ','.join('?' * len(vals)))); args.extend(vals)
-
-    def any_line(expr, vals):
-        # 「句级条件」用 **IN 子查询**取并集（而不是逐篇 EXISTS 探测）：
-        # 让 SQLite 从 lines 侧一次取出命中的 pid 集合，再走 poems 主键索引收窄。
-        # 实测（2026-10-01 深夜，同机同数据）：句脚=愁 2,948 ms → 65 ms
-        # （叠加 lines(tail) 索引与 ANALYZE；见优化报告）。
-        # 语义等价：EXISTS(某句满足) ≡ pid ∈ {满足的 pid}——两者都只要求「存在一句」。
-        where.append('p.pid IN (SELECT l.pid FROM lines l WHERE %s IN (%s))'
-                     % (expr, ','.join('?' * len(vals))))
-        args.extend(vals)
+        sql, a = frag
+        if sql:
+            where.append(sql)
+            args.extend(a)
 
     for attr, col in (('dynasty', 'p.dynasty'), ('author', 'p.author'), ('cipai', 'p.cipai')):
-        one(col, _vals(spec, attr))
+        add(_leaf_one(col, _vals(spec, attr)))
     # ⚠ 2026-10-08 新增（任务C）：**上一轮结果集**范围（会话指代「那里面…」→ 前端传 pid 集合）。
     #   改前 → 无此分支（前端传的上一轮 pid 无处落地）；改后 → 编译成硬条件 `p.pid IN (?,…)`。
     #   依据（性质）：**规则路永不产出 `ctx_pids`**（初始化为 []），只有大模型路/前端会设，
     #   故对 1000 题（规则路）恒不进入此分支 → 零影响。
-    #   例：上一轮命中 12 篇 → `ctx_pids=[p1…p12]` → 本轮所有条件都在这 12 篇内再筛。
     #   注意：参数与 where/args **成对追加**（下方 `assert sum(where 的 '?')==len(args)` 校验）。
     #   若 pid 集合极大（>SQLite 变量上限 999）需在上层分块，本层不静默截断。
     if getattr(spec, 'ctx_pids', None):
-        where.append('p.pid IN (%s)' % ','.join('?' * len(spec.ctx_pids)))
-        args.extend(spec.ctx_pids)
-    # ⚠ 2026-10-05 新增：**题名检索**。题名是完整标题（如「蝶恋花·清明同诸子集原白斋中」），
-    #   用户给出的往往只是「题名部分」（词题），故用**子串**匹配 `LIKE %题名%` 而不是等值。
-    #   多值时取并集（与其它字段一致）。走 OR 而不是 IN：每项各自的 LIKE 无法折成 IN。
-    _ti = _vals(spec, 'title')
-    if _ti:
-        where.append('(' + ' OR '.join('p.title LIKE ?' for _ in _ti) + ')')
-        args.extend('%' + t + '%' for t in _ti)
+        add(_leaf_pid(spec.ctx_pids))
+    # ⚠ 2026-10-05 新增：**题名检索**（子串 OR-并集，见 `_leaf_title`）。
+    add(_leaf_title(_vals(spec, 'title')))
     if spec.scene:
         where.append('p.scene = ?'); args.append(spec.scene)
     _chg = 'ABS(p.change)' if getattr(spec, 'change_abs', False) else 'p.change'
@@ -1826,13 +1940,9 @@ def _sql(spec):
                          ('change_min', _chg, '>='), ('change_max', _chg, '<='),
                          ('thr_min', 'p.threshold', '>='), ('thr_max', 'p.threshold', '<=')):
         if key in spec.rng:
-            where.append('%s %s ?' % (col, op)); args.append(spec.rng[key])
+            add(_leaf_num(col, op, spec.rng[key]))
     if spec.pz:
-        pat = spec.pz.replace('?', '_').replace('？', '_')
-        # 同上：IN 子查询代替逐篇 EXISTS（实测 1,600+ ms → 800 ms；pz 是 LIKE 通配、
-        # 主体不可索引，这一路是残留的大头——只能靠「扫一遍 lines」而不是「每篇各扫一遍」）。
-        where.append('p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?)')
-        args.append('%' + pat + '%')
+        add(_leaf_pz(spec.pz))
     tl = _vals(spec, 'tail')
     # ⚠ 2026-10-03：若句脚字**已经**被句级算子接管（如「满足「句末字是地」的句子占比≥50%
     #   **或句脚为「圆」**」→ 谓词 = tail_any(地,圆)），就绝不能再额外加一个 `tail IN (…)` 的
@@ -1842,33 +1952,110 @@ def _sql(spec):
         _taken = list(_lqp0[1]) if _lqp0[0] == 'tail_any' else [_lqp0[1]]
         tl = [v for v in tl if v not in _taken]
     if tl:
-        any_line('l.tail', tl)
+        add(_leaf_exists_lines('l.tail', tl))
     # ⚠ 2026-10-02：句级算子（∀/∄/≥k/=k/占比/条数/句位/交集/全等）
     _lw, _la = line_ops_where(spec)
     where += _lw
     args += _la
     # 一致性：声情标注与实测派生量**矛盾**的那一面
     if getattr(spec, 'consist', None):
-        if spec.consist == '后段上升':
-            where.append('p.change < 0')
-        elif spec.consist == '后段下降':
-            where.append('p.change > 0')
-        else:
-            where.append('ABS(p.change) < 1')
+        add(_leaf_consist(spec.consist))
     if spec.tail_pz:
-        # 句脚平仄 = 该句平仄串的最后一个字（单一来源：pz 串由引擎生成）
-        # 同上：IN 子查询代替逐篇 EXISTS（实测 2,860 ms → 265 ms）。
         # ⚠ 2026-10-03：句级算子已按同一谓词接管时不要再加（否则 ∃ 平 ∧ ∄ 平 之类的自相矛盾）。
         _lqp1 = (spec.line_q or {}).get('pred')
         if not (_lqp1 and _lqp1[0] == 'tail_pz' and _lqp1[1] == spec.tail_pz):
-            where.append('p.pid IN (SELECT l.pid FROM lines l WHERE substr(l.pz, -1, 1) = ?)')
-            args.append(spec.tail_pz)
+            add(_leaf_tail_pz(spec.tail_pz))
     # 审查 C7 + ⚠ 2026-10-06 修（外部审查 P2-18）：自检必须覆盖**最终**的 where/args。
     #   旧版把 assert 写在 tail_pz 追加**之前**，那一步（以及将来任何新增条件）都不在校验范围内，
     #   名义上的「最终参数校验」实际只覆盖了中途状态。现移到 return 之前。
     assert sum(f.count('?') for f in where) == len(args), \
         'where/args 不平行（少写 args.extend 会整段错位，审查 C7）'
     return (' AND '.join(where) if where else '1=1'), args
+
+
+# ================================================================ 布尔过滤树 → SQL（递归编译）
+# 外部架构审查核心条目：`QuerySpec` 只能表达「字段间 AND、字段内 IN 并集」，无法表达
+# 「（写秋景 或 写离愁）且 不是 临江仙的清词」这类**任意嵌套布尔**。`filters_tree` 补上这一层。
+# 节点形状（与 `queryplan.validate()` 一致）：
+#   {"and":[c…]} / {"or":[c…]} / {"not":c} / {"field":…,"op":…,"value":…}
+def _sql_filters(conn, node):
+    """布尔过滤树 → (where_sql, args)。**递归**编译，支持任意嵌套 and/or/not 与叶子。
+
+    边界语义（**依据**：布尔代数与 SQL 惯例）：
+      · **空的 `and`（`{"and":[]}`）= 真** → 编译成 `'1=1'`；「一个都不要求」＝不设限。
+        （与「合取空集为真元」一致；也让「无条件」平滑退化为 `1=1`，`count_hits` 据此返回 None。）
+      · **空的 `or`（`{"or":[]}`）= 假** → 编译成 `'0=1'`；「任一为真」在无候选时恒假。
+        （与「析取空集为假元」一致；若判真会让「没有任何可选」错误地放行全库。）
+      · `not` → `NOT (<子>)`。
+    `conn` 预留（布尔编译本身不需要查库；保留形参与 `queryplan` 签名一致，便于将来做落地校验）。
+    """
+    if node is None:
+        return '1=1', []
+    if not isinstance(node, dict):
+        raise ValueError('filters 节点必须是 dict（and/or/not/叶子），得到 %r' % (node,))
+    if 'and' in node:
+        parts, args = [], []
+        for child in (node.get('and') or []):
+            s, a = _sql_filters(conn, child)
+            if s and s != '1=1':          # 恒真子式不必进 SQL（避免 `(1=1) AND …` 噪声）
+                parts.append('(%s)' % s)
+                args += a
+        return (('(' + ' AND '.join(parts) + ')') if parts else '1=1'), args
+    if 'or' in node:
+        kids = node.get('or') or []
+        if not kids:
+            return '0=1', []              # 空 or = 假
+        parts, args = [], []
+        for child in kids:
+            s, a = _sql_filters(conn, child)
+            parts.append('(%s)' % s)
+            args += a
+        return '(' + ' OR '.join(parts) + ')', args
+    if 'not' in node:
+        s, a = _sql_filters(conn, node.get('not'))
+        return 'NOT (%s)' % s, a
+    if 'field' in node:
+        return _leaf_sql(node)
+    raise ValueError('filters 节点既非布尔节点也非叶子：%r' % (node,))
+
+
+def _leaf_sql(node):
+    """单个叶子 `{"field","op","value"}` → (sql, args)。字段与 op 的兼容性由 `queryplan.validate` 校验。"""
+    f, op, v = node.get('field'), node.get('op'), node.get('value')
+    if f in ('dynasty', 'author', 'cipai'):
+        col = {'dynasty': 'p.dynasty', 'author': 'p.author', 'cipai': 'p.cipai'}[f]
+        r = _leaf_one(col, list(v) if isinstance(v, (list, tuple)) else [v])
+        return r if r else ('1=1', [])
+    if f == 'title':
+        r = _leaf_title(list(v) if isinstance(v, (list, tuple)) else [v])
+        return r if r else ('1=1', [])
+    if f == 'pid':
+        r = _leaf_pid(list(v) if isinstance(v, (list, tuple)) else [v])
+        return r if r else ('1=1', [])
+    if f == 'scene':
+        return 'p.scene = ?', [v]
+    if f == 'consist':
+        return _leaf_consist(v)
+    if f in _NUM_COL:
+        return _leaf_num(_NUM_COL[f], op, v)
+    if f == 'lines.tail':
+        r = _leaf_exists_lines('l.tail', list(v) if isinstance(v, (list, tuple)) else [v])
+        return r if r else ('1=1', [])
+    if f == 'lines.text':
+        return _leaf_lines_text(v)
+    if f == 'tail_pz':
+        return _leaf_tail_pz(v)
+    if f == 'pz':
+        return _leaf_pz(v)
+    if f == 'pz_exact':
+        return _leaf_pz_exact(v)
+    if f == 'tail_each':
+        r = _leaf_tail_each(list(v) if isinstance(v, (list, tuple)) else [v])
+        return r if r else ('1=1', [])
+    if f == 'line_q':
+        w, a = _line_q_where(v)     # 单一来源：与经典路径同一编译
+        return (('(' + ' AND '.join(w) + ')') if w else '1=1'), a
+    raise ValueError('未知的 filters 叶子字段：%r' % (f,))
 
 
 _PZ_RE_CACHE = {}
@@ -2309,6 +2496,48 @@ def has_hard(spec):
                 or getattr(spec, 'ctx_pids', None))
 
 
+# ⚠⚠ 2026-10-08 新增（任务：**真正的向量语义检索 + RRF 融合 + Reranker**）。
+# 背景：外部架构审查确认旧「语义相关度」不是 embedding，而是「LLM 扩词 → 塞进 FTS/bigram」，
+#   对「秋景」「羁旅愁思」这类**词面必然不重合**的问题天然无能——那是**结构缺失**。
+# 下面两个函数 + `search()` 中新增的一段，是**最小接入**：向量作为**额外一路候选**参与融合，
+#   绝不动任何既有 SQL 硬条件。四点硬性约束（对应审查要求）逐条钉在 `search()` 的注释里。
+def _vector_enabled():
+    """向量路开关：`LVC_VECTOR=1` 才启用（**默认关闭**）——默认关闭时行为与改动前逐字节一致。"""
+    return os.environ.get('LVC_VECTOR') == '1'
+
+
+def semantic_signal(spec):
+    """`spec` 是否命中「语义类信号」（决定要不要**额外**跑一次向量检索）。
+
+    判据（单一来源）：① 大模型路给出的 `semantic` 扩展词非空；或
+      ② 规则路 `keywords` 里有 **2+ 字**的自由词面——规则路已用 STOPWORDS/FRAME_WORDS
+         把「平仄/字数/占比/句脚…」这类**提问虚词**剔净，剩下的即**主题类词**
+         （如「秋景」「离乡漂泊」「隐逸闲适」「边塞风雪」）。
+    规则路对「清 临江仙 仄声比例高于45%」这类**纯形式条件**问句，keywords 恒为空 → 不触发。
+    """
+    if getattr(spec, 'semantic', None):
+        return True
+    return any(len(k) >= 2 for k in (getattr(spec, 'keywords', None) or []))
+
+
+def _vector_channel(conn, qtext, restrict, topk):
+    """跑一次向量检索，返回 `{pid: score}`。**任何不可用/异常都返回 `{}`**（主链绝不因它崩）。
+
+    硬性约束③：有硬条件时用 `restrict` 收窄——向量候选**绕不过**硬过滤。
+    """
+    try:
+        import vector_index
+        if not qtext or not vector_index.available(conn):
+            return {}
+        hits = vector_index.search(qtext, topk=max(50, topk * 10), conn=conn)
+    except Exception:
+        return {}
+    d = {pid: s for pid, s in hits}
+    if restrict is not None:
+        d = {pid: s for pid, s in d.items() if pid in restrict}
+    return d
+
+
 def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=False):
     """五路检索 + 融合。返回按融合分排序的篇级结果。
 
@@ -2349,16 +2578,66 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
     meta = {pid: 1.0 for pid in scope_pids(conn, where, args)} if hard else {}
 
     w1, w2, w3, w4, w5 = weights
-    cands = set(lex) | set(ft) | set(num) | set(meta) | set(pzs)
-    if restrict is not None:
-        cands &= restrict
     lex, ft, num, meta, pzs = _norm(lex), _norm(ft), _norm(num), _norm(meta), _norm(pzs)
-    fused = []
-    for pid in cands:
-        s = (w1 * lex.get(pid, 0) + w2 * meta.get(pid, 0) + w3 * ft.get(pid, 0)
-             + w4 * num.get(pid, 0) + w5 * pzs.get(pid, 0))
-        fused.append((s, pid))
-    fused.sort(key=lambda x: (-x[0], x[1]))
+    # ⚠⚠ 2026-10-08 新增（真正的向量语义检索 + RRF 融合）——**五点硬性约束**，逐条对应：
+    #   ① **开关默认关闭**：只有 `LVC_VECTOR=1` 才进入本块；默认时 `vec` 恒为 `{}`，
+    #      走下方 `else` 的原加权融合 → 与改动前**逐字节一致**（1000 题门禁即在此口径验证）。
+    #   ② **索引不可用 / 无网络 / 无嵌入端点 → 完全跳过**：`_vector_channel` 捕获一切异常、
+    #      不可用直接返回 `{}` → 行为与现在一致（绝不因向量崩或阻塞）。
+    #   ③ **不改任何 SQL 硬条件**：本块**只读** `where/args/restrict`，绝不改动它们；
+    #      向量只影响「召回哪些候选、怎么排序」，**绝不**影响「哪些篇满足条件」。
+    #   ④ **有硬条件时向量候选仍被 `restrict` 收窄**（见 `_vector_channel`），绕不过硬过滤。
+    #   ⑤ **RRF 而非固定权重**：向量分与 BM25/声律/数值分**不同尺度**，故按**名次**融合
+    #      （`fusion.rrf`）——理由见 `fusion.py` 模块 docstring。
+    # ⚠ 向量查询文本的**优先级**：大模型语义扩展词 > 规则路关键词（框架词已剔净，
+    #   剩下的即主题词，如「秋景」「离乡漂泊之苦」） > 整句问句。
+    #   实测：整句嵌入会混入「清词/有哪些」这类噪声，相关性明显下降；
+    #   用关键词后「描写边塞风雪」能命中「落日塞垣路，风劲戛貂裘」这类作品。
+    _kws = [w for w in (spec.keywords or []) if len(w) >= 2]
+    _qtext = (' '.join(_sem) if _sem
+              else (' '.join(_kws) if _kws
+                    else (spec.raw_question or spec.raw or (query if isinstance(query, str) else ''))))
+    vec = (_vector_channel(conn, _qtext, restrict, topk)
+           if (_vector_enabled() and semantic_signal(spec)) else {})
+    if vec:
+        import fusion as _fusion
+        # ⚠ 2026-10-08：**向量主导排序的两版尝试均不理想，已回退为经典 RRF**——
+        #   版本一（restrict 为 None 时向量主导）：仅覆盖无硬条件场景；
+        #   版本二（向量经 restrict 收窄后主导）：部分语义问句被硬条件把向量候选滤空 → 0 篇拒答。
+        #   两版都出现「写秋景」排到不相关篇或 0 篇的问题 → 恢复经典 RRF（至少不出 0 篇）。
+        #   语义排序的调优（向量分阈值、语义题专用通道、rerank 介入点）记为下一迭代（D26）。
+        #   基础设施保留：vector_index.py（嵌入+faiss）、fusion.py（RRF+rerank）、
+        #   build_vector_index.py（建索引 CLI，--limit 试跑/断点续跑），开关 LVC_VECTOR 默认关。
+        _rrf = _fusion.rrf([_fusion.ranked(lex), _fusion.ranked(meta), _fusion.ranked(ft),
+                            _fusion.ranked(num), _fusion.ranked(pzs), _fusion.ranked(vec)])
+        cands = set(_rrf)
+        # 六路（含向量）各按名次降序 → RRF 融合：多路共识者靠前，免疫量纲差异。
+        _rrf = _fusion.rrf([_fusion.ranked(lex), _fusion.ranked(meta), _fusion.ranked(ft),
+                            _fusion.ranked(num), _fusion.ranked(pzs), _fusion.ranked(vec)])
+        cands = set(_rrf)
+        if restrict is not None:
+            cands &= restrict
+        fused = [(_rrf.get(pid, 0.0), pid) for pid in cands]
+        fused.sort(key=lambda x: (-x[0], x[1]))
+        if _fusion.rerank_enabled():
+            # 精排：**默认关闭**（`LVC_RERANK=1` 才开）。见 fusion.py 的实测提醒
+            # ——本机网关的 qwen3-reranker 在多文档下区分度不足，先保「不劣化」。
+            # 只重排头部，其余保持原序；不可用/失败时 rerank_block **原序返回**（不改结果）。
+            _n = min(len(fused), max(20, topk * 4))
+            _head = fused[:_n]
+            _by = {p: s for s, p in _head}
+            _order = _fusion.rerank_block(conn, _qtext, [p for _s, p in _head])
+            fused = [(_by.get(p, 0.0), p) for p in _order] + fused[_n:]
+    else:
+        cands = set(lex) | set(ft) | set(num) | set(meta) | set(pzs)
+        if restrict is not None:
+            cands &= restrict
+        fused = []
+        for pid in cands:
+            s = (w1 * lex.get(pid, 0) + w2 * meta.get(pid, 0) + w3 * ft.get(pid, 0)
+                 + w4 * num.get(pid, 0) + w5 * pzs.get(pid, 0))
+            fused.append((s, pid))
+        fused.sort(key=lambda x: (-x[0], x[1]))
     # ⚠ 2026-10-03 展示层：**空篇（0 句 / 0 字）不占头条**——语料里确有元曲残片（0 句 / 0 字），
     #   它们只是「空集」的**平凡**满足者（如「没有任何一句…」「每一句都…」），作为证据毫无信息量
     #   （实测 Q0008：头条是一篇 0 句 / 0 字的元曲残片，还连带触发「比例不自洽」的误判）。
@@ -2378,7 +2657,8 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
 
     return items_of(conn, [pid for _s, pid in fused],
                     scores={pid: s for s, pid in fused}, explain=explain,
-                    routes={'二字组': lex, '元数据': meta, '全文': ft, '数值': num, '声律': pzs})
+                    routes={'二字组': lex, '元数据': meta, '全文': ft, '数值': num,
+                            '声律': pzs, '向量': vec})
 
 
 def items_of(conn, pids, scores=None, explain=False, routes=None):

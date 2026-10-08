@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """queryast.py —— 「统一语义中间表示」（AST）+ 可回放调试层（**纯新增**）。
 
+> ⚠ 分工（2026-10-08，外部架构审查）：**本模块是「旧调试视图」——有存在感、没权力**
+> （`ask.py` 只把 `to_ast(spec)` 放进 `note['ast']` 供调试，执行链不经过它）。
+> **新执行真源是 `queryplan.py` 的 Query Plan**：`Plan.filters` 是**任意嵌套布尔树**，
+> 可被 `retrieve._sql_filters()` 直接编译执行，`queryplan.to_spec()` 产出的
+> `QuerySpec.filters_tree` 会被 `retrieve._sql()` **优先**采用。**不要**在本模块再造一套
+> 可执行表示——「看」用 queryast，「跑」用 queryplan。
+
 设计意图（定位）
 ----------------
 本模块给「查询理解层」补上一份**稳定的语义中间表示**，把 `retrieve.QuerySpec`

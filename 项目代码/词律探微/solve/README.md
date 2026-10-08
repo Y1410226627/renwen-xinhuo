@@ -1662,3 +1662,30 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 （脚本里有意硬编码 `lambda s: False`）；该语义已由 `ctx_pids` 参数通路承载并实测闭合。
 
 详见 `DECISIONS.md` D24。
+
+## 49. 2026-10-08：第二轮架构重构（Query Plan 执行真源 + 真向量语义检索 + 两个验收器）
+
+> 输入：`D:/桌面/架构母文档（GPT的建议）.md` + `架构母文档（deepseek的建议）.md`（两份外部架构审查）。
+> 共同病根：**QuerySpec 平铺槽位表是表达能力瓶颈**（字段间只能 AND）、**缺 Query Planner**、
+> **硬过滤先于检索会把错误理解放大成 0 召回**、**无真向量语义检索**、**理解失败会退化成模糊搜索**。
+
+**已落地**：
+1. **布尔过滤树进执行层**（`_sql_filters` + `QuerySpec.filters_tree`）—— `AND/OR/NOT` 任意嵌套，
+   默认 `filters_tree=None` 时**逐字节走原路径**（规则路永不填树 → 1000 题零回归生命线）。
+2. **`solve/queryplan.py`（Plan 层）**：`to_plan/from_plan/validate/render`；`compile_filters`
+   **委托** `retrieve._sql_filters`（单一真源）；自检含布尔树「引擎==独立复算」与往返等价。
+3. **真向量语义检索**：`vector_index.py`（嵌入+faiss）+ `build_vector_index.py`（CLI，多粒度、
+   manifest 绑定 corpus_sha、断点续跑）+ `fusion.py`（RRF + rerank）。网关实测可用：
+   `/v1-openai/embeddings`（`qwen3-vl-embedding-8b`，4096 维）、`/v1/rerank`（`qwen3-reranker-4b`）。
+   `LVC_VECTOR=1` 才启用（默认关 → 零影响）。3000 篇试跑实测：
+   「描写边塞风雪」→ 朱熹「春色欲来时，先散满天风雪」、「写隐逸闲适」→「挂冠归去旧烟萝」——
+   **词面不重合的语义查询真的命中了**。
+4. **两个验收器**：`tools/omission_check.py`（**遗漏集测试**，首跑抓到 6 类逃过既有门禁的不一致）+
+   `tools/understand_eval.py`（**LLM 理解回归**，mock+live，发现 5 类 schema 缺口与 3 个真实误答风险）。
+
+**试过回退**（如实）：「语义题向量分主导排序」两版（RRF 混词面噪声 / 硬条件滤空后 0 篇拒答），
+已回退经典 RRF；基础设施全保留，调优记为下一迭代。
+
+**验收**：`selftest` 235/235 ｜ `regress` 双集**逐字节不变** ｜ `verify_1000` **1000/1000、0 不一致** ｜
+`omission_check` **0 类不一致** ｜ `invariant_check` 1,731,388 项 0 违反 ｜ `queryplan` 自检全过 ｜
+前端六门禁全 0 不符 ｜ `check-types` 0 错误。详见 `DECISIONS.md` D26。

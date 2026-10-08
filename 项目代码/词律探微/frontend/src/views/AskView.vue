@@ -13,6 +13,20 @@
  *   ② 理解详情折叠区：如实展示解析来源 / 查询理解 / 丢弃字段 / 未理解片段 / 护栏校验
  *      （有则显示、无则隐藏）；若「有未理解片段且没形成任何条件」，明确告诉用户
  *      「以下按词面相关度排的结果不是该问题的答案」——**绝不**把相关度排序伪装成答案。
+ *
+ * ⚠ 2026-10-08 第二轮增强（外部架构审查 A/B，本轮交付）：
+ *   ③ **取消 200 截断的语义破坏**：旧版下一轮 `ctx_pids = lastTurn.pids.slice(0, 200)`，
+ *      200 是**语义截断**——上一轮命中 3000 首、下一轮问「其中字数最少的有哪些」，
+ *      实际只在前 200 篇里找。现改为：每个会话带一个**服务端会话 id（sid）**，
+ *      由服务端保存**完整**结果集并按指代分类（集合/单篇/继承）使用；`ctx_pids` 保留为
+ *      服务端不可用时的**兜底**（≤200，界面明标「已降级」）；「上一轮 N 篇」按**真值**显示。
+ *   ④ **如实提示截断**：服务端标记 `session.truncated` 时，界面**必须**说
+ *      「上一轮结果过多，仅保留前 M 篇参与追问」——不许静默。
+ *   ⑤ **集合身份校验（set_check）展示**：理解详情里展示「独立复算命中集 vs 返回集」的
+ *      多出/漏掉/完整性；有则显示、无则隐藏。
+ *   ⑥ **未理解硬门**：返回体 `understanding_status == 'UNDERSTANDING_INCOMPLETE'` 时，
+ *      在回答卡片顶部用醒目条明确「这句话里的 X 没能转成可执行条件，以下不是对该问题的回答」。
+ *      （后端已在正文给出一版文案——前端只做顶部醒目条，不重复正文。）
  */
 import { ref, onMounted, nextTick } from 'vue';
 import { api } from '../api.js';
@@ -37,14 +51,19 @@ const carryOn = ref(false);
  * 目标：像大模型对话那样「一个会话一条线」，互不污染；会话存 localStorage，可新建 / 切换 / 删除。
  * 存储纪律：只存**能恢复视图的字段**（问题、结论/证据 HTML、理解详情、状态、篇号），
  *   不存函数与响应式包装；会话数与每会话轮数都设上限，避免把 localStorage 撑爆。 */
-const SKEY = 'lvc_ask_sessions_v1';
+const SKEY = 'lvc_ask_sessions_v2';   // v2：每会话新增 sid（服务端会话 id）
 const S_MAX = 30;               // 最多保留 30 个会话
 const T_MAX = 60;               // 每个会话最多保留 60 轮
-const sessions = ref([]);       // [{ id, title, ts, turns: [...] }]
+/* 本地持久化的 pid 上限（**只为兜底**：服务端会话才是完整集合的权威）。
+ * 注意：这是**本地存储**的容量取舍，不是「把 200 当全部」——展示一律用真值 total。 */
+const PERSIST_PIDS = 200;
+const sessions = ref([]);       // [{ id, sid, title, ts, turns: [...] }]
 const activeId = ref('');
 const sessPanel = ref(false);   // 会话面板开关
 
 function uid() { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+/* 服务端会话 id：与本地会话一一对应（本地删除会话时服务端那份由 LRU 自然淘汰）。 */
+function newSid() { return 'sv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function nowTs() { return Date.now(); }
 
 function titleOf(text) {
@@ -52,12 +71,17 @@ function titleOf(text) {
   return t ? (t.length > 18 ? t.slice(0, 18) + '…' : t) : '（空问题）';
 }
 
-/* 精简一轮：只留能恢复视图的字段（HTML 直接存，重新打开即原样呈现） */
+/* 精简一轮：只留能恢复视图的字段（HTML 直接存，重新打开即原样呈现）。
+ * ⚠ 2026-10-08：`pids` 只做**兜底**存储（≤PERSIST_PIDS），**完整集合在服务端会话里**；
+ *   展示用的篇数一律取真值 `total`，绝不拿截断后的长度冒充「上一轮 N 篇」。 */
 function slim(t) {
   return {
     question: t.question || '', ctx: !!t.ctx, ctxN: t.ctxN || 0,
     concl: t.concl || '', evid: t.evid || '', detail: t.detail || null,
-    gap: t.gap || '', pids: (t.pids || []).slice(0, 200),
+    gap: t.gap || '', pids: (t.pids || []).slice(0, PERSIST_PIDS),
+    total: (typeof t.total === 'number') ? t.total : null,
+    setCheck: t.setCheck || null, understanding: t.understanding || '',
+    sess: t.sess || null,
     status: t.status || '', error: t.error || '',
     streaming: false, delta: '', done: true
   };
@@ -68,7 +92,8 @@ function persist() {
     localStorage.setItem(SKEY, JSON.stringify({
       active: activeId.value,
       sessions: sessions.value.slice(0, S_MAX).map((s) => ({
-        id: s.id, title: s.title, ts: s.ts, turns: (s.turns || []).slice(-T_MAX).map(slim)
+        id: s.id, sid: s.sid, title: s.title, ts: s.ts,
+        turns: (s.turns || []).slice(-T_MAX).map(slim)
       }))
     }));
   } catch (e) { /* 配额满 / 隐私模式：静默降级（功能仍可用，只是不持久化） */ }
@@ -81,7 +106,8 @@ function restore() {
     const o = JSON.parse(raw);
     if (!o || !Array.isArray(o.sessions) || !o.sessions.length) { return false; }
     sessions.value = o.sessions.map((s) => ({
-      id: s.id || uid(), title: s.title || '（未命名）', ts: s.ts || nowTs(),
+      id: s.id || uid(), sid: s.sid || newSid(),
+      title: s.title || '（未命名）', ts: s.ts || nowTs(),
       turns: (s.turns || []).map((t) => Object.assign({}, slim(t), { done: true, streaming: false }))
     }));
     activeId.value = sessions.value.some((s) => s.id === o.active) ? o.active : sessions.value[0].id;
@@ -102,7 +128,7 @@ function loadActive() {
 }
 
 function newSession() {
-  const s = { id: uid(), title: '新会话', ts: nowTs(), turns: [] };
+  const s = { id: uid(), sid: newSid(), title: '新会话', ts: nowTs(), turns: [] };
   sessions.value.unshift(s);
   if (sessions.value.length > S_MAX) { sessions.value.length = S_MAX; }
   activeId.value = s.id;
@@ -146,19 +172,23 @@ function conclHtml(j) { return AskApp.askHtml(Object.assign({}, j, { blocks: [] 
 function evidHtml(j) { return ((j && j.blocks) || []).map(AskApp.blockHtml).join(''); }
 
 /* 从返回体取「本轮命中的篇号」：优先显式 pid 列表，否则取每个证据块的 pid 字段
-   （先读实际返回结构再写：/api/ask 的证据块里确有 pid）。去重、上限 200 个防超长。 */
+   （先读实际返回结构再写：/api/ask 的证据块里确有 pid）。
+ * ⚠ 2026-10-08：**不再截到 200**。旧版 `slice(0,200)` 是**语义截断**——上一轮命中 3000 首时，
+ *   下一轮「其中最短的」只在**前 200 篇**里找。现保留全量（服务端会话另有完整权威集合）。 */
 function pidsOf(j) {
   if (!j || typeof j !== 'object') { return []; }
   const list = Array.isArray(j.pids) ? j.pids : ((j.blocks || []).map((b) => b && b.pid));
   const out = []; const seen = Object.create(null);
   for (const p of list) {
-    if (typeof p === 'string' && p && !seen[p]) {
-      seen[p] = 1;
-      out.push(p);
-      if (out.length >= 200) { break; }
-    }
+    if (typeof p === 'string' && p && !seen[p]) { seen[p] = 1; out.push(p); }
   }
   return out;
+}
+
+/* 本轮「命中篇数」的**真值**：优先后端 total（真值，不是 top-k），否则退回篇号个数。 */
+function totalOf(j) {
+  if (j && typeof j.total === 'number') { return j.total; }
+  return null;
 }
 
 /* 结构化字段 → 可显示的字符串（对象则 JSON 化，避免页面出现 [object Object]）。 */
@@ -176,6 +206,8 @@ function detailOf(j) {
   if (typeof j.spec === 'string') { spec = j.spec; }
   else if (j.spec && typeof j.spec === 'object') { try { spec = JSON.stringify(j.spec); } catch (e) { spec = ''; } }
   const cp = (j.ctx_pids && typeof j.ctx_pids === 'object') ? j.ctx_pids : null;
+  const sc = (j.set_check && typeof j.set_check === 'object') ? j.set_check : null;
+  const se = (j.session && typeof j.session === 'object') ? j.session : null;
   return {
     source: j.parse_source || j.source || '',
     spec: spec,
@@ -185,14 +217,17 @@ function detailOf(j) {
     verifyOk: (typeof v.ok === 'boolean') ? v.ok : null,
     problems: Array.isArray(v.problems) ? v.problems : [],
     ctxPids: (cp && typeof cp.received === 'number') ? cp : null,
-    total: (typeof j.total === 'number') ? j.total : null
+    total: (typeof j.total === 'number') ? j.total : null,
+    setCheck: sc,                                   // 集合身份校验（外部审查 B）
+    understanding: String(j.understanding_status || ''),
+    sess: se
   };
 }
 
 function hasDetail(d) {
   return !!d && !!(d.source || d.spec || d.dropped.length || d.unparsed.length
     || d.notes.length || d.problems.length || d.verifyOk !== null
-    || (d.ctxPids && d.ctxPids.received > 0));
+    || d.setCheck || (d.ctxPids && d.ctxPids.received > 0));
 }
 
 /* 语义缺口：有「没被理解的片段」且「没形成任何条件」（total 为空 → 按词面相关度兜底）时，
@@ -203,13 +238,74 @@ function gapOf(d) {
     + '」没能转成可执行条件；以下按词面相关度排序展示的内容，不是对该问题的回答。';
 }
 
-/* 把一次返回体落到某一轮上（结论/证据/理解详情/缺口/篇号）。 */
+/* 把一次返回体落到某一轮上（结论/证据/理解详情/缺口/篇号/校验/会话）。 */
 function applyResult(turn, j) {
   turn.concl = conclHtml(j);
   turn.evid = evidHtml(j);
   turn.detail = detailOf(j);
   turn.gap = gapOf(turn.detail);
   turn.pids = pidsOf(j);
+  turn.total = totalOf(j);
+  turn.setCheck = (turn.detail && turn.detail.setCheck) || null;
+  turn.understanding = (turn.detail && turn.detail.understanding) || '';
+  turn.sess = (turn.detail && turn.detail.sess) || null;
+}
+
+/* 一次返回体 → 落盘到某一轮，并把**服务端会话**用了多少篇（指代承接情况）同步回界面。 */
+function afterResult(turn, j, text) {
+  applyResult(turn, j);
+  const se = turn.sess;
+  if (se) {
+    if (typeof se.pids_used === 'number') { turn.ctxN = se.pids_used; }
+    turn.ctx = !!se.used_context;
+  }
+  lastTurn = { q: text, spec: (j && typeof j.spec === 'string' ? j.spec : ''), pids: turn.pids };
+}
+
+/* ⑥ **未理解硬门**（外部审查 C）：返回体 `understanding_status == 'UNDERSTANDING_INCOMPLETE'`
+ *   时，顶部出醒目条。后端正文已有一版文案，这里**只做顶部拦截条**，不重复正文。 */
+function incompleteOf(turn) {
+  return !!(turn && turn.understanding === 'UNDERSTANDING_INCOMPLETE');
+}
+
+/* 未理解片段的可读文本（供顶部硬门条点名「是哪一段没被理解」）。 */
+function unparsedTextOf(turn) {
+  const u = (turn && turn.detail && turn.detail.unparsed) || [];
+  return u.length ? u.join('、') : '其中一部分';
+}
+
+/* ④ **如实提示截断**：服务端标记 `session.truncated` 时明说「仅保留前 M 篇参与追问」。 */
+function truncNoteOf(turn) {
+  const s = turn && turn.sess;
+  if (!s || !s.truncated) { return ''; }
+  const m = (typeof s.stored_pids === 'number') ? s.stored_pids : '若干';
+  const n = (typeof s.result_total === 'number') ? s.result_total : '更多';
+  return '上一轮结果过多（共 ' + n + ' 篇），仅保留前 ' + m + ' 篇参与追问——后续「其中…」只会在这 '
+    + m + ' 篇内检索。';
+}
+
+/* 集合指代歧义 / 集合落空等，服务端如实给出的会话注记。 */
+function sessNoteOf(turn) {
+  const s = turn && turn.sess;
+  return (s && s.note) ? String(s.note) : '';
+}
+
+/* set_check → 人可读行（有则显示、无则隐藏）。 */
+function setCheckLines(sc) {
+  if (!sc || typeof sc !== 'object') { return []; }
+  const out = [];
+  if (sc.checked === false) {
+    out.push('集合身份校验：未执行（' + (sc.reason || '无硬条件') + '）');
+    return out;
+  }
+  const tot = (typeof sc.hit_total === 'number') ? sc.hit_total : '—';
+  out.push('集合身份校验：' + (sc.ok ? '通过' : '未通过')
+    + '（独立复算命中 ' + tot + ' 篇；结果给出 ' + (sc.shown != null ? sc.shown : '—') + ' 篇）');
+  if (sc.extra_n) { out.push('多出的（不在条件命中集内）' + sc.extra_n + ' 篇：' + fmtList(sc.extra, '、')); }
+  if (sc.missing_n) { out.push('漏掉的（满足条件却未在结果中）' + sc.missing_n + ' 篇：' + fmtList(sc.missing, '、')); }
+  if (sc.problems && sc.problems.length) { out.push('校验问题：' + fmtList(sc.problems, '；')); }
+  if (sc.notes && sc.notes.length) { out.push('校验说明：' + fmtList(sc.notes, '；')); }
+  return out;
 }
 
 /* 一轮结束后的收尾：更新会话标题（首轮取问句前 18 字）并落盘。 */
@@ -226,15 +322,22 @@ async function go() {
   const text = q.value.trim();
   if (!text) { UI.toast('先写一句问题'); return; }
 
-  /* 多轮：**只有用户勾了「承上一轮」**才把上一轮的「问句摘要 + 命中结果集」带上（默认不发）。 */
-  const carry = useParse.value && carryOn.value && lastTurn;
-  const ctxv = carry
+  /* ── 多轮（2026-10-08 重构，外部审查 A）──
+   * 主通路：把本会话的**服务端会话 id（sid）**随请求发出。服务端据此持有**完整**结果集，
+   *   并按「集合指代 / 单篇指代 / 条件继承」自动决定承接方式 —— 不再由前端把 pid 截到 200。
+   * 兜底通路（保留、不删）：仅当**用户显式勾选「承上一轮结果集」**时，附上上一轮的
+   *   「问句摘要 + ≤200 篇号」；服务端会话不可用（sid 无历史）时才用得上，界面会明标降级。 */
+  const cur = activeSession();
+  const sid = cur ? cur.sid : '';
+  const carryOnNow = !!(useParse.value && carryOn.value && lastTurn);
+  const ctxv = carryOnNow
     ? `上一问：${lastTurn.q}｜上一轮解析为：${lastTurn.spec}`.slice(0, 300) : '';
-  const ctxPids = carry ? (lastTurn.pids || []).slice(0, 200) : [];   // 空数组 → api 不发送
+  const ctxPids = carryOnNow ? (lastTurn.pids || []).slice(0, PERSIST_PIDS) : [];
 
   turns.value.push({
-    question: text, ctx: !!ctxv, ctxN: ctxPids.length,
+    question: text, ctx: carryOnNow, ctxN: ctxPids.length,
     concl: '', evid: '', detail: null, gap: '', pids: [],
+    total: null, setCheck: null, understanding: '', sess: null,
     streaming: false, status: '', delta: '', done: false, error: ''
   });
   /* ⚠⚠ 关键修复（2026-10-08，主人实测「问完必须按一下退格键才显示答案」）：
@@ -256,12 +359,14 @@ async function go() {
         narrate: (useLlm.value || useArg.value) ? 1 : '',
         argument: useArg.value ? 1 : '',
         ctx: ctxv,
-        ctx_pids: ctxPids
+        ctx_pids: ctxPids,
+        sid: sid,
+        carry: carryOn.value ? 1 : ''
       }, (type, d) => {
         if (type === 'status') {
           turn.status = (d.text || '') + (d.model ? `（大模型：${d.model}）` : '');
         } else if (type === 'engine') {
-          applyResult(turn, d);
+          afterResult(turn, d, text);
           if (useLlm.value || useArg.value) {
             turn.status = `数字与证据已就绪（用时 ${d.ms || '…'} ms）；大模型正在补写${useArg.value ? '论证草稿' : '说明'}…`;
           }
@@ -270,8 +375,7 @@ async function go() {
           turn.delta += (d.text || '');
           scrollBottom();
         } else if (type === 'final') {
-          applyResult(turn, d);
-          lastTurn = { q: text, spec: (typeof d.spec === 'string' ? d.spec : ''), pids: turn.pids };
+          afterResult(turn, d, text);
           turn.delta = '';
           turn.streaming = false; turn.done = true;
           scrollBottom();
@@ -285,13 +389,10 @@ async function go() {
       try {
         const j = await api.ask(text, {
           parse: useParse.value ? 1 : '', narrate: 1, argument: useArg.value ? 1 : '',
-          ctx: ctxv, ctx_pids: ctxPids
+          ctx: ctxv, ctx_pids: ctxPids, sid: sid, carry: carryOn.value ? 1 : ''
         });
         if (j && j.error) { turn.error = j.error; }
-        else {
-          applyResult(turn, j);
-          lastTurn = { q: text, spec: (typeof j.spec === 'string' ? j.spec : ''), pids: turn.pids };
-        }
+        else { afterResult(turn, j, text); }
       } catch (e2) {
         turn.error = String(e2);
       }
@@ -307,13 +408,11 @@ async function go() {
   try {
     const j = await api.ask(text, {
       parse: useParse.value ? 1 : '', narrate: (useLlm.value || useArg.value) ? 1 : '',
-      argument: useArg.value ? 1 : '', ctx: ctxv, ctx_pids: ctxPids
+      argument: useArg.value ? 1 : '', ctx: ctxv, ctx_pids: ctxPids,
+      sid: sid, carry: carryOn.value ? 1 : ''
     });
     if (j && j.error) { turn.error = j.error; }
-    else {
-      applyResult(turn, j);
-      lastTurn = { q: text, spec: (typeof j.spec === 'string' ? j.spec : ''), pids: turn.pids };
-    }
+    else { afterResult(turn, j, text); }
   } catch (e) {
     turn.error = String(e);
   }
@@ -369,8 +468,9 @@ onMounted(async () => {
         <span v-for="(s, i) in chips" :key="i" class="chip" :data-q="s" @click="pickExample(s)">{{ s }}</span>
       </div>
       <p class="dim">回答里的每一处数字都带证据块与出处（篇号 + 句序），可疑之处会明说，
-        语料覆盖不到的问题会<b>拒答</b>而不是编。多轮提问会自动带上<b>上一轮的结果集</b>，
-        这样「那里面……」这类指代才落得实。</p>
+        语料覆盖不到的问题会<b>拒答</b>而不是编。多轮提问由<b>服务端会话</b>保存上一轮的
+        <b>完整</b>结果集，「其中…」「那首…」这类指代才会落到真实集合上（若结果过大被截，
+        界面会如实说明保留了多少篇）。</p>
     </div>
 
     <div id="log" ref="logEl">
@@ -393,6 +493,16 @@ onMounted(async () => {
         </div>
 
         <div v-else class="a">
+          <!-- ⑥ 未理解硬门：顶部醒目条（后端正文另有一版文案，这里不重复正文） -->
+          <div v-if="incompleteOf(t)" class="hardgate">
+            <b>这句话里的「{{ unparsedTextOf(t) }}」没能转成可执行条件</b>
+            <p>以下内容<b>不是</b>对该问题的回答（详见「理解详情」）。请换一种说法，或把它拆成
+              「词牌／词人／朝代／句脚字／声律模式／字数句数」这类可执行条件。</p>
+          </div>
+          <!-- ④ 如实提示截断：服务端标记 truncated 时必说 -->
+          <div v-if="truncNoteOf(t)" class="gap">{{ truncNoteOf(t) }}</div>
+          <!-- 指代歧义 / 集合落空等会话注记 -->
+          <div v-if="sessNoteOf(t)" class="gap">{{ sessNoteOf(t) }}</div>
           <div v-if="t.gap" class="gap">{{ t.gap }}</div>
 
           <template v-if="t.concl">
@@ -436,8 +546,24 @@ onMounted(async () => {
                 <b>解析注记</b><span>{{ fmtList(t.detail.notes, '；') }}</span></div>
               <div v-if="t.detail.ctxPids && t.detail.ctxPids.received" class="u-row">
                 <b>多轮结果集</b>
-                <span>服务端收到 {{ t.detail.ctxPids.received }} 个篇号{{
-                  t.detail.ctxPids.consumed ? '（理解层已消费）' : '（理解层暂未消费该参数）' }}</span>
+                <span>本轮把 {{ t.detail.ctxPids.received }} 个篇号作为范围交给检索{{
+                  t.detail.ctxPids.from_session ? '（来自服务端会话）' : '（来自前端兜底）' }}，{{
+                  t.detail.ctxPids.consumed ? '检索层已消费' : '检索层暂未消费该参数' }}</span>
+              </div>
+              <div v-if="t.detail.sess && t.detail.sess.used_context" class="u-row">
+                <b>会话承接</b>
+                <span>指代类型 {{ t.detail.sess.ref_kind }}；本轮锁定 {{ t.detail.sess.pids_used }} 篇{{
+                  t.detail.sess.from_fallback ? '（降级：前端兜底）' : '（服务端完整集合）' }}</span>
+              </div>
+              <div v-if="t.setCheck" class="u-row">
+                <b>集合校验</b>
+                <span :class="t.setCheck.ok ? 'ok' : 'bad'">{{ t.setCheck.ok ? '通过' : '未通过' }}</span>
+              </div>
+              <div v-if="t.setCheck && setCheckLines(t.setCheck).length" class="u-row">
+                <b>校验明细</b>
+                <div>
+                  <div v-for="(ln, i) in setCheckLines(t.setCheck)" :key="'scl' + i">{{ ln }}</div>
+                </div>
               </div>
             </div>
           </details>
@@ -506,6 +632,13 @@ onMounted(async () => {
 
 /* 5) 加载 / 缺口 / 增量 / 出错：都要有明确文案与不刺眼的颜色 */
 #log .loading { margin: 4px 0; color: var(--ink2); }
+/* ⑥ 未理解硬门：顶部醒目条（比 .gap 更重：整块底色 + 左侧粗条 + 加粗标题） */
+#log .hardgate { border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  border-left: 6px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  padding: 10px 12px; border-radius: 8px; margin: 0 0 10px; }
+#log .hardgate b { color: var(--warn); }
+#log .hardgate p { margin: 6px 0 0; font-size: 13.5px; }
 #log .gap { border-left: 4px solid var(--warn);
   background: color-mix(in srgb, var(--warn) 10%, transparent);
   padding: 8px 12px; border-radius: 6px; margin: 0 0 10px; font-size: 13.5px; }

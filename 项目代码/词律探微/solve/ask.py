@@ -675,6 +675,269 @@ def _absorb_model_extras(base, model, question, notes):
     return bool(got)
 
 
+# ====================================================================== 仲裁器（覆盖率 + 一致性）
+# 用「覆盖率 + 一致性仲裁」取代「规则整体优先」——外部审查 A 条（「规则优先压制 LLM 纠错」）。
+# 危险形态：规则**以为自己听全、其实听错**时（「后段下降」误配成 change>0、量纲配错、
+# 识别出假实体），旧逻辑整体以规则为准，模型纠正被丢弃，且文案还写「整句已完整解析」掩盖矛盾。
+_ARB_FIELD_LABEL = {
+    'dynasty': '朝代', 'author': '词人', 'cipai': '词牌', 'title': '题名', 'tail': '句脚字',
+    'tail_pz': '句脚平仄', 'pz': '声律模式', 'pz_exact': '平仄全等', 'scene': '声情',
+    'rng': '数值条件', 'line_q': '句级算子', 'tail_each': '篇内交集', 'parity': '句位奇偶',
+    'consist': '走向一致性', 'agg': '分组统计', 'pair': '配对', 'order_by': '极值/排序',
+    'extract': '提取',
+}
+# 判定「某一路是否表达了这个条件」的字段清单（审查指定口径）。
+_ARB_FIELDS = ('dynasty', 'author', 'cipai', 'title', 'tail', 'tail_pz', 'pz', 'pz_exact',
+               'scene', 'rng', 'line_q', 'tail_each', 'parity', 'consist', 'agg', 'pair',
+               'order_by', 'extract')
+
+
+def _arb_norm(v):
+    """数值归一化：45.0 与 45 视为同一值（避免「量纲/浮点写法」被误判成不一致）。"""
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
+def _arb_fmt(v):
+    """把条件值渲染成人话（用于 note 里如实例出两路各是什么）。"""
+    if isinstance(v, (list, tuple)):
+        return '／'.join(str(x) for x in v) if v else '（空）'
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False, sort_keys=True)
+    return str(v)
+
+
+def _arb_fields(spec):
+    """某一路 spec **表达了哪些条件**（按字段清单逐项判定）。"""
+    got = set()
+    for f in _ARB_FIELDS:
+        if f == 'order_by':
+            if getattr(spec, 'order_by', None):
+                got.add(f)
+            continue
+        v = getattr(spec, f, None)
+        if isinstance(v, (list, tuple)):
+            if len(v) > 0:
+                got.add(f)
+        elif isinstance(v, dict):
+            if v:
+                got.add(f)
+        elif v is not None and v != '':
+            got.add(f)
+    return got
+
+
+def _arb_value(spec, field):
+    """取某字段的可比较值（供「同字段不同值」判定）。"""
+    if field in ('dynasty', 'author', 'cipai', 'title', 'tail', 'tail_each'):
+        return tuple(sorted(str(x) for x in retrieve._vals(spec, field)))
+    if field == 'rng':
+        return tuple(sorted((k, _arb_norm(v)) for k, v in (spec.rng or {}).items()))
+    if field in ('pz', 'pz_exact', 'scene', 'tail_pz', 'consist', 'parity'):
+        return _arb_norm(getattr(spec, field, None))
+    if field == 'line_q':
+        return json.dumps(spec.line_q, sort_keys=True, ensure_ascii=False) if spec.line_q else None
+    if field == 'agg':
+        a = spec.agg or {}
+        return json.dumps({k: a.get(k) for k in ('group_by', 'values', 'metric', 'extreme')},
+                          sort_keys=True, ensure_ascii=False) if a else None
+    if field == 'pair':
+        return json.dumps(spec.pair, sort_keys=True, ensure_ascii=False) if spec.pair else None
+    if field == 'order_by':
+        return (spec.order_by, spec.order_dir) if spec.order_by else None
+    if field == 'extract':
+        e = getattr(spec, 'extract', None)
+        return json.dumps(e, sort_keys=True, ensure_ascii=False) if e else None
+    return None
+
+
+def _arb_field_lands(spec, field, conn):
+    """该路在 `field` 上的取值**能不能在语料里落地**（作者/词牌存在、题名命中>0、朝代在语料内）。
+
+    没有「存在性」判据的字段（声律/数值/算子…）一律视为**可落地**——它们的对错不由「存在性」
+    裁决，两路都可落地时按确定性优先保留规则值并如实记录（见 `_arbitrate`）。
+    """
+    try:
+        if field == 'author':
+            vals = retrieve._vals(spec, 'author')
+            real = {r[0] for r in conn.execute('SELECT author FROM authors')}
+            return all(v in real for v in vals)
+        if field == 'cipai':
+            vals = retrieve._vals(spec, 'cipai')
+            real = {r[0] for r in conn.execute('SELECT cipai FROM cipai')}
+            return all(v in real for v in vals)
+        if field == 'title':
+            for t in retrieve._vals(spec, 'title'):
+                if not conn.execute('SELECT 1 FROM poems WHERE title LIKE ? LIMIT 1',
+                                    ('%' + str(t) + '%',)).fetchone():
+                    return False
+            return True
+        if field == 'dynasty':
+            return all(v in qlm.DYN_OK for v in retrieve._vals(spec, 'dynasty'))
+    except Exception:
+        return True
+    return True
+
+
+def _arb_adopt(base, model, field):
+    """把模型在 `field` 上的取值**采纳进** base（仅用于「规则值落不了地、模型值能落地」时）。"""
+    if field in ('dynasty', 'author', 'cipai', 'title', 'tail'):
+        setattr(base, field + '_any', list(retrieve._vals(model, field)))
+    elif field == 'tail_each':
+        base.tail_each = list(model.tail_each or [])
+    elif field == 'rng':
+        base.rng = dict(model.rng or {})
+    elif field == 'line_q':
+        base.line_q = dict(model.line_q) if model.line_q else None
+    elif field in ('pz', 'pz_exact', 'scene', 'tail_pz', 'consist', 'parity'):
+        setattr(base, field, getattr(model, field, None))
+    elif field == 'agg':
+        base.agg = dict(model.agg) if model.agg else None
+    elif field == 'pair':
+        base.pair = dict(model.pair) if model.pair else None
+    elif field == 'order_by':
+        base.order_by, base.order_col = model.order_by, model.order_col
+        base.order_dir, base.extreme = model.order_dir, model.extreme
+        base.order_label, base.order_src = model.order_label, model.order_src
+    elif field == 'extract':
+        base.extract = dict(model.extract) if getattr(model, 'extract', None) else None
+
+
+def _arbitrate_default(rule, model, question, notes, context):
+    """**`LVC_PLANNER=rule`（默认）时的原有逻辑**——逐字节复刻「规则整体优先」。
+
+    这是生命线：默认环境下 `_arbitrate` 必须与升级前**完全等价**，全部门禁（selftest/
+    qa_eval/understand_eval/omission_check/regress/verify_1000）才能逐项不变。
+    """
+    if context and _looks_elliptic(question):
+        _copy_ctx_attested(rule, model, context, notes)
+        rule.source = '规则解析（整句已完整解析；多轮补充仅取上下文里有依据的）'
+    elif context:
+        notes.append('本轮问句已自足，按规则解析作答（上下文不改动条件）')
+        rule.source = '规则解析（整句已完整解析，上下文未改动条件）'
+    else:
+        notes.append('规则解析已听全整句条件，大模型多给/不同的条件一律忽略（执行以规则解析为准）')
+        rule.source = '规则解析（整句已完整解析，大模型仅作听写核对）'
+    # ⭐ 模型补充吸收（加法）：规则路「听全了」时，仍把模型在**新字段**（题名/句级算子/
+    #    平仄全等/篇内交集/句位奇偶/走向一致性/语义检索词）上给出、而规则路没有的条件补进来。
+    if _absorb_model_extras(rule, model, question, notes):
+        rule.source = '规则解析（整句已完整解析；并补齐了规则路未表达的字段）'
+    return rule, notes
+
+
+def _arb_merge_into_plan(base, other, fields, conn, notes):
+    """`planner` 路：base 是模型给的 **Plan**（`filters_tree` 为执行真源），把 `other`
+    （规则路）独有、而 Plan 未表达的条件**补进 Plan**。
+
+    做法：用 `queryplan.from_spec(other)` 把规则 spec 编成 filters，再以 `and` 并入
+    Plan 的 `filters_tree`（**不重写 IR**，只用它的公开接口）。同时把 flat 字段补上供
+    `describe()`/披露；`filters_tree` 合并失败也如实记 note（不静默）。
+    """
+    add_labels = '、'.join(_ARB_FIELD_LABEL.get(f, f) for f in fields)
+    merged = False
+    try:
+        import queryplan as QP
+        extra = (QP.from_spec(other, conn) or {}).get('filters')
+        if extra and extra != {'and': []} and extra != base.filters_tree:
+            base.filters_tree = {'and': [dict(extra), dict(base.filters_tree)]}
+            merged = True
+    except Exception:
+        merged = False
+    for f in fields:                       # flat 也补上（供 describe/披露；执行仍以树为准）
+        _arb_adopt(base, other, f)
+    notes.append('规则路率先表达了、而大模型的计划未包含的条件（%s）：已并入计划%s。'
+                 % (add_labels, '（作为 and 子树）' if merged
+                    else '（仅平铺补充；布尔树未合并，请复核）'))
+
+
+def _arbitrate(rule, model, question, conn, notes=None, context=None):
+    """**覆盖率 + 一致性仲裁**：取代「规则整体优先」（外部审查 A 条）。
+
+    返回 `(spec, notes)`。选基（哪一路作为执行基底）：
+      · **`planner` 路**（模型 spec 带 `filters_tree`，即布尔 Plan）→ **以模型为基**——Plan
+        的布尔树是执行真源，不能被规则路遮掉；规则路独有的条件再以 `and` 子树并入；
+      · 其余（`llm` 路填槽 spec）→ **以规则路为基**（确定性的、经全量离线复核的那一版），
+        模型听出而规则没有的条件用 `_absorb_model_extras` **加法吸收**（单处实现）。
+
+    两处改写（无论谁为基）：
+      1) **一致性**——两路在**同字段上取值不同**时不静默选一个：
+         · 一方能在库中落地、另一方落不了地 → 采信**可落地**的一方，并如实注明；
+         · 两路都能落地 → 保留基底值，但**如实记录「两路不一致」并给出另一方那一版**
+           （**绝不**再写「整句已完整解析」这种掩盖矛盾的文案）。
+      2) **覆盖度**——覆盖度更高的那一路优先：并集化双方的**新增条件**。
+
+    ⚠ **关键铁律**：`LVC_PLANNER=rule`（默认）时本函数**退化为原有行为**（`_arbitrate_default`），
+    逐字节等价——默认零变更是生命线。
+    """
+    notes = notes if notes is not None else []
+    if os.environ.get('LVC_PLANNER', 'rule') == 'rule':
+        return _arbitrate_default(rule, model, question, notes, context)
+
+    # ---- 多轮：与默认路同口径（指代补全只认「上下文里有依据」的补充）----
+    if context and _looks_elliptic(question):
+        _copy_ctx_attested(rule, model, context, notes)
+    elif context:
+        notes.append('本轮问句已自足，按规则解析作答（上下文不改动条件）')
+
+    rf, mf = _arb_fields(rule), _arb_fields(model)
+    model_plan = bool(getattr(model, 'filters_tree', None))     # planner 路：布尔 Plan
+    if model_plan:
+        base, other, bf, of = model, rule, mf, rf
+        bn, on = '大模型计划', '规则'
+    else:
+        base, other, bf, of = rule, model, rf, mf
+        bn, on = '规则', '大模型'
+
+    # ---- (1) 一致性：同字段不同值 → 按「能否落地」裁决，且**如实记录** ----
+    for field in _ARB_FIELDS:
+        if field not in bf or field not in of:
+            continue
+        bv, ov = _arb_value(base, field), _arb_value(other, field)
+        if bv == ov:
+            continue
+        lab = _ARB_FIELD_LABEL.get(field, field)
+        b_land = _arb_field_lands(base, field, conn)
+        o_land = _arb_field_lands(other, field, conn)
+        if o_land and not b_land:
+            _arb_adopt(base, other, field)
+            notes.append('两路在「%s」上不一致（%s=%s、%s=%s）：%s值在语料里落不了地，'
+                         '已采信%s给出的可在语料落地的值。'
+                         % (lab, bn, _arb_fmt(bv), on, _arb_fmt(ov), bn, on))
+        elif b_land and not o_land:
+            notes.append('两路在「%s」上不一致（%s=%s、%s=%s）：%s值在语料里落不了地'
+                         '（疑似臆造），保留%s值；%s那一版如实记录于此、未执行。'
+                         % (lab, bn, _arb_fmt(bv), on, _arb_fmt(ov), on, bn, on))
+        elif b_land and o_land:
+            notes.append('两路在「%s」上不一致（%s=%s、%s=%s）：两路均可在语料落地，'
+                         '按确定性/更高覆盖优先保留%s值；%s那一版如实记录于此、未执行。'
+                         % (lab, bn, _arb_fmt(bv), on, _arb_fmt(ov), bn, on))
+        else:
+            notes.append('两路在「%s」上不一致（%s=%s、%s=%s）：两路都无法在语料落地，'
+                         '保留%s值并如实记录%s那一版；本次结果不可靠，请复核。'
+                         % (lab, bn, _arb_fmt(bv), on, _arb_fmt(ov), bn, on))
+
+    # ---- (2) 覆盖度：并集化双方条件（高覆盖者优先）----
+    add = sorted(of - bf)
+    if model_plan:
+        if add:
+            _arb_merge_into_plan(base, other, add, conn, notes)
+        retrieve._finalize(base)
+        base.source = ('仲裁（以大模型的查询计划为基；已并入规则路独有条件，冲突已如实记录）'
+                       if add else '仲裁（以大模型的查询计划为基；两路条件一致）')
+        return base, notes
+    absorbed = _absorb_model_extras(base, other, question, notes)
+    if add:
+        notes.append('大模型比规则路多表达了条件字段（%s），已按「覆盖度更高者优先」加法纳入执行。'
+                     % '、'.join(_ARB_FIELD_LABEL.get(f, f) for f in add))
+    retrieve._finalize(base)
+    if absorbed or add:
+        base.source = '仲裁（规则路为基；并入了大模型更高覆盖的条件，冲突已如实记录）'
+    else:
+        base.source = '仲裁（两路条件一致；规则路为基）'
+    return base, notes
+
+
 def _clean_extreme_unparsed(spec):
     """「最高／最低」这类极值词若还留在 unparsed 里，披露文案会写成「未被理解成条件，
     已忽略」——而它其实**已经**被用作排序条件了：这句话本身就不对。补回排序后一并清掉。"""
@@ -704,7 +967,7 @@ def _understand_impl(conn, question, llm=None, llm_parse=False, llm_policy='alwa
         # 响应速度：规则路已够用时省掉一次大模型往返（实测省 1.4~5.7 秒），且结论不变
         note['notes'] = ['规则解析已完整（无残留条件），按 llm_policy=auto 略过大模型理解']
         return rule, note
-    q = qlm.parse(conn, llm, question, context=context)
+    q = qlm.understand(conn, llm, question, context=context)
     if q is None:
         note['notes'] = ['大模型未给出可解析的条件（输出不是合法 JSON），已回落规则解析']
         return rule, note
@@ -801,36 +1064,27 @@ def _understand_impl(conn, question, llm=None, llm_parse=False, llm_policy='alwa
         rule.source = '规则解析（大模型未识别为配对题）'
         return rule, {'source': rule.source, 'dropped': q['dropped'],
                       'notes': notes, 'alt': spec}
-    # ⭐ **规则路优先**（2026-10-03 晚，网页端 B 段全量 1000 题实测驱动）：规则路已经听出
-    #    条件时，执行必须以规则路为准——大模型即使听出整句也常**多塞**条件（篇级句数／句脚字／
-    #    声律模式／比例阈值…），实测这些多出的条件改的就是答案（见 _rule_trustworthy 的注释）。
-    #    · 规则路「听全了」→ 整体以规则路为准，模型的听写只作核对披露；
+    # **规则路为基础**（2026-10-03 晚网页端 B 段全量 1000 题实测驱动；2026-10-08 外部审查 A 条升级）：
+    #    规则路已经听出条件时，执行以**规则路为基**——大模型即使听出整句也常**多塞**条件
+    #    （篇级句数／句脚字／声律模式／比例阈值…），实测这些多出的条件改的就是答案
+    #    （见 _rule_trustworthy 的注释）。
+    #    · 规则路「听全了」→ **仲裁器**（覆盖率 + 一致性；`LVC_PLANNER=rule` 时退化为旧的
+    #      「整体以规则为准」）——旧版整体以规则为准、模型纠正被丢弃；新版可纠错且如实记录；
     #    · 规则路留了词面残片（可能漏听）→ 以规则路为基，只吸收与残片相关的模型条件；
     #    · 带上下文（多轮指代）时不走这两条——指代补全规则路干不了，理解优先。
     #    · 模型认出了配对题而规则路没有时也不走（那是模型能补的确定性意图缺口）。
     if not (spec.pair and not rule.pair) and _rule_trustworthy(rule, question):
-        # ⚠ 2026-10-04：**带上下文时同样走「规则路优先」**。旧版只要带了上下文就整条策略跳过，
-        #   而多轮里模型最容易「顺手带进」上一轮的东西——实测主人多轮提问时，模型把本轮
-        #   「句长 7~11」重复编码成篇级「阈值 7~11」，命中数 3876 → 486 篇。
-        #   多轮真正需要模型的地方只有**指代补全**：所以带上下文时只吸收「上下文里有依据」
-        #   的补充（见 _copy_ctx_attested），其余仍以规则路为准。
-        if context and _looks_elliptic(question):
-            _copy_ctx_attested(rule, spec, context, notes)
-            rule.source = '规则解析（整句已完整解析；多轮补充仅取上下文里有依据的）'
-        elif context:
-            notes.append('本轮问句已自足，按规则解析作答（上下文不改动条件）')
-            rule.source = '规则解析（整句已完整解析，上下文未改动条件）'
-        else:
-            notes.append('规则解析已听全整句条件，大模型多给/不同的条件一律忽略（执行以规则解析为准）')
-            rule.source = '规则解析（整句已完整解析，大模型仅作听写核对）'
-        # ⭐ **模型补充吸收（加法）**：即便规则路「听全了」，只要它在**新字段**（题名/句级算子/
-        #    平仄全等/篇内交集/句位奇偶/走向一致性/语义检索词）上**没有**该条件、而模型给出了，
-        #    就补进来执行——旧版一律静默丢弃（模型听懂了也不算）。规则路已有的同类条件**不覆盖**。
-        if _absorb_model_extras(rule, spec, question, notes):
-            rule.source = '规则解析（整句已完整解析；并补齐了规则路未表达的字段）'
-        _clean_extreme_unparsed(rule)
-        return rule, {'source': rule.source, 'dropped': q['dropped'],
-                      'notes': notes, 'alt': spec}
+        # ⭐ **仲裁器取代「规则整体优先」**（外部审查 A 条）：`_rule_trustworthy` 只说明「规则路
+        #    以为自己听全了」，并不保证**听对了**。旧版此处 `return rule` 让模型完全失去执行权，
+        #    规则一旦听错（量纲配错/假实体/声情误配）就无人纠错。现改为 `_arbitrate`：
+        #      · `LVC_PLANNER=rule`（默认）→ 退化为原有「规则优先」，**逐字节等价**；
+        #      · 否则 → 覆盖率 + 一致性仲裁（可落地者优先；两路都可落地时保留规则值并如实记录模型版）。
+        #    `_absorb_model_extras` 已并入 `_arbitrate`（单处实现，不再与此处并存）。
+        _chosen, notes = _arbitrate(rule, spec, question, conn, notes=notes, context=context)
+        _clean_extreme_unparsed(_chosen)
+        _alt = spec if _chosen is rule else rule
+        return _chosen, {'source': _chosen.source, 'dropped': q['dropped'],
+                         'notes': notes, 'alt': _alt}
     if not (spec.pair and not rule.pair) and _rule_conditions(rule):
         # ⚠ 2026-10-04（D 段全量实测）：**带上下文时也以规则路为基**——旧版带 ctx 时直接
         #   退回「模型 spec 为基」，结果模型缺了规则路的词面残留、或多加了篇级条件，

@@ -19,6 +19,26 @@
 
 用法（自检/演示）：
     python solve/qlm.py --db data/corpus.db --question "句脚是「灯」或者「声」的清词有哪些"
+
+====================================================================
+理解层**三条路**（由环境变量 `LVC_PLANNER` 选择，见 `plan_mode()`）
+====================================================================
+  · `rule`（**默认**）——现有行为**逐字节不变**：`ask._understand_impl` 照旧调
+    `qlm.parse()`（填槽式理解），`ask._arbitrate()` 退化为原有「规则优先」逻辑。
+    这是生命的底线：既有 1000 题、700 公开题、四道护栏、`selftest`/`qa_eval`/
+    `regress`/`understand_eval`/`omission_check`/`verify_1000` 全部门禁都在此路上，
+    默认环境必须与升级前**逐字节一致**。
+  · `llm`    ——同样走现有 `parse()`（填槽）路理解，但 `ask` 侧启用**仲裁器**
+    （覆盖率 + 一致性；见 `ask._arbitrate`）——用「规则听得全不全 + 两路谁落得了地」
+    取代「规则整体优先」，让模型有机会纠正规则**听错**的条件。
+  · `planner`——走**规划式理解**：`planner.plan()` 让模型产出 **Query Plan**（布尔
+    `filters` + 语义 `retrieve` + `operation`），再由调用方 `queryplan.to_spec()` 得到
+    spec，交同一个执行器执行。`queryplan`（Query Plan IR，另一条战线）尚未就绪时
+    **优雅降级**（`planner.plan()` 返回 None）→ 回落 `parse()`。
+
+为什么默认是 `rule`：规划路（`planner`）与仲裁路（`llm`）都要经**真实大模型**往返才
+生效，其正确性尚未在 1000 题离线复核上被验证；而 `rule` 路是唯一经过全量离线复核的
+确定性路径。**先保证默认零变更、可随时回滚**，再在 `llm`/`planner` 上迭代验证。
 """
 import argparse
 import json
@@ -683,6 +703,49 @@ def parse(conn, llm, question, temperature=0.0, max_tokens=400, context=None):
     spec.source = '大模型 %s' % (getattr(llm, 'name', '') or '未知模型')
     return {'spec': spec, 'dropped': dropped, 'notes': notes,
             'model': getattr(llm, 'name', '') or '未知模型', 'raw': raw or ''}
+
+
+# ==================================================================== 双轨：Plan 路（新增）
+def plan_mode():
+    """当前理解层模式：`rule`（默认）/ `llm` / `planner`（读环境变量 `LVC_PLANNER`）。
+
+    取值非法或未设置一律返回 `'rule'`——**默认行为永远是「零变更」的那条路**。
+    见文件头注释「理解层三条路」。
+    """
+    m = (os.environ.get('LVC_PLANNER') or 'rule').strip().lower()
+    return m if m in ('rule', 'llm', 'planner') else 'rule'
+
+
+def understand(conn, llm, question, context=None, temperature=0.0, max_tokens=400):
+    """**统一理解入口**（由 `LVC_PLANNER` 分派；返回值形状与 `parse()` 一致）。
+
+    · `rule` / `llm` → `parse()`（填槽式理解；两模式在**理解层**输出相同，
+      差别只在 `ask` 侧是否需要启用仲裁器）；
+    · `planner`      → `planner.plan()` 产出 Query Plan，再用 `queryplan.to_spec()`
+      转成 spec；**queryplan/planner 任一环节不可用**（未就绪、返回 None、异常）
+      一律**优雅降级**回落到 `parse()`——绝不自己重写 Query Plan IR。
+
+    返回：`{'spec','dropped','notes','model','raw'}` 或 None（模型不可用/输出非法）。
+    """
+    mode = plan_mode()
+    if mode == 'planner':
+        try:
+            import planner                                        # 惰性导入（避免循环/缺失即崩）
+            import queryplan                                      # Query Plan IR（另一条战线）
+            pl = planner.plan(conn, llm, question, context=context)
+            if pl is not None:
+                spec = queryplan.to_spec(pl, conn)
+                spec.raw = question
+                _name = getattr(llm, 'name', '') or '未知模型'
+                spec.source = '大模型计划 %s' % _name
+                return {'spec': spec,
+                        'dropped': list(pl.get('_dropped') or []),
+                        'notes': list(pl.get('_notes') or []),
+                        'model': _name, 'raw': pl.get('_raw') or ''}
+        except Exception:
+            pass                                                  # 任何异常 → 回落填槽路
+    return parse(conn, llm, question, temperature=temperature,
+                 max_tokens=max_tokens, context=context)
 
 
 def main():

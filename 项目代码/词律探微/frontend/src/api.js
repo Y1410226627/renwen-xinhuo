@@ -49,10 +49,18 @@ async function withTimeout(ms, label, fn) {
 /* 多轮「结果集」通路（2026-10-08）：`ctx_pids` = 上一轮命中的 pid 集合。
  *
  * 前端用数组更自然，HTTP 只认逗号串——这里统一成字符串；空数组/空串**不发送**
- * （getJson/askStream 会过滤空值），避免把检索范围锁死成空集。 */
+ * （getJson/askStream 会过滤空值），避免把检索范围锁死成空集。
+ *
+ * ⚠ 2026-10-08 新增（外部审查 A 项）：**服务端会话**。新增 `sid`（服务端会话 id）与
+ *   `carry`（显式「承上一轮」开关）两个参数，**一并透传**给 `/api/ask` 与 `/api/ask_stream`。
+ *   为什么要有 sid：把上一轮**完整**结果集存到服务端，下一轮由服务端判「集合指代/单篇指代/
+ *   条件继承」——避免旧版「前端把 pid 截到 200 后当全部」（那是**语义截断**，不是性能截断）。
+ *   `ctx_pids` 保留为**兜底**（服务端会话不可用时才用）。 */
 function normCtxPids(opt) {
   const o = Object.assign({}, opt);
   if (Array.isArray(o.ctx_pids)) { o.ctx_pids = o.ctx_pids.join(','); }
+  if (o.sid != null) { o.sid = String(o.sid); }          // sid 一律按字符串传（空串会被过滤不发送）
+  if (o.carry != null) { o.carry = o.carry ? '1' : '0'; } // 归一成 0/1，服务端按布尔解析
   return o;
 }
 

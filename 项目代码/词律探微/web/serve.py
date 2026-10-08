@@ -12,12 +12,24 @@
     GET /graph.html /review.html /index.html
 
 接口（全部返回 JSON，字段即文档）：
-    /api/ask?q=...&topk=3&parse=1&narrate=1&argument=1&ctx=...[&ctx_pids=p1,p2,...]
+    /api/ask?q=...&topk=3&parse=1&narrate=1&argument=1&ctx=...[&ctx_pids=p1,p2,...][&sid=...&carry=1]
                 真实引擎作答（检索→证据块→护栏）
                 （ctx＝上一轮「问句+解析」摘要；ctx_pids＝上一轮**命中的篇 id 集合**
                   （逗号分隔或重复参数），用于把「那里面……」的指代落到**真实结果集**上；
                   两者都只在 parse=1 时生效。返回体附 `ctx_pids.{received,consumed}`
                   如实回告服务端收到了几个 id、后端理解层是否已消费）
+                ⚠ 2026-10-08 新增（外部审查 A/B 项）：
+                  · `sid`   —— **服务端会话 id**。带上它，服务端把本轮**完整**结果集
+                    （不截断，上限 20000）存进 `context.ContextStore`，下一轮由
+                    `context.resolve()` 判「集合指代 / 单篇指代 / 条件继承」，**不再靠前端
+                    把 pid 截到 200 后当全部**。返回体附 `session.{sid,turn,stored_pids,
+                    result_total,truncated,ref_kind,used_context,note}` 如实回告；
+                  · `carry` —— 保留的「承上一轮结果集」显式开关（勾选才承接；指代词命中时自动承接）；
+                  · 返回体附 `set_check`（集合身份校验：独立复算命中集 vs 返回集，
+                    差集/完整性/聚合复算见 `answer_verify.build_set_check`）与
+                    `understanding_status`（'OK'/UNDERSTANDING_INCOMPLETE/KEYWORD_FREEFORM）。
+                  · `ctx_pids` 仍保留为**兜底**（服务端会话不可用时用）：因 URL 长度所限，
+                    它仍按 200 截断，界面上会明标「已降级」。
     /api/search?q=&author=&cipai=&tail=&tailPz=&pz=&minZe=&maxZe=&minLen=&maxLen=&minSent=
                 &maxSent=&minLong=&changeMin=&changeMax=&thrMin=&thrMax=&scene=&dynasty=
                 &authorMode=&cipaiMode=&sort=&page=&size=&agg=&pair=&order_by=
@@ -51,7 +63,9 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, 'solve'))
 
 import aggregate as AGG                  # noqa: E402
+import answer_verify as AVERIFY          # noqa: E402  （集合身份校验，2026-10-08 新增）
 import ask as ASK                        # noqa: E402
+import context as CONTEXT                # noqa: E402  （服务端会话语境，2026-10-08 新增）
 import evidence as EV                    # noqa: E402
 import gen as GEN                        # noqa: E402
 import guard as GUARD                    # noqa: E402
@@ -72,6 +86,14 @@ LOCK = threading.Lock()
 _TLS = threading.local()      # 线程本地连接（替代旧版共享单连接 CONN）
 LLM = None
 STAMP = time.strftime('%Y-%m-%d %H:%M:%S')
+
+# ⚠ 2026-10-08 新增（外部审查 A 项）：**服务端会话语境**（`solve/context.py`）。
+#   旧版多轮上下文全在前端（`lastTurn.pids.slice(0, 200)`），而 200 是**语义截断**——
+#   上一轮命中 3000 首、下一轮问「其中字数最少的有哪些」，只在**前 200 篇**里找，改变了问题语义。
+#   现由服务端按 `sid` 存**完整**结果集（每轮上限 20000，超限**如实**标记 truncated），
+#   「集合指代 / 单篇指代 / 条件继承」由 `context.resolve()` 统一判定。
+#   仅当请求带 `sid` 时才建会话 → 既有门禁（不带 sid）不产生会话、逐字不变。
+SESSIONS = CONTEXT.ContextStore(dirpath=os.path.join(DATA, 'sessions'))
 
 EXAMPLES = [
     '清 临江仙 仄声比例高于45%',
@@ -677,24 +699,209 @@ def _ctx_pids_kwargs(ctx_pids):
     return {}, pids
 
 
+# 服务端会话可交给 `ask.answer` 的 pid 上限：贴 SQLite 宿主变量上限（本机 32766）留足余量。
+# 会话自身每轮上限 20000（见 context.MAX_PIDS_PER_TURN），故正常不会触发这里的截断。
+MAX_CTX_PIDS = 20000
+
+
+def _pids_to_answer_kwargs(pids):
+    """把「服务端会话解析出的完整 pid 集」编成 `ask.answer` 的透传参数。
+
+    与前端兜底的 `_ctx_pids_kwargs`（≤200）不同：这里承载的是**完整集合**，
+    因此不做 200 截断；仅在超过 SQLite 宿主变量上限时**如实**截断（由调用方在
+    `session.ctx_truncated` 上标记），绝不静默。
+    """
+    seq, seen = [], set()
+    for x in (pids or []):
+        s = str(x).strip()
+        if s and s not in seen:
+            seen.add(s)
+            seq.append(s)
+    cut = False
+    if len(seq) > MAX_CTX_PIDS:
+        seq = seq[:MAX_CTX_PIDS]
+        cut = True
+    if seq and _ASK_HAS_CTX_PIDS:
+        return {'ctx_pids': seq}, seq, cut
+    return {}, seq, cut
+
+
+def _resolve_context(session, resolved, carry, ctx_arg, pids_arg):
+    """把「会话指代分类结果 + 显式勾选 + 前端兜底」合成本轮实际使用 `(ctx, pids, info)`。
+
+    · 指代命中（set/single/inherit）→ **服务端会话**为准（完整集合 / 单篇 / 条件继承）；
+    · `ambiguous`（上一轮多篇却用「那首」）→ 不承接，如实附上说明（`info['note']`）；
+    · 无指代 → 仅在用户**显式勾选**「承上一轮结果集」时才承接（保留既有语义）；
+    · 会话不可用（sid 缺失/无历史）→ **退回前端 `ctx_pids` 兜底机制**（≤200，明标降级）。
+    """
+    info = {'ref_kind': resolved.get('kind') if resolved else 'none',
+            'used_context': False, 'pids_used': 0, 'fallback': False,
+            'truncated': None, 'note': None}
+    ctx_v = ctx_arg or ''
+    fallback = list(pids_arg or [])                       # 前端兜底（旧机制，保留）
+    pids_v = list(fallback)
+    if fallback:
+        info['fallback'] = True
+    kind = (resolved or {}).get('kind', 'none')
+    if kind == 'set':
+        pids_v = list(resolved.get('pids') or [])
+        info['used_context'] = True
+        info['truncated'] = bool(resolved.get('truncated'))
+        if not pids_v:
+            # 上一轮确实 0 篇：如实说明「集合落空」，不退回兜底（否则会把范围换成别的东西）。
+            info['fallback'] = False
+            info['note'] = ('上一轮命中 0 篇（集合为空），集合指代落空——本轮按原问题作答，'
+                            '未附加任何结果集范围。')
+    elif kind == 'single':
+        pids_v = [resolved['pid']]
+        info['used_context'] = True
+        info['fallback'] = False
+    elif kind == 'ambiguous':
+        pids_v = []
+        info['fallback'] = False
+        info['note'] = resolved.get('reason')
+    elif kind == 'inherit':
+        pids_v = []                                       # 条件继承不锁范围，只补条件
+        info['fallback'] = False
+        prev_q = resolved.get('question') or ''
+        prev_s = resolved.get('spec_desc') or ''
+        if prev_q or prev_s:
+            ctx_v = ('上一问：%s｜上一轮解析为：%s' % (prev_q, prev_s))[:300]
+            info['used_context'] = True
+    else:                                                 # none
+        if carry and session is not None and session.turns:
+            last = session.turns[-1]
+            pids_v = list(last.get('result_pids') or [])
+            info['used_context'] = True
+            info['fallback'] = False
+            info['truncated'] = bool(last.get('truncated'))
+        elif not fallback:
+            pids_v = []
+    info['pids_used'] = len(pids_v)
+    info['ctx_chars'] = len(ctx_v or '')
+    return ctx_v, pids_v, info
+
+
+def _derive_understanding(q, parse, client, policy, ctx_v, pids_v):
+    """**独立再理解一次**，取回本轮所用的 `QuerySpec` 对象与 `note`（供集合身份复核与
+    未理解状态）。
+
+    为什么要再理解一次：`ask.answer()` 的返回体里**没有** spec 对象（只有 `spec.describe()`
+    字符串），而集合身份校验（外部审查 B）必须有可编译成 SQL 的 spec。这里用与 `answer`
+    **完全相同的参数**再走一遍理解层，取得 spec。**不改 ask.py**。
+    ⚠ 代价与边界（如实声明）：
+      · 若 `parse=1` 且大模型可用，本函数会**多调一次大模型理解**（延迟增加，结论不变）；
+      · `ask.answer` 在理解之后还会对 spec 做「题名降级 / 题名兜底」等调整，本函数**不复现**
+        那两步 → 极少数含题名条件的问句上，复核所用 spec 可能与检索实际略有差异
+        （此时 `set_check` 会给出一条「命中总数不一致」的**信息**，供人工判读）。
+    失败一律静默降级（不改动答案本体）。
+    """
+    try:
+        conn = get_conn()
+        if parse and client is not None and getattr(client, 'available', lambda: False)():
+            spec, note = ASK.understand(conn, q, llm=client, llm_parse=True,
+                                        llm_policy=policy, context=ctx_v or None,
+                                        ctx_pids=(pids_v or None))
+        else:
+            spec = RT.parse_query(conn, q)
+            if pids_v:
+                spec.ctx_pids = list(pids_v)
+                RT._finalize(spec)
+            status, _msg = ASK._understanding_status(spec)
+            note = {'understanding_status': status, 'source': '规则解析'}
+            if ctx_v:
+                note['notes'] = ['本轮未启用大模型理解；上下文（ctx）只在理解层生效，规则路不受其影响']
+        return spec, (note if isinstance(note, dict) else {})
+    except Exception as exc:                              # 复核失败绝不影响作答
+        return None, {'understanding_status': None,
+                      'error': '%s: %s' % (type(exc).__name__, exc)}
+
+
+def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
+    """把 `set_check` / `understanding_status` 挂到返回体上（有则给、失败则如实标注）。"""
+    shown = len([p for p in (result_pids or []) if p])
+    _tot = out.get('total')
+    try:
+        out['set_check'] = AVERIFY.build_set_check(
+            conn, spec, result_pids,
+            total=(_tot if isinstance(_tot, int) and not isinstance(_tot, bool) else None),
+            shown=shown, agg_result=agg_result)
+    except Exception as exc:
+        out['set_check'] = {'ok': None, 'checked': False,
+                            'reason': '集合校验未执行：%s: %s' % (type(exc).__name__, exc)}
+        if isinstance(note, dict) and note.get('error'):
+            out['set_check']['reflect'] = note['error']
+    out['understanding_status'] = (note or {}).get('understanding_status')
+    return out
+
+
+def _result_pids_of(out):
+    """从返回体取「结果里给出的 pid 集」：优先显式 `pid`（第 N 名等），否则 `blocks[].pid`。"""
+    if out.get('pid'):
+        return [out['pid']]
+    return [b.get('pid') for b in (out.get('blocks') or []) if b and b.get('pid')]
+
+
+def _store_turn(session, q, spec, out, result_pids):
+    """把本轮落到会话：**完整**结果集（独立复算的命中集优先）、解析摘要、总数。"""
+    if session is None:
+        return None
+    full = None
+    try:
+        full = AVERIFY.hit_pids(get_conn(), spec)
+    except Exception:
+        full = None
+    store_pids = full if (full is not None) else list(result_pids or [])
+    _tot = out.get('total')
+    if not (isinstance(_tot, int) and not isinstance(_tot, bool)):
+        _tot = len(store_pids) if store_pids else None
+    return SESSIONS.add_turn(session, q, (spec.describe() if spec is not None else ''),
+                             store_pids, _tot)
+
+
 def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None,
-          ctx_pids=None):
+          ctx_pids=None, sid=None, carry=False):
     t0 = time.time()
+    conn = get_conn()
     client = get_llm() if (narrate or argument or parse) else None
-    # 多轮「结果集」通路（2026-10-08）：把上一轮命中的 pid 集合透传给理解层（见 _ctx_pids_kwargs）。
-    extra, pids = _ctx_pids_kwargs(ctx_pids)
+    # ① 服务端会话 + 指代分类（外部审查 A）：带 sid 时才建会话。
+    session = SESSIONS.get_or_create(sid) if sid else None
+    resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
+    _fb_pids = _split_ctx_pids(ctx_pids)                  # 前端兜底（≤200）
+    ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
+    # ② 独立再理解一次（取 spec 供复核；见 _derive_understanding 的代价声明）
+    spec, note = _derive_understanding(q, parse, client, policy, ctx_v, pids_v)
+    # ③ 作答（透传完整集合；仅当后端支持该形参时）
+    extra, pids_sent, cut = _pids_to_answer_kwargs(pids_v)
+    cinfo['ctx_truncated_send'] = cut
     # ⚠ 2026-10-06 修（外部审查 P1-29）：原先这里 `with LOCK:` 包住整个 ASK.answer（含 LLM，
-     #   单次 1.4~5 秒）→ 所有并发问答被串行化。改用线程本地连接后无需持锁。
-    res = ASK.answer(get_conn(), q, topk=topk, llm=client,
+    #   单次 1.4~5 秒）→ 所有并发问答被串行化。改用线程本地连接后无需持锁。
+    res = ASK.answer(conn, q, topk=topk, llm=client,
                      narrate=narrate, argument=argument, llm_parse=parse,
-                     llm_policy=policy, context=ctx, **extra)
+                     llm_policy=policy, context=(ctx_v or None), **extra)
     out = _clean_ask_result(res, client, t0)
-    out['ctx_pids'] = {'received': len(pids), 'consumed': bool(extra)}
+    out['ctx_pids'] = {'received': len(pids_sent), 'consumed': bool(extra),
+                       'from_session': bool(cinfo.get('used_context'))}
+    # ④ 集合身份校验 + 未理解状态
+    _attach_checks(out, conn, spec, note, _result_pids_of(out), agg_result=out.get('agg'))
+    # ⑤ 会话落盘（完整集合，供下一轮指代）
+    turn = _store_turn(session, q, spec, out, _result_pids_of(out))
+    out['sid'] = (session.sid if session is not None else (sid or ''))
+    if turn is not None:
+        out['session'] = {'sid': session.sid, 'turn': len(session.turns),
+                          'stored_pids': len(turn['result_pids']),
+                          'result_total': turn['result_total'],
+                          'truncated': bool(turn['truncated']),
+                          'ref_kind': cinfo.get('ref_kind'),
+                          'used_context': bool(cinfo.get('used_context')),
+                          'from_fallback': bool(cinfo.get('fallback')),
+                          'pids_used': cinfo.get('pids_used'),
+                          'note': cinfo.get('note')}
     return out
 
 
 def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='auto', ctx=None,
-                 ctx_pids=None):
+                 ctx_pids=None, sid=None, carry=False):
     """**SSE 流式问答**：把「进度」与「大模型逐字增量」实时推给浏览器。
 
     为什么要流式：原先网页点一下要**干等 1.4~5 秒**（大模型整段写完才返回）。
@@ -717,8 +924,6 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
     rid = _uuid.uuid4().hex[:12]
     out = _queue.Queue(maxsize=256)          # 有界：断开后不再无限堆积（见上）
     cancelled = _threading.Event()
-    # 多轮「结果集」通路（2026-10-08）：与 q_ask 同一套透传与兜底（见 _ctx_pids_kwargs）。
-    extra, pids = _ctx_pids_kwargs(ctx_pids)
 
     def emit(kind, payload):
         if cancelled.is_set():
@@ -735,21 +940,53 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
     def work():
         t0 = time.time()
         try:
+            conn = get_conn()
             client = get_llm() if (narrate or argument or parse) else None
+            # ① 服务端会话 + 指代分类（与 q_ask 同一套，外部审查 A）。
+            session = SESSIONS.get_or_create(sid) if sid else None
+            resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
+            _fb_pids = _split_ctx_pids(ctx_pids)          # 前端兜底（≤200）
+            ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
             emit('status', {'text': '正在理解问句…',
                             'model': (client.name if client and client.available() else None)})
+            # ② 独立再理解一次（取 spec 供 set_check / understanding_status）
+            spec, note = _derive_understanding(q, parse, client, policy, ctx_v, pids_v)
+            extra, pids_sent, _cut = _pids_to_answer_kwargs(pids_v)
+            _cp = {'received': len(pids_sent), 'consumed': bool(extra),
+                   'from_session': bool(cinfo.get('used_context'))}
+
+            def _emit_engine(d):
+                eng = _clean_ask_result(dict(d), client, t0)
+                eng['ctx_pids'] = dict(_cp)
+                _attach_checks(eng, conn, spec, note, _result_pids_of(eng),
+                               agg_result=eng.get('agg'))
+                emit('engine', eng)
+
             # ⚠ 2026-10-06 修（P1-29）：不再持全局锁调用 ASK.answer（含 LLM）。
-            res = ASK.answer(get_conn(), q, topk=topk, llm=client,
+            res = ASK.answer(conn, q, topk=topk, llm=client,
                              narrate=narrate, argument=argument, llm_parse=parse,
-                             llm_policy=policy, context=ctx,
+                             llm_policy=policy, context=(ctx_v or None),
                              on_delta=lambda t: emit('delta', {'text': t}),
                              # 答案先到：确定性结论一算完即推 engine 事件（前端立即渲染），
                              # 大模型随后只补「说明」——用户不再干等模型整段写完。
-                             on_engine=lambda d: emit('engine', _clean_ask_result(dict(d),
-                                                                                 client, t0)),
+                             on_engine=_emit_engine,
                              **extra)
             fin = _clean_ask_result(res, client, t0)
-            fin['ctx_pids'] = {'received': len(pids), 'consumed': bool(extra)}
+            fin['ctx_pids'] = dict(_cp)
+            # ③ 集合身份校验 + 未理解状态；④ 会话落盘（完整集合，供下一轮指代）
+            _attach_checks(fin, conn, spec, note, _result_pids_of(fin), agg_result=fin.get('agg'))
+            turn = _store_turn(session, q, spec, fin, _result_pids_of(fin))
+            fin['sid'] = (session.sid if session is not None else (sid or ''))
+            if turn is not None:
+                fin['session'] = {'sid': session.sid, 'turn': len(session.turns),
+                                  'stored_pids': len(turn['result_pids']),
+                                  'result_total': turn['result_total'],
+                                  'truncated': bool(turn['truncated']),
+                                  'ref_kind': cinfo.get('ref_kind'),
+                                  'used_context': bool(cinfo.get('used_context')),
+                                  'from_fallback': bool(cinfo.get('fallback')),
+                                  'pids_used': cinfo.get('pids_used'),
+                                  'note': cinfo.get('note')}
             emit('final', fin)
         except Exception as exc:
             sys.stderr.write('[sse][%s] worker 异常：%s: %s\n' % (rid, type(exc).__name__, exc))
@@ -926,7 +1163,10 @@ class H(BaseHTTPRequestHandler):
                                         argument=b('argument'), parse=b('parse'),
                                         ctx=(g('ctx') or '')[:300] or None,
                                         # 多轮「结果集」：支持逗号分隔或重复参数（见 _split_ctx_pids）
-                                        ctx_pids=qs.get('ctx_pids')))
+                                        ctx_pids=qs.get('ctx_pids'),
+                                        # 服务端会话（外部审查 A）：带 sid 时用服务端完整结果集
+                                        sid=((g('sid') or '').strip() or None),
+                                        carry=b('carry')))
             if u.path == '/api/ask_stream':
                 # 流式问答：**不能用 _send**（那会带 Content-Length，浏览器要等整包）
                 b = lambda k: g(k).lower() in ('1', 'true', 'yes', 'on')
@@ -945,7 +1185,10 @@ class H(BaseHTTPRequestHandler):
                                           policy=g('policy') or 'auto',
                                           ctx=(g('ctx') or '')[:300] or None,
                                           # 多轮「结果集」：支持逗号分隔或重复参数
-                                          ctx_pids=qs.get('ctx_pids')):
+                                          ctx_pids=qs.get('ctx_pids'),
+                                          # 服务端会话（外部审查 A）
+                                          sid=((g('sid') or '').strip() or None),
+                                          carry=b('carry')):
                     self.wfile.write(frame.encode('utf-8'))
                     self.wfile.flush()
                 return
@@ -1050,6 +1293,13 @@ def main():
               % DB)
         return 2
     get_conn()
+    # 服务端会话：载入 data/sessions/ 的历史（失败静默，内存仍可用）。
+    try:
+        _n_sess = SESSIONS.load()
+        if _n_sess:
+            print('已载入会话 %d 个（data/sessions/）' % _n_sess)
+    except Exception as _se:
+        print('会话载入跳过：%s: %s' % (type(_se).__name__, _se))
     # 启动预热：首问原要 238 ms（首次编译 + SQLite 页缓存冷），预热后稳定在 40~50 ms。
     # 预热失败不影响启动（只影响首个请求的快慢）。
     try:
