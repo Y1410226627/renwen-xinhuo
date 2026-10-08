@@ -48,7 +48,12 @@ def poem_block(conn, pid, top_lines=1, spec=None):
         return None
     (pid, dyn, author, cipai, title, source, sent_n, han_len, ping, ze, ze_ratio,
      scene, change, longest_len, threshold, raw) = r
-    with_cond = spec is not None and retrieve.has_line_cond(spec)
+    with_cond = spec is not None and (retrieve.has_line_cond(spec)
+                                      # ⚠ 2026-10-08：**提取型问题**（第 N 句第 M 字）本身没有
+                                      #   句级**筛选**条件，但它必须让「被取字的那一句」进证据块
+                                      #   （否则答案引用的句子无法逐字落地，护栏会判「引文未落地」）。
+                                      #   故把 extract 也算作「需要选句展示」的一类。
+                                      or bool(getattr(spec, 'extract', None)))
     # ⚠ 2026-10-08 新增（缺陷3 取舍）：`consist`（声情标注为 X 但实测前后段相反）是**篇级**量，
     #   不属于任何单句 → **不**放进 `line_satisfies`（否则会把全篇每一句都误标成「命中句」）。
     #   这里单列为**篇级命中理由**，供上层如实说明「本篇为何入选」。判据与 `retrieve._sql()`
@@ -103,6 +108,20 @@ def poem_block(conn, pid, top_lines=1, spec=None):
             rest = sorted([r0 for r0 in rows if r0[0] not in set(m_idx[:top_lines])],
                           key=lambda r0: (-(r0[4] / (r0[2] or 1.0)), r0[0]))
             pick += rest[:top_lines - len(pick)]
+        # ⚠ 2026-10-08 新增：**提取型问题**（第 N 句第 M 字）必须让「被取字的那一句」
+        #   出现在证据里 —— 否则答案里引用的那一句无法在证据块中**逐字落地**，
+        #   护栏会正确地判「引文未落地」并把整条回答标为未通过（实测已拦下）。
+        #   做法：把目标句**提到 pick 最前**（并去重），保证它一定被展示。
+        _ex = getattr(spec, 'extract', None) if spec is not None else None
+        if _ex:
+            try:
+                _sn = int(_ex.get('sent') or 0)
+            except Exception:
+                _sn = 0
+            if _sn >= 1:
+                _tgt = [r0 for r0 in rows if r0[0] == _sn - 1]
+                if _tgt:
+                    pick = _tgt + [r0 for r0 in pick if r0[0] != _tgt[0][0]]
         lines = [(r0[0], r0[1], r0[2], r0[3], r0[4], r0[5], r0[6], reasons[r0[0]])
                  for r0 in pick]
     else:

@@ -99,6 +99,70 @@ def _no_hard_condition(spec):
     return not retrieve.has_hard(spec)
 
 
+_CN_D = '一二三四五六七八九十'
+
+
+def _cn(n):
+    """阿拉伯数字 → 汉字数字（护栏要求回答文案**不含阿拉伯数字**；序号最大到几十，够用）。"""
+    try:
+        n = int(n)
+    except Exception:
+        return str(n)
+    if n <= 0:
+        return str(n)
+    if n <= 10:
+        return _CN_D[n - 1]
+    if n < 20:
+        return '十' + _CN_D[n - 11]
+    if n < 100:
+        return _CN_D[n // 10 - 1] + '十' + (_CN_D[n % 10 - 1] if n % 10 else '')
+    return str(n)
+
+
+def _extract_answer(conn, spec, blocks):
+    """**提取型问题**（第 N 句第 M 字）的正面回答：从命中的篇里把那个字取出来。
+
+    由来（2026-10-08 主人实测）：「高旭《浪淘沙·杨笃生自沉利物浦死，吊以此阕》**第四句第三字**
+    是哪个字」——正确篇目**已经命中**，但系统把「第四句第三字」当**检索词面**，于是答了句脚，
+    **答非所问**。这类问句要的不是筛篇，而是「**在已定的这一篇里取第 N 句第 M 个字**」。
+
+    纪律（与全项目一致）：
+      ① 取字按**汉字序列**（跳过标点与空白）——与语料「不计标点」的既有口径一致；
+      ② 句序/字序**越界就如实说明**，绝不硬凑或改口径；
+      ③ 多个篇目命中时**逐篇列出**（最多五篇），不替用户选；
+      ④ 文案**不含阿拉伯数字**（护栏要求），序号一律用汉字数字。
+    """
+    ex = getattr(spec, 'extract', None) or {}
+    try:
+        sn, ps = int(ex.get('sent') or 0), int(ex.get('pos') or 0)
+    except Exception:
+        return ''
+    if sn < 1 or ps < 1 or not blocks:
+        return ''
+    parts = []
+    for b in blocks[:5]:
+        pid = b.get('pid')
+        title = b.get('title') or b.get('cipai') or ''
+        try:
+            rows = conn.execute('SELECT idx,text FROM lines WHERE pid=? ORDER BY idx', (pid,)).fetchall()
+        except Exception:
+            rows = []
+        if len(rows) < sn:
+            parts.append('《%s》全篇只有%s句，没有第%s句' % (title, _cn(len(rows)), _cn(sn)))
+            continue
+        L = rows[sn - 1]
+        han = [c for c in (L['text'] or '') if retrieve.is_hanzi(c)]
+        if len(han) < ps:
+            parts.append('《%s》第%s句「%s」只有%s个字，没有第%s个' % (
+                title, _cn(sn), (L['text'] or '').strip(), _cn(len(han)), _cn(ps)))
+            continue
+        parts.append('《%s》第%s句是「%s」，其中第%s个字是「%s」' % (
+            title, _cn(sn), (L['text'] or '').strip(), _cn(ps), han[ps - 1]))
+    if not parts:
+        return ''
+    return '【提取】%s。' % '；'.join(parts)
+
+
 def _line_note(spec, L):
     """给展示句加一句「为什么展示它」的说明（行级条件题专用）。"""
     rs = L.get('match_reasons') or []
@@ -1853,6 +1917,15 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
                 % (spec.describe(), total, more, b0['dynasty'], b0['author'], b0['title'],
                    b0['sent_n'], b0['han_len'], b0['ping'], b0['ze'], b0['ze_ratio'],
                    b0['scene']))
+    # ⚠ 2026-10-08 新增（主人实测驱动）：「**提取型**」问题（第 N 句第 M 字）——用户要的
+    #   **就是那个字**，所以把它作为**第一条结论**给出（在「在条件〔…〕下共命中…」之前）。
+    #   实测反例：「高旭《浪淘沙·…》第四句第三字是哪个字」原先被当词面检索、答了句脚；
+    #   现在会直接答「《浪淘沙·杨笃生自沉利物浦死，吊以此阕》第四句是「宁与金瓯同破却，
+    #   遗恨无穷。」，其中第三个字是「金」」。
+    if getattr(spec, 'extract', None):
+        _ex_line = _extract_answer(conn, spec, blocks)
+        if _ex_line:
+            out.append(_ex_line)
     out.append(head)
     # ⚠ 2026-10-03：语料里确有**空篇残片**（0 句 / 0 字，元曲 144 篇）。「没有任何一句…」
     #   「每一句都…」这类条件会被它们**平凡**满足（空集里没有反例/每个元素都满足）。

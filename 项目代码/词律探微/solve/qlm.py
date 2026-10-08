@@ -76,6 +76,10 @@ SYSTEM = (
     '             sent_min/sent_max（句数）、change_min/change_max（变化值）、\n'
     '             thr_min/thr_max（长句阈值）。如 {"ze_min": 45}。\n'
     '  "unparsed": 你无法映射成上述条件的短语列表（如实填写，不许硬凑）。\n'
+    '  "extract": **提取型**问题专用（问「第 N 句第 M 字是哪个字」「第 N 句的第 M 个字是什么」这类\n'
+    '             **从某一篇里取某个字**的问题）。形如 {"sent": 4, "pos": 3}（第 4 句第 3 个字，\n'
+    '             序号从 1 起）。★ 这类问题**不是筛选条件**——不要把它写进 tail/pz/rng/line_ops，\n'
+    '             也不要写进 unparsed；只要问的是「取某个字」，就必须用本字段。不是这类问题写 null。\n'
     '  "order":  **极值／排序**意图（问「哪一首…最高/最低/最多/最长」时）。形如\n'
     '             {"metric":"ze_ratio"|"ping_ratio"|"han_len"|"sent_n"|"longest_len"|"change",\n'
     '              "dir":"max"|"min"}。不是极值题就写 null（千万不要把「最高」硬凑成条件）。\n'
@@ -391,6 +395,20 @@ def validate(conn, obj, question=''):
                 spec.title_any.append(t)
         else:
             dropped.append('题名=%s（语料标题中不存在）' % t)
+
+    # ⚠ 2026-10-08 新增：**提取型意图**（第 N 句第 M 字）——「从某一篇里取某个字」不是筛选条件，
+    #   不能写进 tail/pz/rng/line_ops（写进去会把检索面缩成 0）。这里只校验序号合法性。
+    ex = obj.get('extract')
+    if isinstance(ex, dict):
+        try:
+            _sn, _ps = int(ex.get('sent')), int(ex.get('pos'))
+        except Exception:
+            _sn = _ps = 0
+        if 1 <= _sn <= 200 and 1 <= _ps <= 200:
+            spec.extract = {'sent': _sn, 'pos': _ps, 'unit': 'char'}
+        else:
+            dropped.append('提取序号不合法（第 %r 句第 %r 字，序号须为正整数）'
+                           % (ex.get('sent'), ex.get('pos')))
 
     tl = [str(x).strip() for x in _as_list(obj.get('tail'))]
     for ch in tl:
