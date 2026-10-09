@@ -46,20 +46,14 @@ let lastTurn = null;            // { q, spec, pids } —— 供下一轮 ctx / c
  *   （主人实测反馈：「每次问下一个问题总会默认承上一轮，导致检索范围有误」）。
  *   `lastTurn` 仍始终记录（供勾选时使用），但**不勾就不发**。 */
 const carryOn = ref(false);
-/* 作答情景（竞品「研究演示 / 应试作答」的对应实现）：
-   · research —— 研究演示：确定性结论 + 大模型补「说法」（默认开 narrate）；
-   · exam     —— 应试作答：论证口径（默认开 argument：更严、依据分列）。
-   ⚠ 诚实边界：本项目**只有一条已就绪的大模型通道**（`/api/llm` 显示实际模型名），
-   这里切换的是**作答口径**，不是模型——不冒充多模型选择。 */
-const mode = ref('research');
-const modeNote = computed(() => (mode.value === 'exam'
-  ? '应试作答：论证口径（依据分列、结论与推断分开）'
-  : '研究演示：确定性结论 + 大模型补说法'));
-function setMode(m) {
-  mode.value = m;
-  if (m === 'exam') { useArg.value = true; useLlm.value = false; useParse.value = true; }
-  else { useArg.value = false; useLlm.value = false; useParse.value = true; }
-}
+/* ─────────────── 对话式 UI 新增状态（2026-10-10，DeepSeek 式重构）───────────────
+ * 旧「研究演示 / 应试作答」情景切换（mode/setMode/modeNote）已由 composer 里的
+ * 三个 pill（深度理解 / 模型补写 / 论证草稿）承载——口径完全不变，只是入口更直接：
+ * 论证草稿 ≙ 原 exam（useArg=1），只勾模型补写 ≙ 原 research（narrate=1）。 */
+const taEl = ref(null);          // composer 输入框（自适应高度）
+const speakingIdx = ref(-1);     // 正在朗读的轮次下标（-1 = 未在朗读）
+/* 「发送中」：任一轮还在流式/请求中 → 发送按钮禁用（防连点重发）。 */
+const busy = computed(() => turns.value.some((t) => t.streaming));
 
 /* ─────────────── 多会话（本地保存，可删除）───────────────
  * 目标：像大模型对话那样「一个会话一条线」，互不污染；会话存 localStorage，可新建 / 切换 / 删除。
@@ -73,7 +67,6 @@ const T_MAX = 60;               // 每个会话最多保留 60 轮
 const PERSIST_PIDS = 200;
 const sessions = ref([]);       // [{ id, sid, title, ts, turns: [...] }]
 const activeId = ref('');
-const sessPanel = ref(false);   // 会话面板开关
 
 function uid() { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 /* 服务端会话 id：与本地会话一一对应（本地删除会话时服务端那份由 LRU 自然淘汰）。 */
@@ -150,17 +143,15 @@ function newSession() {
   lastTurn = null;
   q.value = '';                 // ⭐ 2026-10-09：切/建会话时清空输入框（主人实测驱动）
   persist();
-  sessPanel.value = false;
   scrollBottom();
 }
 
 function switchSession(id) {
-  if (id === activeId.value) { sessPanel.value = false; return; }
+  if (id === activeId.value) { return; }
   activeId.value = id;
   loadActive();
   q.value = '';                 // ⭐ 2026-10-09：切会话清空输入框
   persist();
-  sessPanel.value = false;
 }
 
 function delSession(id) {
@@ -170,6 +161,104 @@ function delSession(id) {
   if (!sessions.value.length) { newSession(); return; }
   if (activeId.value === id) { activeId.value = sessions.value[0].id; loadActive(); }
   persist();
+}
+
+/* 左栏会话按「今天 / 昨天 / 更早」分组（DeepSeek 式）；空组不显示。
+ * sessions 本身按最近更新在前维护（finishTurn 里上浮），组内保持该顺序。 */
+const grouped = computed(() => {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  const today = d.getTime();
+  const yesterday = today - 86400000;
+  const groups = [
+    { label: '今天', items: [] },
+    { label: '昨天', items: [] },
+    { label: '更早', items: [] }
+  ];
+  for (const s of sessions.value) {
+    if (s.ts >= today) { groups[0].items.push(s); }
+    else if (s.ts >= yesterday) { groups[1].items.push(s); }
+    else { groups[2].items.push(s); }
+  }
+  return groups.filter((g) => g.items.length);
+});
+
+/* ─────────────── 对话式交互工具（复制 / 朗读 / 重新生成 / 输入框自适应）─────────────── */
+
+/* 输入框自适应高度：内容多时长高（上限 160px，超出内部滚动），清空后缩回一行。 */
+function autoGrow() {
+  const el = taEl.value;
+  if (!el) { return; }
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+}
+
+/* v-html → 纯文本（复制 / 朗读用）：不引依赖，用浏览器自带的解析。 */
+function stripHtml(html) {
+  if (typeof document === 'undefined') { return String(html || ''); }
+  const d = document.createElement('div');
+  d.innerHTML = String(html || '');
+  return (d.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/* 剪贴板：优先 async API，降级 execCommand（file:// 等非安全上下文）。 */
+function copyText(text) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  if (typeof document === 'undefined') { return Promise.reject(new Error('no document')); }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } finally { ta.remove(); }
+  return Promise.resolve();
+}
+
+/* 复制一轮回答：问句 + 结论 + 证据的纯文本（HTML 标签剥掉，粘贴即读）。 */
+function copyAnswer(t) {
+  const parts = [];
+  if (t.question) { parts.push('问：' + t.question); }
+  const concl = stripHtml(t.concl);
+  const evid = stripHtml(t.evid);
+  if (concl) { parts.push('答：' + concl); }
+  if (evid) { parts.push('证据：' + evid); }
+  if (!parts.length) { UI.toast('这一轮还没有可复制的内容'); return; }
+  copyText(parts.join('\n\n')).then(
+    () => UI.toast('已复制回答'),
+    () => UI.toast('复制失败（浏览器未授权剪贴板）')
+  );
+}
+
+/* 朗读：speechSynthesis（zh-CN）。再点一次 = 停止；读完自动复位按钮。
+ * 内容 = 结论 + 证据的纯文本，截到 600 字（证据块太长时读主干）。 */
+function speak(t, idx) {
+  if (typeof window === 'undefined' || !window.speechSynthesis) {
+    UI.toast('当前环境不支持朗读'); return;
+  }
+  if (speakingIdx.value === idx) {
+    window.speechSynthesis.cancel();
+    speakingIdx.value = -1;
+    return;
+  }
+  const text = [stripHtml(t.concl), stripHtml(t.evid)].filter(Boolean).join('。').slice(0, 600);
+  if (!text) { UI.toast('这一轮还没有可朗读的内容'); return; }
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'zh-CN';
+  u.onend = () => { if (speakingIdx.value === idx) { speakingIdx.value = -1; } };
+  u.onerror = () => { if (speakingIdx.value === idx) { speakingIdx.value = -1; } };
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(u);
+  speakingIdx.value = idx;
+}
+
+/* 重新生成：把那一轮的问题放回输入框并立即再问一遍（新开一轮，不覆盖旧答案）。 */
+function regen(t) {
+  if (!t || !t.question) { return; }
+  q.value = t.question;
+  autoGrow();
+  go();
 }
 
 /* 页面生成时间探针（由服务端在返回 HTML 时替换 @@STAMP@@ 注入）。 */
@@ -368,6 +457,8 @@ function finishTurn(text) {
     s.ts = nowTs();
     if (/^(新会话|（未命名）)$/.test(s.title)) { s.title = titleOf(text); }
   }
+  /* 最近活跃的会话浮到列表最前（DeepSeek 式；sort 在主流引擎稳定，同 ts 不乱序）。 */
+  sessions.value.sort((a, b) => b.ts - a.ts);
   persist();
 }
 
@@ -405,6 +496,7 @@ async function go() {
      提交后**清空输入框**（对话式交互的标准行为）。此前 `q` 只读不清，
      且它是独立 ref（不属于会话存储）→ 换会话后旧文本仍在。 */
   q.value = '';
+  autoGrow();                   // 清空后输入框缩回一行（自适应高度）
   scrollBottom();
 
   const streaming = !!(useLlm.value || useArg.value) && typeof window.fetch === 'function';
@@ -478,7 +570,7 @@ async function go() {
   finishTurn(text);
 }
 
-function pickExample(s) { q.value = s; go(); }
+function pickExample(s) { q.value = s; autoGrow(); go(); }
 
 onMounted(async () => {
   /* 会话：先从 localStorage 恢复；没有（或存储损坏）就开一个新的。 */
@@ -496,202 +588,226 @@ onMounted(async () => {
 
 <template>
   <AppShell active="ask" :online="true" data-note="本地引擎（data/corpus.db）" :stamp="stamp">
-    <!-- 会话栏：多会话（本地保存）、可新建 / 切换 / 删除；「承上一轮」默认关闭，由用户显式勾选 -->
-    <div class="card sess">
-      <div class="sess-head">
-        <button class="ghost" @click="sessPanel = !sessPanel">
-          {{ sessPanel ? '收起会话' : '会话' }}（{{ sessions.length }}）
-        </button>
-        <span class="sess-cur">{{ (activeSession() && activeSession().title) || '新会话' }}</span>
-        <button class="ghost" @click="newSession">＋ 新会话</button>
-        <label class="dim carry">
-          <input type="checkbox" v-model="carryOn"> 承上一轮结果集
-        </label>
-        <span class="dim sess-hint">不勾 = 每问独立（默认）；勾上才把上一轮的篇目范围带进来</span>
-      </div>
-      <ul v-if="sessPanel" class="sess-list">
-        <li v-for="s in sessions" :key="s.id" :class="{ on: s.id === activeId }">
-          <a href="#" @click.prevent="switchSession(s.id)">{{ s.title }}</a>
-          <span class="dim">{{ (s.turns || []).length }} 轮</span>
-          <button class="ghost del" title="删除该会话" @click="delSession(s.id)">删除</button>
-        </li>
-      </ul>
-    </div>
-
-    <div class="card ask-intro">
-      <h1>问我一句</h1>
-      <p class="dim">可以这样问（点一下就填进输入框）：</p>
-      <div id="chips">
-        <span v-for="(s, i) in chips" :key="i" class="chip" :data-q="s" @click="pickExample(s)">{{ s }}</span>
-      </div>
-      <p class="dim">回答里的每一处数字都带证据块与出处（篇号 + 句序），可疑之处会明说，
-        语料覆盖不到的问题会<b>拒答</b>而不是编。多轮提问由<b>服务端会话</b>保存上一轮的
-        <b>完整</b>结果集，「其中…」「那首…」这类指代才会落到真实集合上（若结果过大被截，
-        界面会如实说明保留了多少篇）。</p>
-    </div>
-
-    <div id="log" ref="logEl">
-      <div v-if="!turns.length" class="empty">
-        <p><b>还没有提问。</b></p>
-        <p class="dim">点上面的例子，或直接在下方输入框写一句——例如「清 临江仙 仄声比例高于45%」。</p>
-      </div>
-
-      <article v-for="(t, idx) in turns" :key="idx" class="turn">
-        <div class="q">
-          问：{{ t.ctx ? '（承上一轮）' : '' }}{{ t.question }}
-          <span v-if="t.ctxN" class="badge acc">已带上上一轮结果集 {{ t.ctxN }} 篇</span>
-        </div>
-
-        <div v-if="t.error" class="a err">
-          <b class="bad">这一步没走通</b>
-          <p>{{ t.error }}</p>
-          <p class="dim">可试：① 确认本地服务在运行（python web/serve.py）；② 按 Ctrl+F5 强制刷新；
-            ③ 换个说法再问一次。</p>
-        </div>
-
-        <div v-else class="a">
-          <!-- ⑥ 未理解硬门：顶部醒目条（后端正文另有一版文案，这里不重复正文） -->
-          <div v-if="incompleteOf(t)" class="hardgate">
-            <b>这句话里的「{{ unparsedTextOf(t) }}」没能转成可执行条件</b>
-            <p>以下内容<b>不是</b>对该问题的回答（详见「理解详情」）。请换一种说法，或把它拆成
-              「词牌／词人／朝代／句脚字／声律模式／字数句数」这类可执行条件。</p>
+    <div class="ask-shell">
+      <!-- ★ 2026-10-10：**对话式布局**（对标 DeepSeek 截图逐细节）——
+           左栏固定会话列表（开始新对话 / 今天·昨天·更早分组 / 选中高亮 / hover 删除 / 底部状态）；
+           右主区对话流 + 底部粘性输入区（大输入框 + pill 开关 + 圆形发送）。 -->
+      <aside class="side">
+        <button class="newchat" @click="newSession">＋ 开始新对话</button>
+        <div v-for="g in grouped" :key="g.label" class="sgroup">
+          <div class="slabel dim">{{ g.label }}</div>
+          <div v-for="s in g.items" :key="s.id" class="sitem" :class="{ on: s.id === activeId }"
+               :title="s.title" @click="switchSession(s.id)">
+            <span class="stitle">{{ s.title }}</span>
+            <span class="sn dim">{{ (s.turns || []).length }}</span>
+            <button class="sdel" title="删除该会话" @click.stop="delSession(s.id)">✕</button>
           </div>
-          <!-- ④ 如实提示截断：服务端标记 truncated 时必说 -->
-          <div v-if="truncNoteOf(t)" class="gap">{{ truncNoteOf(t) }}</div>
-          <!-- 指代歧义 / 集合落空等会话注记 -->
-          <div v-if="sessNoteOf(t)" class="gap">{{ sessNoteOf(t) }}</div>
-          <div v-if="t.gap" class="gap">{{ t.gap }}</div>
+        </div>
+        <div class="sfoot dim">
+          <div>本地 · 词律探微</div>
+          <div class="sllm">{{ llmTag }}</div>
+          <label class="carry"><input type="checkbox" v-model="carryOn"> 承上一轮结果集</label>
+          <div class="dim" style="font-size:11.5px">不勾 = 每问独立（默认）；勾上才把上一轮的篇目范围带进来</div>
+        </div>
+      </aside>
 
-          <template v-if="t.concl">
-            <div class="zone">
-              <div class="zh">结论</div>
-              <div class="ans" v-html="t.concl"></div>
+      <section class="main">
+        <div id="log" ref="logEl">
+          <div v-if="!turns.length" class="empty">
+            <h1>问我一句</h1>
+            <p class="dim">可以这样问（点一下就填进输入框）——回答里的每一处数字都带证据块与出处
+              （篇号 + 句序），可疑之处会明说，语料覆盖不到的问题会<b>拒答</b>而不是编。</p>
+            <div id="chips">
+              <span v-for="(s, i) in chips" :key="i" class="chip" :data-q="s" @click="pickExample(s)">{{ s }}</span>
             </div>
-            <div v-if="t.evid" class="zone">
-              <div class="zh">证据</div>
-              <div class="ans" v-html="t.evid"></div>
-            </div>
-          </template>
-          <p v-else class="loading"><span class="spin"></span> 正在检索语料并核算…（数字由本地引擎算出）</p>
-
-          <div v-if="t.status" class="m">{{ t.status }}</div>
-
-          <div v-if="t.delta" class="a delta">
-            <b>说明</b>（大模型正在写；数字仍由引擎给，写完还要过四道护栏）<br>
-            <span class="pre">{{ t.delta }}</span>
           </div>
 
-          <details v-if="hasDetail(t.detail)" class="zone ud">
-            <summary class="zh">理解详情</summary>
-            <div class="u-body">
-              <div v-if="t.detail.source" class="u-row">
-                <b>解析来源</b><span>{{ t.detail.source }}</span></div>
-              <div v-if="t.detail.spec" class="u-row">
-                <b>查询理解</b><span>{{ t.detail.spec }}</span></div>
-              <div v-if="t.detail.dropped.length" class="u-row">
-                <b>丢弃字段</b><span>{{ fmtList(t.detail.dropped, '；') }}</span></div>
-              <div v-if="t.detail.unparsed.length" class="u-row u-warn">
-                <b>未理解片段</b><span>{{ fmtList(t.detail.unparsed, '、') }}</span></div>
-              <div v-if="t.detail.verifyOk !== null" class="u-row">
-                <b>护栏校验</b>
-                <span :class="t.detail.verifyOk ? 'ok' : 'bad'">{{ t.detail.verifyOk ? '通过' : '未通过' }}</span>
+          <article v-for="(t, idx) in turns" :key="idx" class="turn">
+            <!-- 用户消息：右对齐气泡 -->
+            <div class="u-msg">
+              <span v-if="t.ctxN" class="badge acc">已带上一轮 {{ t.ctxN }} 篇</span>
+              <span class="bubble">{{ t.ctx ? '（承上一轮）' : '' }}{{ t.question }}</span>
+            </div>
+
+            <!-- AI 回答：平铺无气泡 -->
+            <div class="a-wrap">
+              <div v-if="t.error" class="a err">
+                <b class="bad">这一步没走通</b>
+                <p>{{ t.error }}</p>
+                <p class="dim">可试：① 确认本地服务在运行（python web/serve.py）；② 按 Ctrl+F5 强制刷新；
+                  ③ 换个说法再问一次。</p>
               </div>
-              <div v-if="t.detail.problems.length" class="u-row u-warn">
-                <b>护栏问题</b><span>{{ fmtList(t.detail.problems, '；') }}</span>
-              </div>
-              <div v-if="t.detail.notes.length" class="u-row">
-                <b>解析注记</b><span>{{ fmtList(t.detail.notes, '；') }}</span></div>
-              <div v-if="t.detail.ctxPids && t.detail.ctxPids.received" class="u-row">
-                <b>多轮结果集</b>
-                <span>本轮把 {{ t.detail.ctxPids.received }} 个篇号作为范围交给检索{{
-                  t.detail.ctxPids.from_session ? '（来自服务端会话）' : '（来自前端兜底）' }}，{{
-                  t.detail.ctxPids.consumed ? '检索层已消费' : '检索层暂未消费该参数' }}</span>
-              </div>
-              <div v-if="t.detail.sess && t.detail.sess.used_context" class="u-row">
-                <b>会话承接</b>
-                <span>指代类型 {{ t.detail.sess.ref_kind }}；本轮锁定 {{ t.detail.sess.pids_used }} 篇{{
-                  t.detail.sess.from_fallback ? '（降级：前端兜底）' : '（服务端完整集合）' }}</span>
-              </div>
-              <div v-if="t.setCheck" class="u-row">
-                <b>集合校验</b>
-                <span :class="t.setCheck.ok ? 'ok' : 'bad'">{{ t.setCheck.ok ? '通过' : '未通过' }}</span>
-              </div>
-              <div v-if="t.setCheck && setCheckLines(t.setCheck).length" class="u-row">
-                <b>校验明细</b>
-                <div>
-                  <div v-for="(ln, i) in setCheckLines(t.setCheck)" :key="'scl' + i">{{ ln }}</div>
+
+              <div v-else class="a">
+                <div v-if="incompleteOf(t)" class="hardgate">
+                  <b>这句话里的「{{ unparsedTextOf(t) }}」没能转成可执行条件</b>
+                  <p>以下内容<b>不是</b>对该问题的回答（详见「执行详情」）。请换一种说法，或把它拆成
+                    「词牌／词人／朝代／句脚字／声律模式／字数句数」这类可执行条件。</p>
+                </div>
+                <div v-if="truncNoteOf(t)" class="gap">{{ truncNoteOf(t) }}</div>
+                <div v-if="sessNoteOf(t)" class="gap">{{ sessNoteOf(t) }}</div>
+                <div v-if="t.gap" class="gap">{{ t.gap }}</div>
+
+                <template v-if="t.concl">
+                  <div class="zone">
+                    <div class="zh">结论</div>
+                    <div class="ans" v-html="t.concl"></div>
+                  </div>
+                  <div v-if="t.evid" class="zone">
+                    <div class="zh">证据</div>
+                    <div class="ans" v-html="t.evid"></div>
+                  </div>
+                </template>
+                <p v-else class="loading"><span class="spin"></span> 正在检索语料并核算…（数字由本地引擎算出）</p>
+
+                <div v-if="t.status" class="m">{{ t.status }}</div>
+
+                <div v-if="t.delta" class="a delta">
+                  <b>说明</b>（大模型正在写；数字仍由引擎给，写完还要过四道护栏）<br>
+                  <span class="pre">{{ t.delta }}</span>
+                </div>
+
+                <!-- ★ 「已思考（用时 N）」的对应物：**执行详情**可折叠——
+                     本系统的"思考过程"是确定性执行链（路线/召回/校验），如实折叠展示 -->
+                <details v-if="hasDetail(t.detail)" class="zone ud">
+                  <summary class="zh">已执行（{{ t.detail.ms ? '用时 ' + t.detail.ms + ' ms' : '引擎链路' }}）</summary>
+                  <div class="u-body">
+                    <div v-if="t.detail.source" class="u-row">
+                      <b>解析来源</b><span>{{ t.detail.source }}</span></div>
+                    <div v-if="t.detail.spec" class="u-row">
+                      <b>查询理解</b><span>{{ t.detail.spec }}</span></div>
+                    <div v-if="t.detail.dropped.length" class="u-row">
+                      <b>丢弃字段</b><span>{{ fmtList(t.detail.dropped, '；') }}</span></div>
+                    <div v-if="t.detail.unparsed.length" class="u-row u-warn">
+                      <b>未理解片段</b><span>{{ fmtList(t.detail.unparsed, '、') }}</span></div>
+                    <div v-if="t.detail.verifyOk !== null" class="u-row">
+                      <b>护栏校验</b>
+                      <span :class="t.detail.verifyOk ? 'ok' : 'bad'">{{ t.detail.verifyOk ? '通过' : '未通过' }}</span>
+                    </div>
+                    <div v-if="t.detail.problems.length" class="u-row u-warn">
+                      <b>护栏问题</b><span>{{ fmtList(t.detail.problems, '；') }}</span>
+                    </div>
+                    <div v-if="t.detail.notes.length" class="u-row">
+                      <b>执行注记</b><span>{{ fmtList(t.detail.notes, '；') }}</span></div>
+                    <div v-if="t.detail.ctxPids && t.detail.ctxPids.received" class="u-row">
+                      <b>多轮结果集</b>
+                      <span>本轮把 {{ t.detail.ctxPids.received }} 个篇号作为范围交给检索{{
+                        t.detail.ctxPids.from_session ? '（来自服务端会话）' : '（来自前端兜底）' }}，{{
+                        t.detail.ctxPids.consumed ? '检索层已消费' : '检索层暂未消费该参数' }}</span>
+                    </div>
+                    <div v-if="t.detail.sess && t.detail.sess.used_context" class="u-row">
+                      <b>会话承接</b>
+                      <span>指代类型 {{ t.detail.sess.ref_kind }}；本轮锁定 {{ t.detail.sess.pids_used }} 篇{{
+                        t.detail.sess.from_fallback ? '（降级：前端兜底）' : '（服务端完整集合）' }}</span>
+                    </div>
+                    <div v-if="t.setCheck" class="u-row">
+                      <b>集合校验</b>
+                      <span :class="t.setCheck.ok ? 'ok' : 'bad'">{{ t.setCheck.ok ? '通过' : '未通过' }}</span>
+                    </div>
+                    <div v-if="t.setCheck && setCheckLines(t.setCheck).length" class="u-row">
+                      <b>校验明细</b>
+                      <div>
+                        <div v-for="(ln, i) in setCheckLines(t.setCheck)" :key="'scl' + i">{{ ln }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+
+                <!-- 操作图标行（DeepSeek 式）：复制 / 重新生成 / 朗读 / 导出 -->
+                <div v-if="t.done && t.concl" class="acts">
+                  <button class="mini ghost" type="button" @click="copyAnswer(t)">⧉ 复制回答</button>
+                  <button class="mini ghost" type="button" @click="regen(t)">↻ 重新生成</button>
+                  <button class="mini ghost" type="button" @click="speak(t, idx)">
+                    {{ speakingIdx === idx ? '■ 停止朗读' : '▷ 朗读' }}</button>
+                  <button v-if="t.raw" class="mini ghost" type="button" @click="exportTurn(t, idx)">⬇ 导出 JSON</button>
                 </div>
               </div>
             </div>
-          </details>
-
-          <!-- 分析级 JSON 导出（2026-10-09）：本轮完整返回体原样下载，便于存档与复算。 -->
-          <div v-if="t.done && t.raw" class="turn-actions">
-            <button class="ghost" type="button" @click="exportTurn(t, idx)">导出本轮 JSON</button>
-          </div>
+          </article>
         </div>
-      </article>
-    </div>
 
-    <div class="bar">
-      <input id="q" v-model="q" style="width:min(560px,60%)"
-             placeholder="例：清 临江仙 仄声比例高于45%" @keydown.enter="go">
-      <button id="go" @click="go">提问</button>
-      <!-- ★ 2026-10-10（竞品对照）：**作答情景**预设——
-           研究演示 = 在确定性结论之上补「说法」；应试作答 = 走论证口径（更严、带依据分列）。
-           这里不做「模型选择」：本项目只有一条**已就绪的大模型通道**，如实写明用的是哪个。 -->
-      <span class="dim" style="margin-left:8px">情景：</span>
-      <button type="button" class="ghost mini" :class="{ on: mode === 'research' }"
-              @click="setMode('research')">研究演示</button>
-      <button type="button" class="ghost mini" :class="{ on: mode === 'exam' }"
-              @click="setMode('exam')">应试作答</button>
-      <label class="dim" style="margin-left:8px">
-        <input type="checkbox" id="useParse" v-model="useParse"> 用大模型理解问句</label>
-      <label class="dim" style="margin-left:8px">
-        <input type="checkbox" id="useLlm" v-model="useLlm"> 让大模型写说明</label>
-      <label class="dim" style="margin-left:6px">
-        <input type="checkbox" id="useArg" v-model="useArg"> 论证辅助草稿</label>
-      <span class="dim" style="margin-left:6px">{{ modeNote }}</span>
-      <span id="llmTag" class="dim" style="margin-left:8px">{{ llmTag }}</span>
+        <!-- 底部输入区（粘性）：大输入框 + pill 开关 + 圆形发送 -->
+        <div class="composer-wrap">
+          <div class="composer">
+            <textarea id="q" ref="taEl" v-model="q" rows="1"
+                      placeholder="给词律探微发消息：例「清 临江仙 仄声比例高于45%」"
+                      @keydown.enter.exact.prevent="go" @input="autoGrow"></textarea>
+            <div class="crow">
+              <div class="pills">
+                <button type="button" class="pill" :class="{ on: useParse }"
+                        @click="useParse = !useParse" title="先让大模型理解问句（条件经引擎校验）">◐ 深度理解</button>
+                <button type="button" class="pill" :class="{ on: useLlm }"
+                        @click="useLlm = !useLlm" title="在确定性结论之上让大模型补写说法">✎ 模型补写</button>
+                <button type="button" class="pill" :class="{ on: useArg }"
+                        @click="useArg = !useArg" title="论证口径：更严、依据分列">≡ 论证草稿</button>
+              </div>
+              <button id="go" class="send" :disabled="busy || !(q && q.trim())" @click="go"
+                      title="发送（Enter）">↑</button>
+            </div>
+          </div>
+          <div class="cfoot dim">数字归引擎 · 文料归检索 · 说法归生成 · 出处归引用——内容由本地引擎与大模型共同生成，请对照证据甄别</div>
+        </div>
+      </section>
     </div>
   </AppShell>
 </template>
 
 <style>
-/* AskView.vue —— 问答页精修（2026-10-08）。**只作用于本页**（ask 页只挂本组件），
- * 配色沿用 core/ui.js 的 CSS 变量，不另起一套；不引入任何依赖。
- * 注意：回答正文/证据块由 core/ask.js 生成（v-html），scoped 样式覆盖不到，故此处用非 scoped。 */
+/* AskView.vue —— 问答页「对话式布局」精修（2026-10-10，对标 DeepSeek 逐细节）。
+ * 只作用于本页（ask 页只挂本组件）；配色沿用 core/ui.js 的 CSS 变量，不另起一套；
+ * 不引入任何依赖。回答正文/证据块由 core/ask.js 生成（v-html），scoped 样式覆盖不到，
+ * 故此处用非 scoped——所有选择器都带 #log / .ask-shell / .composer 前缀收口，不外溢。 */
 
-/* 0) 会话栏（多会话，本地保存；可新建/切换/删除，「承上一轮」默认关闭） */
-.sess { padding: 10px 14px; margin-bottom: 10px; }
-.sess-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.sess-cur { font-weight: 600; color: var(--accent); }
-.sess-hint { font-size: 12.5px; }
-.sess .carry { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
-.sess-list { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px dashed var(--line); }
-.sess-list li { display: flex; align-items: center; gap: 10px; padding: 6px 2px;
-  border-bottom: 1px dashed var(--line); }
-.sess-list li.on a { font-weight: 700; color: var(--accent); }
-.sess-list a { color: var(--ink); text-decoration: none; flex: 1; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
-.sess-list .del { margin-left: auto; }
+/* 0) 两栏骨架：左栏会话（sticky 跟随）+ 右主区（对话流 + 粘性 composer） */
+.ask-shell { display: flex; align-items: flex-start; min-height: 62vh; }
 
-/* 1) 输入区：控件用 flex 对齐，间距一致（改前各控件靠 inline margin 拼，窄屏易散） */
-.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.bar label { margin-left: 0 !important; }
-.bar #go { padding: 6px 20px; font-weight: 600; letter-spacing: 1px; }
+/* 1) 左栏：会话列表（开始新对话 / 今天·昨天·更早分组 / 选中高亮 / hover 删除） */
+.side { width: 250px; flex: none; position: sticky; top: 12px;
+  max-height: calc(100vh - 28px); overflow: auto;
+  display: flex; flex-direction: column;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.newchat { width: 100%; text-align: left; background: transparent; color: var(--ink);
+  border: 1px solid var(--line); padding: 9px 12px; font-size: 14px; }
+.newchat:hover { background: transparent; border-color: var(--accent); color: var(--accent); }
+.sgroup { margin-top: 10px; }
+.slabel { font-size: 11px; letter-spacing: 1.5px; padding: 2px 8px 5px; }
+.sitem { display: flex; align-items: center; gap: 6px; padding: 7px 9px; border-radius: 8px;
+  cursor: pointer; color: var(--ink); }
+.sitem:hover { background: var(--panel3); }
+.sitem.on { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.sitem.on .stitle { color: var(--accent); font-weight: 600; }
+.sitem .stitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 13.5px; }
+.sitem .sn { font-size: 11px; flex: none; }
+.sdel { visibility: hidden; flex: none; background: none; border: none; padding: 0 3px;
+  color: var(--ink2); font-size: 12px; cursor: pointer; }
+.sitem:hover .sdel { visibility: visible; }
+.sdel:hover { color: var(--warn); }
+.sfoot { margin-top: auto; padding: 10px 8px 2px; border-top: 1px solid var(--line); line-height: 1.8; }
+.sfoot .carry { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; font-weight: 600; }
 
-/* 2) 一轮问答：问句与答案拉开距离，便于竖向扫读 */
-#log .turn { margin: 18px 0 0; }
-#log .q { font-size: 15px; padding: 9px 12px; }
-#log .q .badge { margin-left: 6px; vertical-align: 1px; }
+/* 2) 主区：对话流 + 粘性输入区 */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding-left: 18px; }
+#log { flex: 1; }
+#log .turn { margin: 20px 0 0; }
 
-/* 3) 空态：不再是一片空白 */
+/* 2a) 用户消息：右对齐气泡（问句用楷体，与 AI 回答一眼区分） */
+.u-msg { display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+  margin: 4px 0 10px; }
+.u-msg .bubble { background: var(--panel3); border: 1px solid var(--line);
+  border-radius: 14px 14px 4px 14px; padding: 9px 14px; max-width: 76%;
+  font-family: var(--kai); font-size: 15.5px; line-height: 1.75;
+  white-space: pre-wrap; word-break: break-word; }
+.a-wrap { margin: 0; }
+
+/* 3) 空态 + 操作图标行（复制/重新生成/朗读/导出，DeepSeek 式轻量按钮） */
 #log .empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 18px;
   background: var(--panel2); text-align: center; margin: 12px 0; }
 #log .empty p { margin: 4px 0; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.acts .mini { font-size: 12px; padding: 3px 10px; }
 
-/* 4) 回答卡片：结论 / 证据 / 理解详情 三段各成一区（靠分区标题 + 左侧色条区分） */
+/* 4) 回答卡片：结论 / 证据 / 执行详情 三段各成一区（靠分区标题 + 左侧色条区分） */
 #log .a { padding: 12px 14px; }
 #log .zone { margin: 2px 0 10px; }
 #log .zh { font-size: 12px; font-weight: 700; letter-spacing: 1.5px; color: var(--accent);
@@ -718,8 +834,7 @@ onMounted(async () => {
 #log .err { border-left: 4px solid var(--warn); }
 #log .err p { margin: 6px 0 0; }
 
-/* 6) 理解详情：折叠区 + 「标签 / 值」两列，元信息不再挤成一行 */
-#log .turn-actions { margin-top: 8px; }
+/* 6) 执行详情：折叠区（「已思考」的对应物）+ 「标签 / 值」两列 */
 #log details.ud { border: 1px dashed var(--line); border-radius: 8px; padding: 6px 10px;
   background: var(--panel2); }
 #log details.ud > summary { cursor: pointer; list-style: none; }
@@ -733,10 +848,36 @@ onMounted(async () => {
 #log .u-row > b { color: var(--ink2); font-weight: 600; }
 #log .u-warn { color: var(--warn); }
 
-/* 7) 窄屏不塌：底栏不再 sticky（避免遮住内容）、理解详情改单列 */
-@media (max-width: 640px) {
-  .bar { position: static; }
+/* 7) composer：粘性底部输入区（大输入框 + pill 开关 + 圆形发送，DeepSeek 式） */
+.composer-wrap { position: sticky; bottom: 0; z-index: 6; padding: 16px 0 4px;
+  background: linear-gradient(to top, var(--bg) 78%, transparent); }
+.composer { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 10px 12px 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, .08); }
+.composer textarea { display: block; width: 100%; box-sizing: border-box;
+  border: none; background: transparent; resize: none; outline: none;
+  font-family: var(--song); font-size: 14.5px; line-height: 1.6; color: var(--ink);
+  min-height: 26px; max-height: 160px; padding: 2px; }
+.composer textarea:focus-visible { outline: none; }
+.composer textarea::placeholder { color: var(--ink2); }
+.crow { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.pill { background: transparent; color: var(--ink2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 4px 12px; font-size: 12.5px; cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s; }
+.pill:hover { border-color: var(--accent); color: var(--accent); background: transparent; }
+.pill.on { background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent); color: var(--accent); }
+.send { width: 36px; height: 36px; border-radius: 50%; padding: 0; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; line-height: 1; }
+.send:disabled { opacity: .45; cursor: not-allowed; }
+.cfoot { text-align: center; padding: 6px 0 2px; font-size: 11.5px; }
+
+/* 8) 窄屏不塌：左栏隐藏（会话仍在 localStorage，宽屏可见），气泡放宽 */
+@media (max-width: 900px) {
+  .side { display: none; }
+  .main { padding-left: 0; }
+  .u-msg .bubble { max-width: 92%; }
   #log .u-row { grid-template-columns: 1fr; }
-  .sess-hint { display: none; }
 }
 </style>

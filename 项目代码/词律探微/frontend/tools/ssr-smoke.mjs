@@ -38,7 +38,7 @@ async function main() {
 
   const views = [
     { file: '/views/IndexView.vue', name: '总览 IndexView', must: ['词律探微', '复现'], props: {} },
-    { file: '/views/AskView.vue', name: '问答 AskView', must: ['词律探微', '提问'], props: {} },
+    { file: '/views/AskView.vue', name: '问答 AskView', must: ['词律探微', '开始新对话'], props: {} },
     { file: '/views/ParseView.vue', name: '逐字解析 ParseView（离线）', must: ['词律探微'], props: { mode: 'offline' } },
     { file: '/views/ParseView.vue', name: '多条件检索 ParseView（在线）', must: ['词律探微'], props: { mode: 'online' } },
     { file: '/views/GraphView.vue', name: '知识图谱 GraphView', must: ['词律探微'], props: {} },
