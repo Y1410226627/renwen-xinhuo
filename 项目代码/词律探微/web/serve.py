@@ -1129,6 +1129,14 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
     ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
     # ② 独立再理解一次（取 spec 供复核；见 _derive_understanding 的代价声明）
     spec, note = _derive_understanding(q, parse, client, policy, ctx_v, pids_v)
+    # ⭐ 2026-10-09（主人实测）：「内容/情感类问题」「开放提问」或「问句含未理解片段」
+    #   即使没勾任何选项，也补建大模型句柄——「大模型能理解、原材料在数据中能找到的问题
+    #   就答出来」（主人原话）。⚠ 判据用 `RT.content_ask_of(q)`/`RT.open_ask_of(q)`：
+    #   `content_ask` 标记是 **answer() 内部**解析时打的，这一层拿不到；unparsed 用本层 spec 的。
+    #   get_llm() 是进程内单例、构造零网络开销。
+    if client is None and (bool(RT.content_ask_of(q)) or bool(RT.open_ask_of(q))
+                           or list(getattr(spec, 'unparsed', None) or [])):
+        client = get_llm()
     # ③ 作答（透传完整集合；仅当后端支持该形参时）
     extra, pids_sent, cut = _pids_to_answer_kwargs(pids_v)
     cinfo['ctx_truncated_send'] = cut
@@ -1217,6 +1225,10 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
                             'model': (client.name if client and client.available() else None)})
             # ② 独立再理解一次（取 spec 供 set_check / understanding_status）
             spec, note = _derive_understanding(q, parse, client, policy, ctx_v, pids_v)
+            # ⭐ 2026-10-09：内容/开放类问题补建大模型句柄（与 q_ask 同一纪律，见彼处注释）。
+            if client is None and (bool(RT.content_ask_of(q)) or bool(RT.open_ask_of(q))
+                                   or list(getattr(spec, 'unparsed', None) or [])):
+                client = get_llm()
             extra, pids_sent, _cut = _pids_to_answer_kwargs(pids_v)
             _cp = {'received': len(pids_sent), 'consumed': bool(extra),
                    'from_session': bool(cinfo.get('used_context'))}

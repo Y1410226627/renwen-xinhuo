@@ -2116,16 +2116,28 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #   会拿它们去全文检索（搜不到，还污染结果）。此处剔除，并标记 `content_ask`，
     #   由下方把该篇**全文**列入证据块作为内容层依据。
     _cask = retrieve.content_ask_of(question)
-    if _cask:
+    _oask = retrieve.open_ask_of(question)
+    if _cask or _oask:
         _kw0, _sem0 = list(spec.keywords or []), list(spec.semantic or [])
-        spec.keywords = [k for k in _kw0 if k not in _cask]
-        spec.semantic = [s for s in _sem0 if s not in _cask]
+        _req = list(_cask) + list(_oask)
+        # ★ 2026-10-09：用**包含判断**剔除——解析器切出的词（如「作用」）可能只是请求短语
+        #   （「有什么作用」）的一部分；只做"完全相等"遗漏了这类（主人实测：「词面=作用」拿
+        #   两个字去搜正文，荒谬且污染结果）。
+        spec.keywords = [k for k in _kw0 if not any(k in w or w in k for w in _req)]
+        spec.semantic = [s for s in _sem0 if not any(s in w or w in s for w in _req)]
         if spec.keywords != _kw0 or spec.semantic != _sem0:
             retrieve._finalize(spec)
-            pnote['notes'] = list(pnote.get('notes') or []) + [
-                '问句中的「%s」属**内容/情感层面的请求**（不是检索条件），已从词面中剔除；'
-                '该篇全文会逐句列在证据块里供判读' % '／'.join(_cask)]
+        _nts = []
+        if _cask:
+            _nts.append('问句中的「%s」属**内容/情感层面的请求**（不是检索条件），已从词面中剔除；'
+                        '该篇全文会逐句列在证据块里，并给出模型层面的解读' % '／'.join(_cask))
+        if _oask:
+            _nts.append('问句中的「%s」属**开放提问**（不是检索条件），已从词面中剔除；'
+                        '将基于材料给出回应' % '／'.join(_oask))
+        if _nts:
+            pnote['notes'] = list(pnote.get('notes') or []) + _nts
     spec.content_ask = bool(_cask)
+    spec.open_ask = list(_oask)
 
     _ge = retrieve._group_extreme_of(question)
     if _ge[0] and not (spec.agg or getattr(spec, 'order_by', None)
@@ -2352,7 +2364,7 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         #   若需要模型层面的解读，界面上的「论证辅助草稿」由大模型生成并已过四道护栏。
         out.append('【内容与情感】本系统按**形式与原文**作答，不对思想感情作结论；'
                    '该篇**全文已逐句列在下方证据块**中，可直接判读其内容与情感。'
-                   '（如需模型层面的解读，请勾选界面上的**论证辅助草稿**选项——那是**大模型说法**，'
+                   '（大模型可用时，会基于原文自动附一段**文意解读**——那是**大模型说法**，'
                    '已过四道护栏，但不作为事实结论。）')
     # ⚠ 2026-10-03：语料里确有**空篇残片**（0 句 / 0 字，元曲 144 篇）。「没有任何一句…」
     #   「每一句都…」这类条件会被它们**平凡**满足（空集里没有反例/每个元素都满足）。
@@ -2415,19 +2427,57 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         problems = list(problems) + ['条件复核未通过：%s' % '；'.join(cond_bad)]
     narrator = 'template'
     narrative = None
-    if (narrate or argument) and llm is not None and getattr(llm, 'available', lambda: False)():
-        if on_engine is not None:
-            # 「答案先到」：主检索路的确定性结论（含证据块与护栏结论）此刻已算完，
-            # 先如实发给前端；大模型的「论证表述」随后边写边补（实测省 1~5 秒干等）。
-            on_engine({'question': question, 'spec': spec.describe(), 'kind': kind,
-                       'blocks': blocks,
-                       'answer': text + _verdict_line(ok, problems, GUARD_PASS_MAIN),
-                       'verify': (ok, problems),
-                       'refused': False, 'problems': problems, 'total': total,
-                       'cond_violations': cond_bad, 'extreme': ei,
-                       'parse_source': pnote['source'], 'parse_dropped': pnote['dropped'],
-                       'parse_notes': pnote['notes'], 'unparsed': list(spec.unparsed),
-                       'narrator': 'template', 'narrative': None})
+    content_read = None
+    _llm_live = llm is not None and getattr(llm, 'available', lambda: False)()
+    # ⭐ 2026-10-09（主人实测）：「内容/情感类问题」与「含未理解片段的问题」默认走**文意解读**
+    #   通道——大模型基于**原文**作答（标注非事实结论、过四道护栏、不过即静默跳过）。
+    #   主人原话：「大模型能理解、原材料在数据中能找到的问题，你都应该给我答出来」。
+    #   触发条件要求**有命中篇目**（没有材料可解读，不空跑模型）。
+    # 开放提问（「有什么作用 / 有何特点 …」）与未理解片段合流，逐条交给生成层回应。
+    _open_parts = (list(getattr(spec, 'open_ask', None) or [])
+                   + list(getattr(spec, 'unparsed', None) or []))
+    _need_read = _llm_live and bool(blocks) and (
+        bool(getattr(spec, 'content_ask', False)) or bool(_open_parts))
+    if (narrate or argument or _need_read) and _llm_live and on_engine is not None:
+        # 「答案先到」：主检索路的确定性结论（含证据块与护栏结论）此刻已算完，
+        # 先如实发给前端；生成段随后边写边补（实测省 1~5 秒干等）。
+        # ⚠ 条件比旧版多 `_need_read`——内容/开放类问题即使没勾选项也享受同一契约。
+        on_engine({'question': question, 'spec': spec.describe(), 'kind': kind,
+                   'blocks': blocks,
+                   'answer': text + _verdict_line(ok, problems, GUARD_PASS_MAIN),
+                   'verify': (ok, problems),
+                   'refused': False, 'problems': problems, 'total': total,
+                   'cond_violations': cond_bad, 'extreme': ei,
+                   'parse_source': pnote['source'], 'parse_dropped': pnote['dropped'],
+                   'parse_notes': pnote['notes'], 'unparsed': list(spec.unparsed),
+                   'narrator': 'template', 'narrative': None})
+    if _need_read:
+        # 文意解读（默认通道）：回答内容/情感层问题 + 逐条回应「未被听懂的片段」。
+        try:
+            _read = gen.read_content(
+                llm, {'question': question, 'spec': spec.describe(), 'blocks': blocks},
+                kind, BOUNDARIES[kind],
+                parts=(_open_parts or None),
+                content_full=bool(getattr(spec, 'content_ask', False)),
+                on_delta=on_delta)
+            if _read.get('ok'):
+                _t2 = text + '\n【文意解读（大模型 %s 基于原文写成，非事实结论）】\n%s' % (
+                    _read['model'], _read['text'])
+                _ok2, _p2 = guard.verify(_t2, blocks, boundary_kind=kind,
+                                         allow=list(allow) + _nums(_read['model']))
+                if _ok2:
+                    text, ok, problems = _t2, _ok2, _p2
+                    content_read = _read
+                else:                    # 合并后未过护栏 → 整段不带（文本保持原样）
+                    content_read = dict(_read, ok=False,
+                                        problems=(list(_read['problems']) + list(_p2))[:5]
+                                        or ['合并后未过护栏'])
+            else:
+                content_read = _read
+        except Exception as e:           # noqa: BLE001 生成层任何故障都不拖垮答案
+            content_read = {'ok': False, 'model': '—', 'text': '',
+                            'problems': ['生成通道异常：%r' % e]}
+    if (narrate or argument) and _llm_live:
         res_now = {'question': question, 'spec': spec.describe(), 'kind': kind, 'blocks': blocks}
         if ei is not None:
             res_now['extreme_fact'] = ('【题型：极值题】本题问的是「哪一首…%s」，答案就是极值篇目，'
@@ -2465,7 +2515,8 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
             'total': total, 'cond_violations': cond_bad, 'extreme': ei,
             'parse_source': pnote['source'], 'parse_dropped': pnote['dropped'],
             'parse_notes': pnote['notes'], 'unparsed': list(spec.unparsed),
-            'narrator': narrator, 'narrative': narrative}
+            'narrator': narrator, 'narrative': narrative,
+            'content_read': content_read}
 
 
 def main():

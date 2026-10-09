@@ -354,6 +354,72 @@ def main():
     finally:
         S.LLM = old_llm
 
+    # ---------- 八、内容 / 开放类问题的「文意解读」（桩模型，不联网；2026-10-09 新增） ----------
+    # 口径（主人实测确立）：大模型能理解、原材料在数据中能找到的问题 → 默认给生成式回应；
+    # 纪律：基于原文、标注非事实结论、过四道护栏，编造引文必须被拦下、不过即静默回退。
+    import re as _re2
+
+    class _ReadStub:
+        """桩：模拟「文意解读层」——从 FACTS 里偷一句原文与一个数字，保证引用/数字合规。"""
+        name = 'stub-read'
+        provider = 'stub'
+        last_error = ''
+
+        def __init__(self, mode='ok'):
+            self.mode = mode
+
+        def available(self):
+            return True
+
+        def chat(self, messages, **kw):
+            user = messages[-1].get('content', '') if messages else ''
+            if self.mode == 'noread':
+                return 'NO_READ'
+            if self.mode == 'bad':              # 编造引文（材料里根本没有这句）
+                return '这首词化用了“碧海青天夜夜心”的意境，情感深沉。'
+            m = _re2.search(r'原文：([^\n（(]+)', user)
+            quote = (m.group(1) if m else '').strip().strip('。')
+            n = _re2.search(r'仄声比例\s*([\d.]+)%', user)
+            return ('该篇以“%s”一句最为关键，似传达出含蓄的情绪；'
+                    '材料给出的仄声比例为 %s%%，形式偏平缓。'
+                    % (quote, n.group(1) if n else '0'))
+
+    old3 = S.LLM
+    try:
+        S.LLM = _ReadStub('ok')
+        o1 = S.q_ask('清 浣溪沙 主要内容是什么', topk=2, parse=False)
+        ok('内容类问题默认生成「文意解读」（无需勾选）',
+           '【文意解读' in (o1.get('answer') or '')
+           and (o1.get('content_read') or {}).get('ok') is True)
+        ok('解读段标注「非事实结论」', '非事实结论' in (o1.get('answer') or ''))
+        S.LLM = _ReadStub('bad')
+        o2 = S.q_ask('清 浣溪沙 主要内容是什么', topk=2, parse=False)
+        ok('编造引文必须被拦下（无解读段、如实回退）',
+           '【文意解读' not in (o2.get('answer') or '')
+           and (o2.get('content_read') or {}).get('ok') is False)
+        S.LLM = _ReadStub('ok')
+        o3 = S.q_ask('清 浣溪沙 有什么作用', topk=2, parse=False)
+        ok('开放提问不进入检索词面（不再「词面=作用」）',
+           '作用' not in (o3.get('spec') or ''), 'spec=%s' % o3.get('spec'))
+        ok('开放提问也走解读通道（逐条回应）', '【文意解读' in (o3.get('answer') or ''))
+        S.LLM = _ReadStub('noread')
+        o4 = S.q_ask('清 浣溪沙 主要内容是什么', topk=2, parse=False)
+        ok('模型判定无法回应（NO_READ）→ 静默跳过解读段',
+           '【文意解读' not in (o4.get('answer') or ''))
+    finally:
+        S.LLM = old3
+
+    # ⑤ 无大模型（get_llm 返回 None）：内容类问题保持旧行为（模板兜底、零网络调用）
+    _oldget = S.get_llm
+    S.get_llm = lambda: None
+    try:
+        o5 = S.q_ask('清 浣溪沙 主要内容是什么', topk=2, parse=False)
+        ok('无大模型时不出解读段（旧行为不变）',
+           '【文意解读' not in (o5.get('answer') or '')
+           and '【内容与情感】' in (o5.get('answer') or ''))
+    finally:
+        S.get_llm = _oldget
+
     # ---------- 汇报 ----------
     print('服务端门禁：比对项 %d 项，不符 %d 项' % (CMP[0], len(BAD)))
     for b in BAD[:20]:

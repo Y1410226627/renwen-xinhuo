@@ -48,6 +48,83 @@ TASK_ARGUMENT = (
     '可能的反证（哪些情况会让这个形式规律不成立）／局限（本系统只提供形式层证据）。'
 )
 
+# ⭐ 2026-10-09 新增（主人实测）：「文意解读」——内容/情感类问题的**生成式回答**。
+#   定位：与 produce()（形式层说明/论证）并列的第二条说法通道。
+#   为什么要有它：主人要的是「大模型能理解、原材料在数据中能找到的问题，就答出来」——
+#   问「主要内容与思想感情是什么」，原文就在证据块里，不该只回一句「请自行判读」。
+#   纪律不变：只依据材料（原文 + 引擎数字）、标注「非事实结论」、过四道护栏、不过即丢弃。
+SYSTEM_READ = (
+    '你是「词律探微」的**文意解读层**：基于给定的原文与事实，回答用户关于词作内容、'
+    '意境与思想感情的问题。\n'
+    '硬规则（违反任何一条，稿件都会被程序丢弃）：\n'
+    '1) 只依据材料中的原文与数据作答，**不得引入材料之外的情节、史实、生平、版本或他人评价**；\n'
+    '2) 引用词句必须**逐字照抄**材料里「原文：」后的整句，并用**双引号“…”**括起'
+    '（护栏按「模型引文」核验：字字都要能在原文里找到，漏抄句末标点不影响）；\n'
+    '3) 不得自己编造数字；要提数字时只能照抄材料里已有的；\n'
+    '4) 解读保持克制（用「可理解为」「似传达出」「或寄寓」这类措辞），不作事实断言、不判优劣；\n'
+    '5) 直接回答用户想知道的层面；材料不足以判断时，明说「据现有原文不足以判断……」，不要硬猜；\n'
+    '6) 若【问句】有一部分与词作内容/情感无关（如礼貌语、杂问），忽略即可；'
+    '若整句都无法基于材料回应，只输出：NO_READ\n'
+    '7) 篇幅 100—260 字，连续段落，不要表格 / 标题 / 项目符号。'
+)
+TASK_READ_FULL = (
+    '用户在【问句】里对词作提出了内容 / 情感层面的问题。请基于原文写出解读：'
+    '先概括内容画面，再谈情绪与思想感情的走向（引 1—2 处原文关键句作为依据）。'
+)
+TASK_READ_PARTS = (
+    '用户的【问句】里，以下片段未被系统转换为检索条件：\n  · %s\n'
+    '请判断其中**哪些是对上述词作或声律数据的真问题**，基于材料逐一回应；'
+    '无法回应的部分略过即可；若全部都无法回应，只输出：NO_READ'
+)
+
+
+def read_content(llm, res, kind, boundary, parts=None, content_full=False,
+                 max_tokens=700, temperature=0.3, on_delta=None):
+    """生成「**文意解读**」并过护栏（内容 / 情感类问题专用；失败时调用方**静默跳过**）。
+
+    · `content_full=True`：用户整体在问内容/情感（`content_ask`）→ 「内容解读」任务；
+    · `parts=[…]`：问句里有开放提问 / 系统没听懂的片段（如「有什么作用」）→ 「逐条回应」任务；
+    · 两者同时给出 → 两个任务合并（先解读内容，再逐条回应）；
+    · 模型判定无法基于材料回应时输出 `NO_READ` 标记 → 本函数返回 ok=False
+      （调用方不显示该段——**宁可不说，不可乱说**）。
+    """
+    model = getattr(llm, 'name', None) or '未知模型'
+    if not (llm and llm.available()):
+        return {'ok': False, 'model': model, 'text': '', 'raw': '',
+                'problems': ['大模型不可用（无密钥或未联网）']}
+    _t_parts = (TASK_READ_PARTS % '；'.join(list(parts)[:6])) if parts else ''
+    if content_full and _t_parts:
+        task = TASK_READ_FULL + '\n另外，' + _t_parts
+    elif content_full:
+        task = TASK_READ_FULL
+    else:
+        task = _t_parts
+    user = ('【问句】%s\n【查询理解】%s\n【FACTS】\n%s\n【任务】%s'
+            % (res.get('question', ''), res.get('spec', ''), facts(res), task))
+    kw = {'temperature': temperature, 'max_tokens': max_tokens}
+    if on_delta is not None:
+        kw['on_delta'] = on_delta
+    raw = llm.chat([{'role': 'system', 'content': SYSTEM_READ},
+                    {'role': 'user', 'content': user}], **kw)
+    if not raw:
+        return {'ok': False, 'model': model, 'text': '', 'raw': '',
+                'problems': ['大模型无返回：%s' % (getattr(llm, 'last_error', '') or '未知原因')]}
+    txt = raw.strip()
+    if 'NO_READ' in txt[:40]:
+        return {'ok': False, 'model': model, 'text': '', 'raw': txt,
+                'problems': ['模型判定无法基于材料回应（已跳过该段）']}
+    check_body = txt + ('\n【推断边界｜%s问句】%s' % (kind, boundary))
+    problems = []
+    sf = safety.check(txt, 'out')
+    if not sf['ok']:
+        problems.append('生成文本命中内容安全规则（%s）' % sf['category'])
+    ok_g, probs = guard.verify(check_body, res.get('blocks') or [], boundary_kind=kind,
+                               allow=_allow(res))
+    if not ok_g:
+        problems += probs[:4]
+    ok = (not problems) and ok_g
+    return {'ok': ok, 'model': model, 'text': txt, 'raw': txt, 'problems': problems}
+
 
 def _num(x, fmt='%.1f'):
     try:

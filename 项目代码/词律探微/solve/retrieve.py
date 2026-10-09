@@ -3023,7 +3023,7 @@ def parse_query(conn, text):
     parse_line_ops(text, spec)
     _patch_parse(text, spec)
     _lift_known_names(conn, spec)          # 已知实体回填（只填空，不覆盖）
-    return _flag_ops(spec, text)
+    return _flag_ops(spec, text)
 
 
 # ───────────────────── 内容/情感类「语义请求词」（2026-10-09） ─────────────────────
@@ -3052,6 +3052,38 @@ def content_ask_of(question):
         return []
     out, seen = [], set()
     for m in _CONTENT_ASK_RE.finditer(q):
+        w = m.group(0)
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+# ⭐ 2026-10-09 新增（主人实测驱动）：「**开放提问**」词表——「有什么作用 / 有何特点 / 为什么 …」
+#   这类话是**请求**（要回应），不是**检索条件**（拿"作用"二字去搜正文，荒谬且污染结果）。
+#   与 CONTENT_ASK_WORDS 的分工：内容/情感类走「文意解读」任务；开放提问类走「逐条回应」任务；
+#   两者可同时命中（都由大模型基于材料作答，标注非事实结论）。
+OPEN_ASK_WORDS = (
+    '有什么作用', '有何作用', '什么作用', '有什么用', '作用是什么', '有什么用处',
+    '有什么特点', '有何特点', '特点是什么', '有何特色', '有什么意义', '有何意义',
+    '有什么价值', '有何价值', '为什么', '何以见得', '怎么理解', '如何理解',
+    '怎么解释', '如何解释', '说明了什么', '意味着什么', '有何关系', '有什么关系',
+)
+_OPEN_ASK_RE = re.compile('|'.join(
+    sorted((re.escape(w) for w in OPEN_ASK_WORDS), key=len, reverse=True)))
+
+
+def open_ask_of(question):
+    """问句里的「**开放提问**」片段（请求回应、非检索条件）→ 列表（无则 []）。
+
+    与 `content_ask_of` 同构：解析层把命中片段从词面剔除（包含判断，剔掉
+    「有什么作用」里被切出来的「作用」），生成层再基于材料逐条回应。
+    """
+    q = str(question or '')
+    if not q:
+        return []
+    out, seen = [], set()
+    for m in _OPEN_ASK_RE.finditer(q):
         w = m.group(0)
         if w not in seen:
             seen.add(w)

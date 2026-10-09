@@ -189,6 +189,11 @@ def check_citations(answer_text, blocks):
             pool.append(L.get('text') or '')
             if L.get('tail'):
                 pool.append(L['tail'])
+            # ⚠ 2026-10-09 加（主人实测驱动）：**平仄串（pz）也是被引证据块的原始数据**——
+            #   模型解读声情时会正当引用它（如“仄平仄仄仄平平”），旧池子没有它 →
+            #   被误判成「凭空引用」。补进池子后「编造的平仄串」仍会被拦（不在任何 pz 里）。
+            if L.get('pz'):
+                pool.append(L['pz'])
     pool = [t for t in pool if t]
     # 逐行建立「行 → 该行引用的证据号集合」：引文必须能在**同一行被引的块**里逐字找到
     # 用**列表**而不是 dict：重复行会让 dict 的后一行覆盖前一行（审查 B27）
@@ -239,8 +244,9 @@ def check_citations(answer_text, blocks):
                 hosts |= eids
         if hosts:
             ok = any(q in t for b in blocks if b['eid'] in hosts
-                     for t in (evidence.texts_of(b) | {L.get('tail') or ''
-                                                       for L in (b.get('lines') or [])}))
+                     for t in (evidence.texts_of(b)
+                               | {L.get('tail') or '' for L in (b.get('lines') or [])}
+                               | {L.get('pz') or '' for L in (b.get('lines') or [])}))
             if not ok:
                 ok = any(q in str(b.get(k) or '') for b in blocks if b['eid'] in hosts
                          for k in ('title', 'cipai', 'author', 'dynasty', 'scene'))
