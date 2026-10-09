@@ -93,10 +93,16 @@ def _fields_of(spec, plan=None):
         import queryplan as QP
         for f in QP._filter_fields(spec.filters_tree):
             got.add(f.rsplit('.', 1)[0])
-    if plan:
+    # ★ 2026-10-09（第三轮审查 P1-17）：plan 模式**只看 Plan 自己的字段**——
+    #   旧版把规则路的字段与 Plan 根级过滤树**并进同一个集合**，于是「规划路漏了某条件、
+    #   规则路却识别到」时 Coverage 仍会通过（测的不是规划路）。现在按 `mode` 严格隔离。
+    if plan and mode == 'plan':
         import queryplan as QP
+        got = set()
         for f in QP._filter_fields(plan.get('filters') or {}):
             got.add(f.rsplit('.', 1)[0])
+    elif plan:                                    # rule 模式但给了 plan：仅规则路字段
+        pass
     return got
 
 
@@ -119,6 +125,9 @@ def run_case(conn, case, mode='rule', llm=None, verbose=False):
             plan = None
     got = _fields_of(spec, plan)
     res['plan_ok'] = bool(plan)
+    # ★ 2026-10-09（第三轮审查 P1-18）：plan 模式但**没真跑出计划**（大模型不可用等）时，
+    #   该用例**不计入 plan 成绩**（标 skipped_plan=True），绝不并入「规划路」汇总。
+    res['skipped_plan'] = (mode == 'plan' and not plan)
     want = set(case.get('fields') or [])
     res['fields_got'] = sorted(got)
     res['fields_want'] = sorted(want)
@@ -240,17 +249,25 @@ def main():
         print('%s %-7s %-34s %s' % (mark, c['id'], c['q'][:34], detail))
 
     total = len(results)
-    cov = sum(1 for r in results if r.get('coverage_ok'))
-    setc = [r for r in results if r.get('set_ok') is not None]
+    # ★ 2026-10-09（第三轮审查 P1-18）：plan 模式只统计**真正跑过 Plan**的用例；
+    #   被跳过（skipped_plan）的单独披露，绝不并入规划路成绩。
+    _skipped = [r for r in results if r.get('skipped_plan')]
+    _active = [r for r in results if not r.get('skipped_plan')]
+    cov = sum(1 for r in _active if r.get('coverage_ok'))
+    setc = [r for r in _active if r.get('set_ok') is not None]
     setn = sum(1 for r in setc if r.get('set_ok'))
-    cnt = [r for r in results if r.get('count_ok') is not None]
+    cnt = [r for r in _active if r.get('count_ok') is not None]
     cntn = sum(1 for r in cnt if r.get('count_ok'))
+    _n_ok = sum(1 for r in _active if r.get('ok'))
     print('\n———— 汇总（模式=%s，%.1f 秒）————' % (a.mode, __import__('time').time() - t0))
     print('用例总数           : %d' % total)
-    print('① 条件覆盖 Coverage : %d/%d' % (cov, total))
+    if _skipped:
+        print('⚠ 跳过（未真正跑规划路）: %d —— %s' % (len(_skipped),
+              '、'.join(r['id'] for r in _skipped)))
+    print('① 条件覆盖 Coverage : %d/%d' % (cov, len(_active)))
     print('② 集合身份 SetIdentity: %d/%d（有真值 SQL 的用例）' % (setn, len(setc)))
     print('③ 计数正确 AnswerCorrect: %d/%d（有期望计数的用例）' % (cntn, len(cnt)))
-    print('整体通过           : %d/%d' % (n_ok, total))
+    print('整体通过           : %d/%d' % (_n_ok, len(_active)))
     if a.json:
         json.dump(results, open(a.json, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
         print('结果已写入 %s' % a.json)

@@ -167,6 +167,31 @@ def _isnum(x):
         return False
 
 
+def _pool_extras(b):
+    """单个证据块里**可被正当引用**的文本池（含材料展示词形）。
+
+    ⚠ 2026-10-09（第三轮审查排障扩展）：模型引用的是它在 FACTS 里**看到的文本**
+    （如「声情转向 后段上升」「平仄串 仄仄平」「句脚 明」）——池子若只有裸值，
+    这些正当引用会被误判「凭空引用」。把展示词形一并纳入；**编造的内容依然拦得住**
+    （不在任何变体里）。
+    """
+    out = []
+    for k in ('dynasty', 'author', 'title', 'cipai'):
+        if b.get(k):
+            out.append(str(b[k]))
+    sc = b.get('scene')
+    if sc:
+        out += [str(sc), '声情转向 %s' % sc, '声情 %s' % sc]
+    for L in (b.get('lines') or []):
+        if L.get('text'):
+            out.append(L['text'])
+        if L.get('tail'):
+            out += [str(L['tail']), '句脚 %s' % L['tail']]
+        if L.get('pz'):
+            out += [str(L['pz']), '平仄串 %s' % L['pz'], '平仄 %s' % L['pz']]
+    return out
+
+
 def check_citations(answer_text, blocks):
     """护栏②（引用落地 + 引文按块校验 + 必须是整句）。返回 (通过?, 问题列表)。
 
@@ -182,18 +207,7 @@ def check_citations(answer_text, blocks):
     all_texts = evidence.all_texts(blocks)
     pool = []
     for b in blocks:
-        for k in ('dynasty', 'author', 'title', 'cipai', 'scene'):
-            if b.get(k):
-                pool.append(str(b[k]))
-        for L in (b.get('lines') or []):
-            pool.append(L.get('text') or '')
-            if L.get('tail'):
-                pool.append(L['tail'])
-            # ⚠ 2026-10-09 加（主人实测驱动）：**平仄串（pz）也是被引证据块的原始数据**——
-            #   模型解读声情时会正当引用它（如“仄平仄仄仄平平”），旧池子没有它 →
-            #   被误判成「凭空引用」。补进池子后「编造的平仄串」仍会被拦（不在任何 pz 里）。
-            if L.get('pz'):
-                pool.append(L['pz'])
+        pool += _pool_extras(b)
     pool = [t for t in pool if t]
     # 逐行建立「行 → 该行引用的证据号集合」：引文必须能在**同一行被引的块**里逐字找到
     # 用**列表**而不是 dict：重复行会让 dict 的后一行覆盖前一行（审查 B27）

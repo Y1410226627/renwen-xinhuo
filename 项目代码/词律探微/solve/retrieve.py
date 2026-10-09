@@ -1846,21 +1846,34 @@ def line_ops_where(spec):
 # 外部架构审查要求：「把 `_sql()` 对每个字段的编译逻辑抽成可复用函数再递归调用，不要重复实现两套」。
 # 下列 `_leaf_*` 是**单一来源**：经典字段路径（`_sql`）与布尔树路径（`_sql_filters`）都调用它们，
 # 从而对同一条件保证**逐字相同**的 SQL 片段 —— 这是「零回归」与「布尔树可信」的共同前提。
-def _leaf_one(col, vals):
-    """等值 / IN —— 元数据字段（朝代/词人/词牌）。空列表 → None（空 IN () 是语法错）。"""
+def _leaf_one(col, vals, op='in'):
+    """等值 / 并集 / **否定** —— `op` 必须真正改变 SQL（第三轮审查 P0-1 实测修复）。
+
+    ⚠ 2026-10-09 前：本函数只按值个数生成 `=` 或 `IN`、**`op` 被完全无视**——
+    于是 `{"field":"cipai","op":"not_in","value":["临江仙"]}` 会被编译成
+    **正向**的 `cipai IN ('临江仙')`（语义相反！）。现按 `op` 分派：
+    `=`→等值；`in`→并集；`!=`/`not_in`→ `NOT IN (...)`（单值同语义）。
+    默认 `op='in'` 保证既有调用（如 `source` 等）**行为逐字不变**。
+    """
     if not vals:
         return None
+    if op in ('!=', 'not_in'):
+        return ('%s NOT IN (%s)' % (col, ','.join('?' * len(vals))), list(vals))
     if len(vals) == 1:
         return '%s = ?' % col, [vals[0]]
     return '%s IN (%s)' % (col, ','.join('?' * len(vals))), list(vals)
 
 
-def _leaf_exists_lines(expr, vals):
-    """句级条件：`p.pid IN (SELECT l.pid FROM lines l WHERE <expr> IN (...))`（存在一句即命中）。
+def _leaf_exists_lines(expr, vals, op='in'):
+    """句级条件：`p.pid IN (SELECT …)`（存在一句即命中）；`not_in`/`!=` → **NOT IN**（反向）。
 
-    用 IN 子查询而不是逐篇 EXISTS：让 SQLite 从 lines 侧一次取出命中的 pid 集合，再走 poems
-    主键索引收窄（实测句脚=愁 2,948 ms → 65 ms）。语义等价：EXISTS(某句满足) ≡ pid∈{满足的 pid}。
+    2026-10-09（P0-1）：否定算子原被无视——「句脚不是愁」等条件会编译成**正向**匹配。
     """
+    if not vals:
+        return None
+    if op in ('!=', 'not_in'):
+        return ('p.pid NOT IN (SELECT l.pid FROM lines l WHERE %s IN (%s))'
+                % (expr, ','.join('?' * len(vals)))), list(vals)
     return ('p.pid IN (SELECT l.pid FROM lines l WHERE %s IN (%s))'
             % (expr, ','.join('?' * len(vals)))), list(vals)
 
@@ -1885,7 +1898,7 @@ def _derived_ready(conn):
     return (t, g)
 
 
-def _leaf_title(vals, conn=None):
+def _leaf_title(vals, conn=None, op='in'):
     """题名子串并集（`p.title LIKE %题名%`，多项 OR）；空 → None。
 
     ⚠ 2026-10-08 第二轮（审查 B8）：题名检索原本是 `LIKE '%…%'` **全表扫**。
@@ -1894,11 +1907,16 @@ def _leaf_title(vals, conn=None):
       （`tools/build_indexes.py --check` 实测这个不变式：92 == 92）。
       安全边界：值含非纯汉字、或短于 3 字（trigram 不产生词元）时**不启用** FTS，
       回退到纯 LIKE —— 宁可慢，不可错。
+    ⚠ 2026-10-09（P0-1）：新增 `op`——`!=`/`not_in` → **NOT(...)**（"题名不含任何这些词"）。
+      否定时不走 FTS 收窄（NOT 语义需全表判定，宁可慢不可错）。
     """
     if not vals:
         return None
-    like = '(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')'
+    neg = op in ('!=', 'not_in')
+    like = ('NOT ' if neg else '') + '(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')'
     args = ['%' + t + '%' for t in vals]
+    if neg:
+        return like, args
     _fts, _ = _derived_ready(conn)
     if not _fts:
         return like, args
@@ -1922,18 +1940,21 @@ def _leaf_pid(vals):
 
 
 def _leaf_num(col, op, v):
-    """数值比较（`col op ?`）。`col` 可为普通列或表达式（如 `ABS(p.change)`）。
+    """数值比较（`col op ?`；`between` 为闭区间 `[min,max]`）。`col` 可为列或表达式。
 
-    ⚠ 2026-10-09（第三轮审查 P0 实测驱动）：**比较口径归一**——`>` → `>=`、`<` → `<=`。
-    依据（铁证）：官方/基准口径「高于 / 超过 X」= `>= X`——
-    `tests/nl_paraphrase.jsonl` 的 NL001/NL002 truth_sql 为 `p.ze_ratio>=45`，
-    note 明写「『超过45个百分点』= >=45」；经典字段路径（ze_min/ze_max）也编 `>=`/`<=`。
-    大模型把「高于45%」自然译成 `op='>'`，此处原样拼 `>` 会**少算**
-    （实测「清 临江仙 仄声比例高于45%」：`>=` 59 篇 vs `>` 27 篇——正是审查点名的
-    「规划路反向回归 27 vs 真值 59」的根因）。计划级另有 `queryplan.normalize_ops`
-    先行归一（保证计划展示与执行一致），此处再兜一次防其他入口绕过。
+    ⚠ 2026-10-09（第三轮审查 P0-6 修订）：**编译器不再改写算子**。
+    上一版曾把 `>`/`<` **无条件**归一为 `>=`/`<=`（为对齐 NL001 的「超过45个百分点」口径），
+    但「严格大于」与「至少」在语言上应当区分（审查原话）。现改由**解析阶段按措辞**决定
+    算子（见 `queryplan.normalize_ops`：问句含「至少/不少于/高于/超过/多于/以上」等才归一
+    为 ≥；含「严格/恰」类词或无所依据时**保留**严格算子），编译器**严格执行既定 op**。
+    `between` 的 value 必须是 `[min, max]` 两值（闭区间）——原实现未处理（会绑定出错），此为补全。
     """
-    op = {'>': '>=', '<': '<='}.get(op, op)
+    if op == 'between':
+        try:
+            a, b = v
+        except (TypeError, ValueError):
+            raise ValueError('between 的 value 必须形如 [min, max]（闭区间两值）')
+        return '(%s BETWEEN ? AND ?)' % col, [a, b]
     return '%s %s ?' % (col, op), [v]
 
 
@@ -1971,9 +1992,13 @@ def _leaf_pz(v, conn=None):
             base_args + grams)
 
 
-def _leaf_tail_pz(v):
-    """句脚平仄 = 该句平仄串最后一个字（单一来源：pz 串由引擎生成）。"""
-    return 'p.pid IN (SELECT l.pid FROM lines l WHERE substr(l.pz, -1, 1) = ?)', [v]
+def _leaf_tail_pz(v, op='in'):
+    """句脚平仄 = 该句平仄串最后一个字（单一来源：pz 串由引擎生成）。
+
+    2026-10-09（P0-1）：支持 `in`/`not_in`（单值 `=` 语义等价）——否定原被无视。
+    """
+    vals = list(v) if isinstance(v, (list, tuple)) else [v]
+    return _leaf_exists_lines('substr(l.pz, -1, 1)', vals, op)
 
 
 def _leaf_pz_exact(v):
@@ -2150,34 +2175,41 @@ def _sql_filters(conn, node):
 
 
 def _leaf_sql(node, conn=None):
-    """单个叶子 `{"field","op","value"}` → (sql, args)。字段与 op 的兼容性由 `queryplan.validate` 校验。"""
+    """单个叶子 `{"field","op","value"}` → (sql, args)。字段与 op 的兼容性由 `queryplan.validate` 校验。
+
+    ⚠ 2026-10-09（第三轮审查 P0-1）：**op 必须真正参与编译**——下面所有分支都把 `op`
+    传给对应构造函数（否定 `!=`/`not_in` 生效）；不再出现「schema 允许否定、编译器当正向」。
+    """
     f, op, v = node.get('field'), node.get('op'), node.get('value')
     if f in ('dynasty', 'author', 'cipai'):
         col = {'dynasty': 'p.dynasty', 'author': 'p.author', 'cipai': 'p.cipai'}[f]
-        r = _leaf_one(col, list(v) if isinstance(v, (list, tuple)) else [v])
+        r = _leaf_one(col, list(v) if isinstance(v, (list, tuple)) else [v], op)
         return r if r else ('1=1', [])
     if f == 'title':
-        r = _leaf_title(list(v) if isinstance(v, (list, tuple)) else [v], conn)
+        r = _leaf_title(list(v) if isinstance(v, (list, tuple)) else [v], conn, op)
         return r if r else ('1=1', [])
     if f == 'pid':
         r = _leaf_pid(list(v) if isinstance(v, (list, tuple)) else [v])
         return r if r else ('1=1', [])
     if f == 'scene':
-        return 'p.scene = ?', [v]
+        vals = list(v) if isinstance(v, (list, tuple)) else [v]
+        r = _leaf_one('p.scene', vals, op)
+        return r if r else ('1=1', [])
     if f == 'source':
         # 语料来源标记（poetry-source / chinese-poetry 等不同源）
-        return _leaf_one('p.source', list(v) if isinstance(v, (list, tuple)) else [v]) or ('1=1', [])
+        r = _leaf_one('p.source', list(v) if isinstance(v, (list, tuple)) else [v], op)
+        return r if r else ('1=1', [])
     if f == 'consist':
         return _leaf_consist(v)
     if f in _NUM_COL:
         return _leaf_num(_NUM_COL[f], op, v)
     if f == 'lines.tail':
-        r = _leaf_exists_lines('l.tail', list(v) if isinstance(v, (list, tuple)) else [v])
+        r = _leaf_exists_lines('l.tail', list(v) if isinstance(v, (list, tuple)) else [v], op)
         return r if r else ('1=1', [])
     if f == 'lines.text':
         return _leaf_lines_text(v)
     if f == 'tail_pz':
-        return _leaf_tail_pz(v)
+        return _leaf_tail_pz(v, op)
     if f == 'pz':
         return _leaf_pz(v, conn)
     if f == 'pz_exact':

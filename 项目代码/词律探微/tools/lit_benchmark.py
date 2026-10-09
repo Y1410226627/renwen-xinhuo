@@ -61,15 +61,27 @@ def check_case(conn, c, r):
     pid = c.get('pid')
     # 引文落地池：**证据块里所有篇**的全篇原文并集——解读材料可能含多篇候选，
     # 只要引文出自「被展示的任一篇」即不算编造；完全不在这批篇里才判「疑编造」。
-    pool = _loose(_orig_text(conn, pid)) if pid else ''
+    # ★ 2026-10-09（第三轮审查 P1-19）：引文落地池**只取实际返回的证据块**——
+    #   旧版把测试用例里预期 pid 的**全文**预先塞进池子，于是"预期作品根本没被召回、
+    #   答案却引用了它的原文"也能通过字面检查（没测到真正的召回）。
+    #   现改为：池 = 实际 `blocks`（每篇全文 + 字段变体）；预期 pid 是否真的被召回，
+    #   单独用 `must_quote` 的"关键句覆盖"来断言（关键句只可能来自该篇）。
+    pool = ''
     for b in ((r or {}).get('blocks') or []):
         bp = b.get('pid')
-        if bp and bp != pid:
+        if bp:
             pool += _loose(_orig_text(conn, bp))
-        # 证据块**字段**（scene/cipai/title…）也算「被展示的材料」——
-        # 模型正当引用它们（如把 scene「后段上升」用引号括起）不算编造。
         for _k in ('scene', 'cipai', 'title', 'author', 'dynasty'):
             pool += _loose(str(b.get(_k) or ''))
+        for _L in (b.get('lines') or []):
+            for _k in ('text', 'tail', 'pz'):
+                if _L.get(_k):
+                    pool += _loose(str(_L[_k]))
+    if pool:
+        for m in re.findall(r'[“"]([^”"]+)[”"]', ans):
+            mq = _loose(m)
+            if len(mq) >= 2 and mq not in pool:
+                probs.append('引文未在被展示的篇中落地（疑编造）：%s' % m)
     if pool:
         for m in re.findall(r'[“"]([^”"]+)[”"]', ans):
             mq = _loose(m)
@@ -83,6 +95,22 @@ def check_case(conn, c, r):
     if c.get('semantic'):
         if not any(w in ans for w in ('候选', '最接近', '并非全部', '非穷尽', '语义')):
             probs.append('语义题未声明「非穷尽」（不得冒充完整集合）')
+        # ★ 2026-10-09（第三轮审查 P1-19）：主题检索除了"声明非穷尽"，还要验**召回相关性**。
+        #   判据分两层：① 展示块（用户直接看到的）里命中锚点；② **召回报告**里命中的篇数
+        #   （报告是执行器的真实召回结果，topk 常为 50-60，比展示块大得多）。二者取**更宽**的
+        #   那一个——主题检索的"相关性"应看「召回了哪些」，而非「top-2 恰好展示了哪些」。
+        _want_pids = c.get('expect_pids') or []
+        if _want_pids:
+            _shown = {b.get('pid') for b in ((r or {}).get('blocks') or []) if b.get('pid')}
+            # ★ 完整召回集优先（`retrieved_pids` = 执行器真实召回、语义题时 f.pids 全集）：
+            #   这才是「召回了哪些」的正确判据；展示块（topk）小是正常的。
+            _rec = (r or {}).get('retrieved_pids')
+            _pool = set(_rec) if _rec else _shown
+            _hitn = len(_pool & set(_want_pids))
+            _need = int(c.get('min_hits') or 1)
+            if _hitn < _need:
+                probs.append('主题召回相关性不足：标注锚点 %d 篇，召回命中 %d/%d（要求≥%d）'
+                             % (len(_want_pids), _hitn, len(_want_pids), _need))
     if c.get('hedge'):
         if not any(w in ans for w in ('可理解为', '也可', '似传达', '或寄寓', '可能')):
             probs.append('未使用克制的解读措辞（歧义/推断未标明）')

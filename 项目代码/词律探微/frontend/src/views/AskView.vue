@@ -134,6 +134,7 @@ function newSession() {
   activeId.value = s.id;
   turns.value = [];
   lastTurn = null;
+  q.value = '';                 // ⭐ 2026-10-09：切/建会话时清空输入框（主人实测驱动）
   persist();
   sessPanel.value = false;
   scrollBottom();
@@ -143,6 +144,7 @@ function switchSession(id) {
   if (id === activeId.value) { sessPanel.value = false; return; }
   activeId.value = id;
   loadActive();
+  q.value = '';                 // ⭐ 2026-10-09：切会话清空输入框
   persist();
   sessPanel.value = false;
 }
@@ -385,6 +387,10 @@ async function go() {
    *   修法：**push 之后从数组取回代理**，后续所有赋值都走它（依赖追踪才能正常工作）。
    *   （已用 @vue/reactivity 做确定性验证：改原始对象渲染增量 0；改代理增量 1。） */
   const turn = turns.value[turns.value.length - 1];
+  /* ⭐ 2026-10-09 修（主人实测）：「每次输完问题之后，上一个问题还留在对话框里」——
+     提交后**清空输入框**（对话式交互的标准行为）。此前 `q` 只读不清，
+     且它是独立 ref（不属于会话存储）→ 换会话后旧文本仍在。 */
+  q.value = '';
   scrollBottom();
 
   const streaming = !!(useLlm.value || useArg.value) && typeof window.fetch === 'function';

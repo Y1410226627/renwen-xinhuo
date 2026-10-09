@@ -177,6 +177,11 @@ def get_llm():
     return LLM
 
 
+def _planner_on():
+    """规划路是否启用（`LVC_PLANNER` = plan/planner）。**只读**环境变量。"""
+    return os.environ.get('LVC_PLANNER', 'rule').strip().lower() in ('plan', 'planner')
+
+
 def get_conn():
     """**线程本地连接**（每线程一条）。
 
@@ -885,22 +890,41 @@ def _derive_understanding(q, parse, client, policy, ctx_v, pids_v):
 
 
 def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
-    """把 `set_check` / `understanding_status` 挂到返回体上（有则给、失败则如实标注）。"""
+    """把 `set_check` / `understanding_status` / `result_state` 挂到返回体上。
+
+    ⚠ 2026-10-09（第三轮审查 P0-11）：**plan 路自算的 `set_check` 优先保留**——
+    它是以**实际计划**为真源复算的；这里不再用另一套规则（legacy spec）覆盖它。
+    ⚠ 2026-10-09（P0-11/12）：**语义轮强制非穷尽**——legacy 的语义扩展词（`spec.semantic`）
+    与 plan 路的语义召回（`out['semantic_used']`）都标 `SEMANTIC_NOT_EXHAUSTIVE`，
+    绝不因为"候选都满足硬条件"就归成精确。
+    """
     shown = len([p for p in (result_pids or []) if p])
     _tot = out.get('total')
-    try:
-        out['set_check'] = AVERIFY.build_set_check(
-            conn, spec, result_pids,
-            total=(_tot if isinstance(_tot, int) and not isinstance(_tot, bool) else None),
-            shown=shown, agg_result=agg_result)
-    except Exception as exc:
-        # ★ 未做成 ≠ 通过（审查 §24）：显式标 `NOT_CHECKED`，不许让它落在任何「✓」的语义里
-        out['set_check'] = {'ok': None, 'checked': False, 'status': 'NOT_CHECKED',
-                            'agg_status': 'NOT_EXECUTED',
-                            'status_text': '集合校验未执行（未验证）',
-                            'reason': '集合校验未执行：%s: %s' % (type(exc).__name__, exc)}
-        if isinstance(note, dict) and note.get('error'):
-            out['set_check']['reflect'] = note['error']
+    if getattr(spec, 'semantic', None):
+        out['semantic_used'] = True
+    _sc0 = out.get('set_check')
+    if _sc0 and _sc0.get('checked'):
+        pass                                     # plan 路已按实际计划校验——原样保留
+    elif out.get('semantic_used'):
+        out['set_check'] = {
+            'ok': None, 'checked': True, 'status': 'SEMANTIC_NOT_EXHAUSTIVE',
+            'status_text': '本轮含语义召回/融合排序——**非穷尽**：这是候选集，'
+                           '不代表「全部符合主题的作品」。',
+            'agg_status': 'NOT_EXECUTED', 'reason': '语义路径（非穷尽）'}
+    else:
+        try:
+            out['set_check'] = AVERIFY.build_set_check(
+                conn, spec, result_pids,
+                total=(_tot if isinstance(_tot, int) and not isinstance(_tot, bool) else None),
+                shown=shown, agg_result=agg_result)
+        except Exception as exc:
+            # ★ 未做成 ≠ 通过（审查 §24）：显式标 `NOT_CHECKED`，不许让它落在任何「✓」的语义里
+            out['set_check'] = {'ok': None, 'checked': False, 'status': 'NOT_CHECKED',
+                                'agg_status': 'NOT_EXECUTED',
+                                'status_text': '集合校验未执行（未验证）',
+                                'reason': '集合校验未执行：%s: %s' % (type(exc).__name__, exc)}
+            if isinstance(note, dict) and note.get('error'):
+                out['set_check']['reflect'] = note['error']
     out['understanding_status'] = (note or {}).get('understanding_status')
     # ★ 2026-10-09（第三轮审查 P1）：**结果状态四态**——「没有查出来」不等于「数据中不存在」：
     #   · EXACT_EMPTY          ：条件可判定（集合身份复算过）而 0 命中 → **确切的空**；
@@ -945,6 +969,10 @@ def _store_turn(session, q, spec, out, result_pids):
     try:
         full = AVERIFY.hit_pids(get_conn(), spec)
     except Exception:
+        full = None
+    # ★ 2026-10-09（第三轮审查 P0-12）：**语义轮不得把「硬条件全集」存成精确集**——
+    #   用户看见的是语义候选，追问「这些里面…」就必须围绕候选（而不是更大的 SQL 全集）。
+    if out.get('semantic_used'):
         full = None
     store_pids = full if (full is not None) else list(result_pids or [])
     _tot = out.get('total')
@@ -1146,7 +1174,10 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
           ctx_pids=None, sid=None, carry=False):
     t0 = time.time()
     conn = get_conn()
-    client = get_llm() if (narrate or argument or parse) else None
+    # ⭐ 2026-10-09（第三轮审查 P1-13 补）：**规划路开启时始终建 LLM 句柄**——
+    #   规划器（Planner）需要大模型；旧版只有 narrate/argument/parse 才建，
+    #   导致语义题（靠 planner 生成 retrieve 计划）在默认参数下 client=None → 静默回落。
+    client = get_llm() if (narrate or argument or parse or _planner_on()) else None
     # ① 服务端会话 + 指代分类（外部审查 A）：带 sid 时才建会话。
     session = SESSIONS.get_or_create(sid) if sid else None
     resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
@@ -1240,7 +1271,7 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
         t0 = time.time()
         try:
             conn = get_conn()
-            client = get_llm() if (narrate or argument or parse) else None
+            client = get_llm() if (narrate or argument or parse or _planner_on()) else None
             # ① 服务端会话 + 指代分类（与 q_ask 同一套，外部审查 A）。
             session = SESSIONS.get_or_create(sid) if sid else None
             resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
@@ -1806,6 +1837,29 @@ def main():
         q_search(_warm, {'cipai': '临江仙'})
         q_ask('清 临江仙 仄声比例高于50%', topk=3)
         print('预热完成（首个提问不再吃 200+ ms 的冷启动）')
+        # ★ 2026-10-09（第三轮审查 P1-14/P1-15）：启动即报告**向量索引覆盖 + 指纹一致性**。
+        #   「索引可用」≠「语料全覆盖」；且索引指纹必须对应当前**正在用的**数据库。
+        try:
+            import vector_index as _VI
+            _cov = _VI.coverage(_warm)
+            _fp = _VI.corpus_fingerprint(DB)
+            _mf_fp = (_VI.info() or {}).get('corpus_sha')
+            if _VI.available():
+                _fp_ok = (_mf_fp == _fp)
+                print('向量索引：%s ｜ 篇级 %d/%d（清 %s／宋 %s／元 %s）｜ 句级 %d/%d ｜ 指纹一致=%s'
+                      % ('可用' if _cov['complete'] is not False else '**部分覆盖（未完整）**',
+                         _cov['indexed_poems'], _cov['total_poems'] or 0,
+                         (_cov['by_dynasty'].get('清') or {}).get('indexed', 0),
+                         (_cov['by_dynasty'].get('宋') or {}).get('indexed', 0),
+                         (_cov['by_dynasty'].get('元') or {}).get('indexed', 0),
+                         _cov['indexed_lines'], _cov['total_lines'] or 0, _fp_ok))
+                if not _fp_ok:
+                    print('⚠ 索引指纹（%s）与当前库指纹（%s）不一致——语义检索可能错配，请重建索引'
+                          % (_mf_fp, _fp))
+            else:
+                print('向量索引不可用：%s' % (_VI.why() or '未知'))
+        except Exception as _ve:                                # noqa: BLE001
+            print('向量索引报告跳过：%s' % _ve)
     except Exception as _e:
         print('预热跳过：%s: %s' % (type(_e).__name__, _e))
     srv = None

@@ -105,7 +105,7 @@ class Frame:
     """执行器的数据载体。**只装 pid 集合 / 标量 / 分组行**，不装 SQL。"""
 
     def __init__(self, dag, kind='set', pids=None, scores=None, value=None,
-                 rows=None, single=None, note='', prov=None):
+                 rows=None, single=None, note='', prov=None, label=None, group_field=None):
         self.dag = dag
         self.kind = kind                       # set | scalar | groups | rows | single
         self.pids = list(pids or [])
@@ -116,6 +116,11 @@ class Frame:
         self.note = note
         self.prov = prov
         self.truncated = False
+        # ★ 2026-10-09（第三轮审查 P1-8）：**帧自述**——scalar 的语义标签（篇数/中位数/标准差…），
+        #   分组帧的真实分组字段。渲染层据此出文案，不再用一套通用文案覆盖所有情况
+        #   （旧版把所有 scalar 都写成"共 N 篇"、把所有分组都写成"按作者分组"）。
+        self.label = label
+        self.group_field = group_field
 
     def __len__(self):
         return len(self.pids)
@@ -128,6 +133,11 @@ class Frame:
 _METRIC_COL = dict((k, v[0]) for k, v in retrieve.ORDER_COLS.items())  # ze_ratio / han_len / …
 _METRIC_EXPR = dict(retrieve.ORDER_EXPR)                               # change → ABS(p.change)
 _METRIC_EXPR.update({'abs_change': 'ABS(p.change)'})
+
+#: 数值字段的中文名（scalar 帧的标签用；2026-10-09 第三轮审查 P1-8）
+_FIELD_CN = {'ze_ratio': '仄声比例', 'han_len': '字数', 'sent_n': '句数', 'change': '变化值',
+             'abs_change': '变化幅度', 'threshold': '阈值', 'longest_len': '最长句字数',
+             'longest_seq': '最长同声串', 'f_ratio': '前段仄声比例', 'b_ratio': '后段仄声比例'}
 
 
 def _order_expr(metric):
@@ -179,6 +189,12 @@ class Executor:
         self.problems = []
         self.named = {}          # materialize_as 的命名帧
         self.retrieve_report = []      # ★ retrieve 各路召回的**执行报告**（是否执行/召回了多少）
+        # ★ 2026-10-09（第三轮审查 P0-2/P0-3）：**失败语义**——关键步骤失败不得再产出
+        #   「已满足条件」式的正常答案。`failed_steps` 里的任何一条都会让 whole-plan
+        #   标为 EXECUTION_FAILED（上层据此回落既有链并如实报告原因）；
+        #   `partial_reasons` 为可控降级（继续执行、但要如实标注）。
+        self.failed_steps = []
+        self.partial_reasons = []
 
     # -------------------------------------------------- 入口
     def run(self):
@@ -187,6 +203,7 @@ class Executor:
             f = self._seed()
         except Exception as e:                                   # noqa: BLE001
             self.problems.append('初始帧构造失败：%s: %s' % (type(e).__name__, e))
+            self.failed_steps.append(self.problems[-1])
             return None
         # 0) ★ retrieve（2026-10-09 修，第三轮审查 P0）：执行 plan['retrieve'] 的
         #    **多路召回**——「理解层说了（vector/fts），执行层照做」。纯 sql 时零变化。
@@ -195,28 +212,37 @@ class Executor:
         except Exception as e:                                   # noqa: BLE001
             self.problems.append('retrieve 执行失败：%s: %s（已按 SQL 候选继续）'
                                  % (type(e).__name__, e))
+            self.failed_steps.append(self.problems[-1])
         # 1) 显式 steps（Planner 产出）
         for i, st in enumerate(self.plan.get('steps') or []):
             try:
                 f = self._step(f, st)
             except Exception as e:                               # noqa: BLE001
-                self.problems.append('第 %d 步（%s）失败：%s: %s'
-                                     % (i + 1, (st or {}).get('op'), type(e).__name__, e))
-                return f
+                msg = ('第 %d 步（%s）失败：%s: %s'
+                       % (i + 1, (st or {}).get('op'), type(e).__name__, e))
+                self.problems.append(msg)
+                self.failed_steps.append(msg)                    # ★ 关键步骤失败 → 状态 FAILED
+                return {'frame': f, 'dag': self.dag, 'problems': self.problems,
+                        'named': self.named, 'seconds': round(time.time() - t0, 4),
+                        'retrieve_report': self.retrieve_report,
+                        'state': 'EXECUTION_FAILED'}
         # 2) operation（旧 intent 的语义糖：extreme / agg / pair / locate）
         op = self.plan.get('operation')
         if op:
             try:
                 f = self._operation(f, op)
             except Exception as e:                               # noqa: BLE001
-                self.problems.append('operation（%s）失败：%s: %s'
-                                     % (op.get('kind'), type(e).__name__, e))
+                msg = ('operation（%s）失败：%s: %s' % (op.get('kind'), type(e).__name__, e))
+                self.problems.append(msg)
+                self.failed_steps.append(msg)                    # ★ 同上
         # 3) 意图兜底
         f = self._by_intent(f)
         self.problems = [p for p in self.problems if p]
+        state = ('EXECUTION_FAILED' if self.failed_steps
+                 else ('EXECUTION_PARTIAL' if self.partial_reasons else 'EXECUTION_OK'))
         return {'frame': f, 'dag': self.dag, 'problems': self.problems,
                 'named': self.named, 'seconds': round(time.time() - t0, 4),
-                'retrieve_report': self.retrieve_report}
+                'retrieve_report': self.retrieve_report, 'state': state}
 
     # -------------------------------------------------- 初始帧
     def _seed(self):
@@ -224,8 +250,20 @@ class Executor:
         t0 = time.time()
         if sc.get('base') == 'prev_result':
             pids = list(sc.get('ctx') or [])
-            nid = self.dag.add('scope.prev_result', [], '上一轮结果集', 'set', len(pids),
-                               time.time() - t0)
+            # ★ 2026-10-09（第三轮审查 P0-5）：本轮根级 `plan['filters']` 必须与上一轮
+            #   结果集**求交**——旧版此分支直接返回、根级条件被静默跳过
+            #   （「这些词里字数超过五十的有哪些」会把新条件丢掉）。
+            flt = self.plan.get('filters') or {}
+            if flt and pids:
+                import queryplan as QP
+                sql, args = QP.compile_filters(self.conn, flt)
+                parts, pargs = _pid_filter_sql(pids)
+                _hits = set(r[0] for r in self.conn.execute(
+                    'SELECT p.pid FROM poems p WHERE (%s) AND (%s)'
+                    % (sql, ' OR '.join(parts)), list(args) + pargs))
+                pids = [p for p in pids if p in _hits]           # 保持上一轮顺序
+            nid = self.dag.add('scope.prev_result', [], '上一轮结果集∩本轮条件',
+                               'set', len(pids), time.time() - t0)
             return Frame(self.dag, 'set', pids, note='prev_result', prov=nid)
         # 有 filters 就从 SQL 精确集合起步（比先拿全库再过滤省一大截）
         flt = self.plan.get('filters') or {}
@@ -297,10 +335,17 @@ class Executor:
                     self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk,
                                                  'n': 0, 'executed': False, 'why': repr(e)})
         if not channels:
-            if self.retrieve_report:
-                self.dag.add('retrieve.none', [f.prov], '召回未产生候选（如实记录）',
-                             'set', 0, time.time() - t0)
-            return f                                     # 保持原帧（空就是空，不硬造）
+            # ★ 2026-10-09（第三轮审查 P0-2）：**召回失败/为空不得回落到原 SQL 候选集**——
+            #   旧版 `return f` 会把「清词全量」当成「写秋景的作品」交给答案渲染。
+            #   现在统一走**失败语义**（返回空帧 + 记 failed，由上层回落既有链并报告原因）：
+            #   语义条件「没执行成功」时，宁可不给结果，也不拿未经筛选的集合冒充。
+            _why = '；'.join('%s：%s' % (x.get('mode'), x.get('why') or '未返回候选')
+                           for x in self.retrieve_report) or '未返回候选'
+            self.failed_steps.append('语义召回未完成（%s）——不以 SQL 候选集冒充语义结果' % _why)
+            self.problems.append(self.failed_steps[-1])
+            nid = self.dag.add('retrieve.failed', [f.prov], '召回未完成（failed-closed）',
+                               'set', 0, time.time() - t0)
+            return Frame(self.dag, 'set', [], note='retrieve_failed', prov=nid)
         if len(channels) == 1:
             merged = list(channels[0])
         else:
@@ -352,9 +397,11 @@ class Executor:
             'median': self._op_median, 'stddev': self._op_stddev,
             'mode': self._op_mode, 'rank': self._op_rank,
             'project': self._op_project, 'similar_to': self._op_similar_to,
+            'retrieve': self._op_retrieve,
         }.get(op)
         if fn is None:
             self.problems.append('未知步骤算子：%r' % op)
+            self.failed_steps.append(self.problems[-1])          # ★ 未知算子=关键失败
             return f
         return fn(f, st)
 
@@ -425,7 +472,15 @@ class Executor:
 
     def _op_limit(self, f, st):
         t0 = time.time()
-        n = int(st.get('n') or self.topk)
+        # ★ 2026-10-09（第三轮审查 P1-8⑥）：`n=0`/负数不再被静默当成"未传参数"——
+        #   显式非法的 n 报 problem 并按默认处理（validate 已挡一层，这是执行层双保险）。
+        n_raw = st.get('n')
+        if isinstance(n_raw, int) and not isinstance(n_raw, bool) and n_raw >= 1:
+            n = n_raw
+        else:
+            if n_raw is not None:
+                self.problems.append('limit.n 非法（%r）——已按默认 %d 处理' % (n_raw, self.topk))
+            n = self.topk
         if f.kind != 'set':
             return f
         pids = f.pids[:n]
@@ -449,7 +504,7 @@ class Executor:
         # ⚠ pids **必须带下去**：后续 aggregate/annotate 仍要在这个候选宇宙里做 SQL/GROUP BY，
         #   若 groups 帧丢掉 pids，下一步的 `pid IN ()` 会是空集（实测多步① 因此返回 []）。
         return self._mk(Frame(self.dag, 'groups', pids=f.pids, rows=out,
-                              note='group_by:%s' % field),
+                              note='group_by:%s' % field, group_field=field),
                         'group_by:%s' % field, f, '', time.time() - t0)
 
     def _op_aggregate(self, f, st):
@@ -461,7 +516,11 @@ class Executor:
             f = self._op_group_by(f, st)
         parts, args = _pid_filter_sql(f.pids)
         where = (' OR '.join('(%s)' % p for p in parts) if parts else '1=0')
-        field = st.get('field') or st.get('by') or 'author'
+        # ★ 2026-10-09（第三轮审查 P1-8③）：聚合的分组**沿用上一阶段的真实分组字段**
+        #   （groups 帧的 group_field）；只有完全没有分组信息时才退回 author——旧版无条件默认
+        #   author，会让「按声情分组、再求统计」的多步计划退化成按作者分组。
+        field = (st.get('field') or st.get('by')
+                 or getattr(f, 'group_field', None) or 'author')
         col = _group_col(field)
         if col is None:
             self.problems.append('聚合：不支持的分组维度 %r' % field)
@@ -499,12 +558,21 @@ class Executor:
     def _op_count(self, f, st):
         t0 = time.time()
         n = len(f.pids) if f.kind == 'set' else (f.value or 0)
-        return self._mk(Frame(self.dag, 'scalar', value=n, note='count'),
+        return self._mk(Frame(self.dag, 'scalar', value=n, note='count', label='篇数'),
                         'count', f, '', time.time() - t0)
 
     def _op_extract(self, f, st):
-        """篇内取值：第 N 句第 M 个字 / 第 N 句整句（审查 #14：旧 extract 只支持单个字位置）。"""
+        """篇内取值：第 N 句第 M 个**汉字** / 第 N 句整句。
+
+        ⚠ 2026-10-09（第三轮审查 P1-10）两处口径修订：
+        ① 多篇候选时**如实披露**「基于首篇」（旧版静默取首篇——候选未排序时会提取错篇目）；
+        ② 「第 M 个字」统一为**汉字序号**（跳过标点，与全库口径 `lines.pz` 一致）——
+           旧版用字符串下标，'……分明。' 的「第 7 字」会取到句号。
+        """
         t0 = time.time()
+        if f.kind == 'set' and len(f.pids) > 1:
+            self.problems.append('extract：在 %d 篇候选上取**首篇**（如需指定篇目请先 sort/limit）'
+                                 % len(f.pids))
         pids = f.pids[:1] if f.kind == 'set' else ([f.single] if f.single else [])
         if not pids:
             self.problems.append('extract：没有锚定篇目')
@@ -523,7 +591,9 @@ class Executor:
                 self.problems.append('extract(char) 缺 pos')
                 val = ''
             else:
-                val = text[pos - 1:pos] if len(text) >= pos else ''
+                import re as _re3
+                _han = _re3.findall(r'[\u3400-\u4dbf\u4e00-\u9fff]', text)
+                val = _han[pos - 1] if len(_han) >= pos else ''
         rows = [{'pid': pid, 'sent': sent, 'pos': pos, 'unit': unit, 'text': text, 'value': val}]
         return self._mk(Frame(self.dag, 'rows', rows=rows, single=pid, note='extract'),
                         'extract', f, '第%d句%s' % (sent, ('第%d字' % pos) if unit == 'char' else '整句'),
@@ -538,32 +608,65 @@ class Executor:
             spec.pair = {'dims': ('tone',), 'n_frame': int(st.get('n_frame') or 1)}
             if self.plan.get('filters'):
                 spec.filters_tree = self.plan['filters']
+            # ★ 2026-10-09（第三轮审查 P1-9）：**当前帧（已收窄）必须参与配对范围**——
+            #   旧版只用根级条件重查，上一阶段的筛选会被越过（「先筛后配」的步骤失效）。
+            #   （≤30000 才带 ctx_pids：更大即视为"接近全库"，避免超 SQLite 变量上限。）
+            if f.kind == 'set' and f.pids and len(f.pids) <= 30000:
+                spec.ctx_pids = list(f.pids)
             spec = retrieve._finalize(spec)
             groups = pairing.find_pairs(self.conn, spec, limit=int(st.get('limit') or 3))
             rows = [{'pids': list(g), 'label': '全篇逐位平仄完全相同'} for g in (groups or [])]
         except Exception as e:                                   # noqa: BLE001
             self.problems.append('pair 失败：%s: %s' % (type(e).__name__, e))
+            self.failed_steps.append(self.problems[-1])          # ★ 关键步骤失败
             rows = []
         return self._mk(Frame(self.dag, 'rows', rows=rows, note='pair'),
                         'pair', f, '', time.time() - t0)
 
     def _op_locate(self, f, st):
-        """反查出处：「寒蛩切切响空帷」出自哪首 —— FTS/字面 = 首选，向量 = 兜底。"""
+        """反查出处：「寒蛩切切响空帷」出自哪首 —— 字面（当前帧内）= 首选，句级向量 = 兜底。
+
+        ⚠ 2026-10-09（第三轮审查 P1-9）：原实现**全库搜**（不继承当前帧约束）、
+        且注释声称的"向量兜底"并不存在。现补：① 在当前帧内做字面检索；
+        ② 字面 0 命中时走 `search_lines` 句级向量兜底（同样限定当前帧）。
+        """
         t0 = time.time()
         q = st.get('q') or (self.plan.get('_legacy') or {}).get('raw_question') or ''
         q = (q or '').strip('「」“”"\'').strip()
         rows = []
+        _restrict = (f.kind == 'set' and f.pids)
         if q:
             try:
-                rr = self.conn.execute(
-                    'SELECT pid, idx, text FROM lines WHERE text LIKE ? LIMIT 5',
-                    ('%' + q + '%',)).fetchall()
+                sql = 'SELECT pid, idx, text FROM lines WHERE text LIKE ?'
+                args = ['%' + q + '%']
+                if _restrict:
+                    parts, pargs = _pid_filter_sql(f.pids, alias='lines')
+                    sql += ' AND (' + ' OR '.join(parts) + ')'
+                    args += pargs
+                rr = self.conn.execute(sql + ' LIMIT 5', args).fetchall()
                 rows = [{'pid': r[0], 'idx': r[1] + 1, 'text': r[2], 'score': 1.0} for r in rr]
             except Exception:                                    # noqa: BLE001
                 rows = []
+        _via = '字面'
+        if not rows and q:                       # ★ 句级向量兜底（限定在当前帧内）
+            try:
+                import vector_index as VI
+                if VI.available():
+                    _al = set(f.pids) if _restrict else None
+                    for _p, _i, _t, _s in VI.search_lines(q, topk=6):
+                        if _al is not None and _p not in _al:
+                            continue
+                        rows.append({'pid': _p, 'idx': (_i or 0) + 1, 'text': _t,
+                                     'score': round(float(_s), 3)})
+                        if len(rows) >= 3:
+                            break
+                    if rows:
+                        _via = '字面 0 句→句级向量兜底'
+            except Exception as e:                               # noqa: BLE001
+                self.problems.append('locate 向量兜底失败：%r' % e)
         pids = [r['pid'] for r in rows]
         return self._mk(Frame(self.dag, 'rows', pids=pids, rows=rows, note='locate'),
-                        'locate', f, '字面命中 %d 句' % len(rows), time.time() - t0)
+                        'locate', f, '%s命中 %d 句' % (_via, len(rows)), time.time() - t0)
 
     def _op_intersect(self, f, st):
         return self._set_op(f, st, 'intersect')
@@ -640,8 +743,17 @@ class Executor:
                         'annotate', f, '语义重排 %d 篇' % len(hits), time.time() - t0)
 
     def _numeric_values(self, f, field):
-        """当前集合在 `field` 上的数值列表（表达式走**白名单**，接受用户串）。"""
-        expr = _order_expr(field) or _order_expr('ze_ratio')
+        """当前集合在 `field` 上的数值列表（表达式走**白名单**）。
+
+        ⚠ 2026-10-09（第三轮审查 P1-8⑤）：字段无法解析时**不再静默回退**到 ze_ratio——
+        旧版会把「错误的 of 参数」悄悄换成另一个字段去算（用户拿到的是别的东西的数）。
+        现在：报 problem + 记 failed（由上层决定回落），返回空。
+        """
+        expr = _order_expr(field)
+        if expr is None:
+            self.problems.append('数值字段不在白名单：%r（不静默回退）' % field)
+            self.failed_steps.append(self.problems[-1])
+            return []
         parts, args = _pid_filter_sql(f.pids)
         if not parts:
             return []
@@ -655,9 +767,11 @@ class Executor:
         if f.kind != 'set' or not f.pids:
             return f
         import statistics
-        vals = self._numeric_values(f, st.get('of') or 'ze_ratio')
+        _of = st.get('of') or 'ze_ratio'
+        vals = self._numeric_values(f, _of)
         val = round(statistics.median(vals), 4) if vals else None
-        return self._mk(Frame(self.dag, 'scalar', value=val, note='median'),
+        return self._mk(Frame(self.dag, 'scalar', value=val, note='median',
+                              label='中位数（%s）' % _FIELD_CN.get(_of, _of)),
                         'median', f, '中位数（n=%d）' % len(vals), time.time() - t0)
 
     def _op_stddev(self, f, st):
@@ -666,9 +780,11 @@ class Executor:
         if f.kind != 'set' or not f.pids:
             return f
         import statistics
-        vals = self._numeric_values(f, st.get('of') or 'han_len')
+        _of = st.get('of') or 'han_len'
+        vals = self._numeric_values(f, _of)
         val = round(statistics.pstdev(vals), 4) if vals else None
-        return self._mk(Frame(self.dag, 'scalar', value=val, note='stddev'),
+        return self._mk(Frame(self.dag, 'scalar', value=val, note='stddev',
+                              label='标准差（%s）' % _FIELD_CN.get(_of, _of)),
                         'stddev', f, '标准差（n=%d）' % len(vals), time.time() - t0)
 
     def _op_mode(self, f, st):
@@ -699,9 +815,23 @@ class Executor:
                         'rank', f, '', time.time() - t0)
 
     def _op_project(self, f, st):
-        """取字段（单篇→明细行；供「那首是谁写的」）。字段走**白名单**。"""
+        """取字段：**单篇→一行；集合→逐篇投影**（第三轮审查 P1-10）。
+
+        旧版对集合**静默只取首篇**（「这些作品的作者分别是谁」会退化成只输出一篇）。
+        现在：集合输入 → 对至多 500 篇逐篇投影为多行（超过即截断并在 problems 披露）；
+        单篇/单篇帧 → 一行。字段仍走**白名单**。
+        """
         t0 = time.time()
-        pids = f.pids[:1] if f.kind in ('set', 'single') else ([f.single] if f.single else [])
+        if f.kind == 'set':
+            pids = list(f.pids)
+            if len(pids) > 500:
+                self.problems.append('project：集合 %d 篇超过 500——只投影前 500 篇（如实披露）'
+                                     % len(pids))
+                pids = pids[:500]
+        elif f.single:
+            pids = [f.single]
+        else:
+            pids = list(f.pids[:1])
         allow = {'author': 'author', 'cipai': 'cipai', 'title': 'title', 'dynasty': 'dynasty',
                  'han_len': 'han_len', 'sent_n': 'sent_n', 'ze_ratio': 'ze_ratio',
                  'scene': 'scene', 'pid': 'pid', 'source': 'source'}
@@ -709,23 +839,34 @@ class Executor:
         cols = [allow[x] for x in fields if x in allow]
         rows = []
         if pids and cols:
-            row = self.conn.execute('SELECT %s FROM poems WHERE pid=?'
-                                    % ','.join(cols), (pids[0],)).fetchone()
-            if row:
-                rows = [dict(zip(cols, row))]
+            parts, args = _pid_filter_sql(pids)              # 生成 `p.pid IN (…)`（alias=p）
+            rr = self.conn.execute(
+                'SELECT %s FROM poems p WHERE %s'
+                % (','.join(['p.pid'] + ['p.%s' % c for c in cols]), ' OR '.join(parts)),
+                args).fetchall()
+            rows = [dict(zip(['pid'] + cols, row)) for row in rr]
         return self._mk(Frame(self.dag, 'rows', pids=pids,
-                              single=(pids[0] if pids else None), rows=rows, note='project'),
+                              single=(pids[0] if len(pids) == 1 else None), rows=rows,
+                              note='project'),
                         'project', f, '取字段 %s' % ','.join(cols), time.time() - t0)
 
     def _op_similar_to(self, f, st):
         """「与这首/这段话主题相近」（向量）。不可用则**如实记 problem**，不伪造。"""
         t0 = time.time()
+        # ★ 2026-10-09（第三轮审查 P1-9）：`restrict=True` 而当前集合为空时**保持空**——
+        #   旧版把 allow 设为 None → 退化成**全库**相似检索（越过一切范围约束）。
+        if st.get('restrict') and not f.pids:
+            self.problems.append('similar_to：restrict=True 但当前集合为空——保持空结果，'
+                                 '不进行全库相似检索')
+            return self._mk(Frame(self.dag, 'set', [], note='similar_to(empty)'),
+                            'similar_to', f, '空集合，未检索', time.time() - t0)
         pid = st.get('pid') or (f.pids[0] if f.pids else None)
         q = st.get('q') or ''
         try:
             import vector_index as VI
             if not VI.available():
                 self.problems.append('similar_to：向量索引不可用（%s）' % VI.why())
+                self.failed_steps.append(self.problems[-1])      # ★ 语义步骤失败=关键
                 return f
             tk = int(st.get('topk') or max(self.topk, 10))
             allow = set(f.pids) if (f.pids and st.get('restrict')) else None
@@ -733,6 +874,7 @@ class Executor:
                     else VI.search(q, topk=tk, allow=allow))
         except Exception as e:                                   # noqa: BLE001
             self.problems.append('similar_to 失败：%s: %s' % (type(e).__name__, e))
+            self.failed_steps.append(self.problems[-1])
             return f
         pids = [p for p, _s in (hits or [])]
         return self._mk(Frame(self.dag, 'set', pids, scores=dict(hits or {}), note='similar_to'),
@@ -742,6 +884,51 @@ class Executor:
         name = st.get('name') or ('s%d' % (len(self.named) + 1))
         self.named[name] = f
         return self._mk(f, 'materialize_as:%s' % name, f, '', 0.0)
+
+    def _op_retrieve(self, f, st):
+        """**步骤级召回**（第三轮审查 P1-16）：在当前帧（上一步结果）内执行一路召回。
+
+        这就是「先构造中间集合、再在该集合内语义检索」的正解——把本步骤放在那一阶段之后，
+        **天然受当前帧约束**（等价于 `candidate_from=上一命名集`，但语义由顺序保证、无需引用）。
+        空集合→空结果；索引不可用→失败语义（绝不退化为全库）。
+        """
+        mode = str(st.get('mode') or 'vector')
+        q = str(st.get('q') or self.question or '').strip()
+        tk = int(st.get('topk') or max(self.topk * 10, 50))
+        t0 = time.time()
+        if f.kind != 'set':
+            self.problems.append('retrieve 步骤需要集合输入（当前 %s）' % f.kind)
+            self.failed_steps.append(self.problems[-1])
+            return f
+        allow = set(f.pids)
+        if not allow:
+            return self._mk(Frame(self.dag, 'set', [], note='retrieve(empty)'),
+                            'retrieve.%s' % mode, f, '空集合，未检索', time.time() - t0)
+        pids = []
+        if mode == 'vector':
+            try:
+                import vector_index as VI
+                if not VI.available():
+                    self.problems.append('步骤 retrieve(vector)：索引不可用（%s）' % VI.why())
+                    self.failed_steps.append(self.problems[-1])
+                    return self._mk(Frame(self.dag, 'set', [], note='retrieve_failed'),
+                                    'retrieve.vector', f, '', time.time() - t0)
+                pids = [p for p, _s in VI.search(q, topk=tk, allow=allow)]
+            except Exception as e:                               # noqa: BLE001
+                self.problems.append('步骤 retrieve(vector) 失败：%r' % e)
+                self.failed_steps.append(self.problems[-1])
+                return self._mk(Frame(self.dag, 'set', [], note='retrieve_failed'),
+                                'retrieve.vector', f, '', time.time() - t0)
+        elif mode == 'fts':
+            pids = self._fts_in(allow, q, tk)
+        else:
+            self.problems.append('步骤 retrieve：未知 mode %r' % mode)
+            self.failed_steps.append(self.problems[-1])
+            return f
+        return self._mk(Frame(self.dag, 'set', pids, note='retrieve.%s' % mode),
+                        'retrieve.%s' % mode, f,
+                        '候选集（%d 篇）内召回 %d 篇' % (len(allow), len(pids)),
+                        time.time() - t0)
 
     # -------------------------------------------------- operation（旧 intent 的语义糖）
     def _operation(self, f, op):
@@ -1004,9 +1191,11 @@ def selftest(conn):
         _chk('⑯ 溯源出现 retrieve 节点',
              any('retrieve' in n['op'] for n in rv['dag'].to_list()), True)
     else:
-        _chk('⑯ 索引不可用时如实报告（不假装执行）',
+        # 索引不可用：召回路全未执行 → 失败语义（空帧 + failed，由上层回落并报告）
+        _chk('⑯ 索引不可用时按失败关闭（不拿原候选冒充语义结果）',
              bool(rep) and rep[0].get('executed') is False
-             and any('retrieve.vector' in p for p in rv['problems']), True)
+             and any('语义召回未完成' in p for p in rv['problems'])
+             and len(rv['frame'].pids) == 0, True)
     # ⑰ fts 路：与独立 SQL 复算逐篇一致
     plan2 = dict(plan, retrieve=[{'mode': 'fts', 'q': '明月 孤灯', 'topk': 10}])
     rf = execute(conn, plan2)

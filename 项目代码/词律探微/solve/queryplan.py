@@ -173,6 +173,8 @@ STEP_OPS = {
     'argmax':          '取度量最大 / 最小的那一组（sort+limit 的语义糖）',
     'count':           '计数（结果是一个数，不是集合）',
     'extract':         '篇内取值：{"sent":N,"pos":M,"unit":"char"|"line"}',
+    'retrieve':        '在**当前集合内**执行一路召回：{"mode":"vector"|"fts","q":…,"topk":N}'
+                       '（「先筛完再语义召回其中…」即用它；天然受当前帧约束）',
     'pair':            '两两配对（找出满足关系的篇对）',
     'locate':          '反查出处（某句出自哪首）',
     'intersect':       '与另一个结果集求交（「这些里面哪些还…」）',
@@ -203,6 +205,10 @@ RETRIEVE_MODES = {
 
 AGG_METRICS = ('count', 'sum', 'avg', 'min', 'max', 'ratio_ze')
 
+#: 可分组字段（**与 `plan_exec._GROUP_COL` 的键必须一致**——`selftest` 里有对账断言；
+#: 2026-10-09 第三轮审查 P1-7：`validate` 用它拒绝不可分组的 field）。
+GROUP_FIELDS = ('author', 'cipai', 'dynasty', 'scene', 'sent_n', 'source')
+
 
 # ------------------------------------------------------------------ 布尔树编译
 def _leaf_sql(field, op, value):
@@ -230,19 +236,28 @@ def compile_filters(conn, node):
 _CMP_NORM = {'>': '>=', '<': '<='}
 
 
-def normalize_ops(node):
-    """**比较口径归一**（就地修改布尔树，返回归一的叶子数）：`>` → `>=`、`<` → `<=`。
+# 比较口径归一的**措辞依据**（第三轮审查 P0-6 修订版）。
+# 含界措辞（至少/不少于/高于/超过…）→ 按基准口径归一为 >=/<=；「严格/恰好」类词在场、
+# 或无任何依据时不归一（严格就是严格）。
+_BOUND_WORDS = ('至少', '不少于', '不低于', '高于', '超过', '多于', '以上')
+_STRICT_WORDS = ('严格', '恰好', '正好', '恰大于', '恰小于')
 
-    ⚠ 2026-10-09（第三轮审查 P0 实测驱动）：**依据（铁证）**——官方/基准口径
-    「高于 / 超过 X」= `>= X`、『低于 / 少于 X』= `<= X`：
-    `tests/nl_paraphrase.jsonl` 的 NL001/NL002 truth_sql 为 `p.ze_ratio>=45`，
-    note 明写「『超过45个百分点』= >=45」；经典字段路径（ze_min/ze_max）亦编 `>=`/`<=`。
-    大模型把「高于45%」自然译成 `op='>'`，若原样执行会**少算**
-    （实测「清 临江仙 仄声比例高于45%」：`>=` 59 篇 vs `>` 27 篇——审查点名的反向回归根因）。
-    本函数把**计划本身**归一（前端「理解详情」看到的 op 与执行一致）；
-    `retrieve._leaf_num` 在编译出口再兜一次（防其他入口绕过）。
-    `between` 维持既有闭区间口径，不动。
+
+def normalize_ops(node, question=''):
+    """**按问句措辞**归一比较算子（就地修改布尔树，返回归一叶子数）——P0-6 修订版。
+
+    依据与边界（不许含糊）：
+      · 官方/基准口径「高于 / 超过 / 至少 / 不少于 X」= `>= X`——`tests/nl_paraphrase.jsonl`
+        的 NL001/NL002 truth_sql 为 `p.ze_ratio>=45`，note 明写「『超过45个百分点』= >=45」；
+      · 但「大于 50 字」与「至少 50 字」在语言上应当区分（第三轮审查原话）——所以
+        **只在问句明确使用含界措辞**（至少/不少于/不低于/高于/超过/多于/以上）时，把
+        `>`/`<` 归一为 `>=`/`<=`；问句含「严格/恰好/正好」类词、或没有相应措辞依据时，
+        **保留**原算子；`between` 一律不动。
+      · 编译器（`retrieve._leaf_num`）**不再做任何改写**——严格执行既定 op。
     """
+    q = str(question or '')
+    if (not q) or (not any(w in q for w in _BOUND_WORDS)) or any(w in q for w in _STRICT_WORDS):
+        return 0
     n = 0
 
     def _walk(x):
@@ -625,15 +640,72 @@ def validate(plan, conn, strict=True):
     sc = plan.get('scope') or {}
     if sc.get('base') not in ('corpus', 'prev_result'):
         problems.append('未知检索范围：%r' % sc.get('base'))
+    # ── ★ 2026-10-09（第三轮审查 P1-7）：**参数级校验**（原先只查"名字是否合法"）──
+    #   目标：让"计划通过校验"尽量接近"可正确执行"；不支持/形态错的参数**显式拒绝**，
+    #   而不是执行时才崩、或悄悄按另一种语义执行。
+    _sort_fields = set(retrieve.ORDER_COLS) | {'abs_change'}
     for i, st in enumerate(plan.get('steps') or []):
         if not isinstance(st, dict) or st.get('op') not in STEP_OPS:
             problems.append('第 %d 步的算子不认识：%r' % (i + 1, (st or {}).get('op')))
+            continue
+        op = st.get('op')
+        _p = '第 %d 步（%s）' % (i + 1, op)
+        if op in ('sort', 'rank'):
+            keys = st.get('keys') or ([{'by': st.get('by'), 'dir': st.get('dir')}]
+                                      if st.get('by') else [])
+            for k in keys:
+                if not isinstance(k, dict) or k.get('by') not in _sort_fields:
+                    problems.append('%s 排序指标不在白名单：%r' % (_p, (k or {}).get('by')))
+        elif op == 'limit':
+            n = st.get('n')
+            if not (isinstance(n, int) and not isinstance(n, bool) and n >= 1):
+                problems.append('%s limit.n 必须是 ≥1 的整数：%r' % (_p, n))
+        elif op == 'group_by':
+            if st.get('field') not in GROUP_FIELDS:
+                problems.append('%s group_by.field 不可分组：%r（可用：%s）'
+                                % (_p, st.get('field'), '/'.join(GROUP_FIELDS)))
+        elif op == 'aggregate':
+            m = (st.get('metric') or 'count')
+            if m not in AGG_METRICS:
+                problems.append('%s 未知聚合指标：%r' % (_p, m))
+        elif op == 'extract':
+            s_, p_ = st.get('sent'), st.get('pos')
+            if s_ is not None and not (isinstance(s_, int) and s_ >= 1):
+                problems.append('%s extract.sent 需 ≥1 的整数（第几句）' % _p)
+            if p_ is not None and not (isinstance(p_, int) and p_ >= 1):
+                problems.append('%s extract.pos 需 ≥1 的整数（第几个）' % _p)
+            if st.get('unit') not in (None, 'char', 'line'):
+                problems.append('%s extract.unit 不认识：%r（可用 char/line）' % (_p, st.get('unit')))
+        elif op == 'filter' and isinstance(st.get('filters'), dict):
+            try:
+                compile_filters(conn, st['filters'])
+            except ValueError as e:
+                problems.append('%s 的 filters 无法编译：%s' % (_p, e))
+            except Exception as e:                               # noqa: BLE001
+                problems.append('%s 的 filters 编译异常：%s: %s' % (_p, type(e).__name__, e))
+        elif op == 'retrieve':
+            if st.get('mode') not in ('vector', 'fts'):
+                problems.append('%s 步骤 retrieve 的 mode 需为 vector/fts：%r'
+                                % (_p, st.get('mode')))
+            tk = st.get('topk')
+            if tk is not None and not (isinstance(tk, int) and tk >= 1):
+                problems.append('%s 步骤 retrieve 的 topk 需 ≥1 的整数' % _p)
+        elif op in ('median', 'stddev') and st.get('of') is not None \
+                and st.get('of') not in _sort_fields:
+            problems.append('%s 的 of 不在数值字段白名单：%r' % (_p, st.get('of')))
     for r in (plan.get('retrieve') or []):
-        if (r or {}).get('mode') not in RETRIEVE_MODES:
+        if not isinstance(r, dict) or r.get('mode') not in RETRIEVE_MODES:
             problems.append('未知召回模式：%r' % (r or {}).get('mode'))
+        # ★ 2026-10-09（第三轮审查 P1-16）：**计划级 retrieve 不支持 candidate_from**——
+        #   它在显式 steps 之前执行，此刻没有任何命名集可引用。显式拒绝，而不是收下后静默忽略；
+        #   「在某集合内召回」的正解是 steps 里的 retrieve 步骤（天然受当前帧约束）。
+        elif r.get('candidate_from'):
+            problems.append('计划级 retrieve 不支持 candidate_from（此刻无命名集可用）；'
+                            '请改用 steps 中的 retrieve 步骤（在当前集合内召回）')
+    # 旧的聚合指标检查（保留，与上面重复时只报一次也无害）
     for ag in [s for s in (plan.get('steps') or []) if (s or {}).get('op') == 'aggregate']:
         m = (ag.get('metric') or 'count')
-        if m not in AGG_METRICS:
+        if m not in AGG_METRICS and ('未知聚合指标：%r' % m) not in ' '.join(problems):
             problems.append('未知聚合指标：%r' % m)
     if strict:
         problems += _entity_check(plan, conn)
@@ -846,13 +918,14 @@ def selftest(conn):
                                   {'field': 'author', 'op': '=', 'value': '朱彝尊'}]}}]},
          "SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' "
          "AND p.author NOT IN ('纳兰性德','朱彝尊')"),
-        # 「清代（句中含月 或 含雪）且 字数不低于 50」——⚠ 输入写 `>`，期望 SQL 写 `>=`：
-        #   **比较口径归一**的原地验证（NL001/NL002：『高于/超过』= `>=`；见 normalize_ops）。
+        # 「清代（句中含月 或 含雪）且 字数>50」——⚠ 第三轮审查 P0-6 后：编译器**严格执行**
+        #   既定算子（不再全局改写）；「高于/超过」的归一由 `normalize_ops` 在**计划层按措辞**
+        #   完成（见 op_truth_check 的措辞与边界用例）。
         ({'and': [{'field': 'dynasty', 'op': '=', 'value': '清'},
                   {'or': [{'field': 'lines.text', 'op': 'contains', 'value': '月'},
                           {'field': 'lines.text', 'op': 'contains', 'value': '雪'}]},
                   {'field': 'han_len', 'op': '>', 'value': 50}]},
-         "SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.han_len>=50 AND "
+         "SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.han_len>50 AND "
          "(p.pid IN (SELECT pid FROM lines WHERE text LIKE '%月%') OR "
          " p.pid IN (SELECT pid FROM lines WHERE text LIKE '%雪%'))"),
         # 「清 且 不是 临江仙」（NOT 单叶）

@@ -1140,3 +1140,69 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
 - **状态**：✅ 已修。零回归：selftest 235/0 ｜ test_api 150/0 ｜ qa_eval 34/37（同基线）｜
   nl_benchmark 20/40（零回退）｜ 双集哈希逐字节不变 ｜ fixture_gate 6/6 ｜
   plan_exec/queryplan/planner 自检全过 ｜ 文学基准 8/8（含波动说明）。
+
+---
+
+## D41 ✅ 已修（2026-10-09 深夜·第四轮）：《关键核心现状》20 项（P0-1~6 / P1-7~20）逐项落地 + 输入框 bug
+
+> 依据：`D:/桌面/关键核心现状.txt`（针对上轮提交 `206f4c2` 的二次深审）。**20 项全部核实并处置**，
+> 另修主人实测的「输入框不清空」bug。命令与数字见 `外部审查处置表.md` §十三。
+
+### 一、P0 六项（消除错误答案）
+
+1. **P0-1 否定算子**：`_leaf_one`/`_leaf_exists_lines`/`_leaf_title`/`_leaf_tail_pz` 原先
+   **无视 `op`**（`not_in`/`!=` 被编译成正向匹配，语义相反）。现全部按 op 分派（否定→`NOT IN`）；
+   新增 `tools/op_truth_check.py`：**30 个字段×算子组合 + 边界值 + 嵌套布尔**，与**手写独立 SQL**
+   逐篇对拍（**36 项全过**）——这正是审查要的"每个允许组合独立真值"。
+2. **P0-2 召回失败语义**：`_retrieve` 召回为空/不可用时，**不再 `return f`（原 SQL 候选集）**——
+   改为空帧 + `EXECUTION_FAILED`，由上层回落既有链并报告原因。
+3. **P0-3 步骤失败继续作答**：`Executor` 新增 `failed_steps`；关键步骤（filter/sort/group/aggregate/
+   extract/retrieve/similar_to/pair/locate/未知算子）失败 → `state=EXECUTION_FAILED`；
+   `_answer_by_plan` 见 FAILED 即回落。返回体带结构化 `state`（EXECUTION_OK/PARTIAL/FAILED）。
+4. **P0-4 护栏异常当通过**：`_answer_by_plan` 里 `guard.verify` 异常不再 `_g_ok=True`——
+   改为**未校验=失败**（并如实标注），整案不得显示"通过"。
+5. **P0-5 多轮丢条件**：`_seed` 的 `prev_result` 分支现在把根级 `filters` 与上一轮结果集**求交**
+   （实测「清·临江仙 418 篇 ∩ ze≥50 → 4 篇」，独立复算一致）。
+6. **P0-6 归一过度**：`>`/`<` 不再无条件归一——`normalize_ops` 改为**措辞驱动**（含
+   "至少/不少于/高于/超过/多于/以上"才归 ≥；"严格/恰好"或无所依据则保留）；编译器
+   `_leaf_num` 只严格执行既定 op；补 `between` 闭区间编译（原实现缺失）。
+
+### 二、P1 执行与校验契约
+
+- **P1-7**：`validate` 升级为**参数级**（sort.by 白名单 / limit.n 正整数 / group_by 维度 /
+  extract.sent/pos/unit / aggregate 指标 / 步骤 filters 可编译 / median.of 白名单）；
+- **P1-8**：`Frame` 加 `label`/`group_field` 自述；渲染按标签出文案（scalar 不再一律"共 N 篇"）；
+  分组文案用真实字段、聚合沿用上一分组字段、`_numeric_values` 不静默回退 ze_ratio、limit 边界；
+- **P1-9**：`_op_locate`（继承当前帧 + 真向量兜底）、`_op_pair`（带 ctx_pids）、
+  `_op_similar_to`（restrict 空集保持空，不再退化为全库）；
+- **P1-10**：`_op_project` 集合→逐篇投影（不再静默取首篇）；`_op_extract` 统一"汉字序号"
+  口径 + 多候选如实披露。
+
+### 三、结果校验以「实际计划」为真源
+
+- **P0-11**：规划路**自算** `set_check`（以 `to_spec(plan)` 复算，非 legacy spec）；语义召回强制
+  `SEMANTIC_NOT_EXHAUSTIVE`；`semantic_used` 字段回传。
+- **P0-12**：`_store_turn` 语义轮 `full=None`（不把硬条件全集存成精确集）。
+- **P1-13**：`_read_request_of` **统一判定**（content/开放/未理解三类）供两条主链共用；
+  规划路全文证据 + `parts`/`content_full` 一并传给 `read_content`；guard 引文池补材料展示词形。
+- **P1-20**：规则路 vs 计划路对照升级为**结构化**（field,op,值 三重集差，非仅字段名）。
+
+### 四、索引与测试体系
+
+- **P1-14**：`vector_index.coverage(conn)`——篇级/句级、按朝代（清/宋/元）覆盖与缺口；启动即报告。
+- **P1-15**：启动报告**索引指纹 vs 当前库指纹**是否一致（不一致告警要求重建）。
+- **P1-16**：`candidate_from` 计划级显式拒绝；新增 `retrieve` **步骤算子**（在步骤序中受当前帧约束，
+  这才是"先筛再召回"的正解）。
+- **P1-17**：nl_benchmark plan 模式**只看 plan 字段**（不再与规则路字段合并）。
+- **P1-18**：nl_benchmark 无真实 plan 的用例标 `skipped_plan`、不计入成绩。
+- **P1-19**：lit_benchmark 引文池**只取实际返回的证据块**（不放预期作品全文）；主题检索新增
+  **召回相关性**检查（人工标注锚点作品，按 `retrieved_pids` 全集判命中）。
+- **P1-13 补**：规划路开启时 serve 侧**始终建 LLM 句柄**（否则语义题默认参数下 client=None → 静默回落）。
+
+### 五、前端 bug（主人实测）
+
+- **输入框不清空**：`AskView.vue` 的 `go()` 提交后 `q.value=''`；`newSession/switchSession` 亦清空。
+
+- **状态**：✅ 已修。零回归：selftest 235/0 ｜ test_api 150/0 ｜ op_truth 36/0 ｜ qa_eval 34/37（同基线）｜
+  nl_benchmark 20/40（零回退）｜ 双集哈希逐字节不变 ｜ 前端六门禁全绿 ｜ 文学基准 8/8 ｜
+  真服务 HTTP 终验：语义题走 plan+非穷尽+召回报告、精确题 59、内容题解读段。

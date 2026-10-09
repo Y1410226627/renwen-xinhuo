@@ -156,6 +156,57 @@ def info():
     }
 
 
+def coverage(conn=None):
+    """**索引覆盖率**（第三轮审查 P1-14）：篇级/句级各覆盖多少、按朝代分、缺多少。
+
+    ⚠ 「索引可用」≠「语料全覆盖」——本函数把覆盖做成**可观测指标**：
+      · `poems.indexed / poems.total`：篇级索引条数 vs 语料总篇数；
+      · `poems.by_dynasty`：每朝代的 {indexed, total}（清/宋/元）；
+      · `lines.indexed / lines.total`：句级索引条数 vs 语料总句数；
+      · 任一缺口即 `complete=False`，并列出 `notes`（哪一代/哪层缺）。
+    `conn` 为 None 时只报**索引侧**的条数（无法对拍语料总数），`complete` 记 None。
+    """
+    mf = _STATE.get('manifest') or {}
+    pm, lm = list(_STATE['poem_meta']), list(_STATE['line_meta'])
+    out = {
+        'indexed_poems': len(pm), 'indexed_lines': len(lm),
+        'total_poems': None, 'total_lines': None,
+        'by_dynasty': {}, 'complete': None, 'notes': [],
+    }
+    if not _STATE['ok']:
+        out['notes'].append('索引不可用（%s）' % why())
+    if conn is not None:
+        try:
+            out['total_poems'] = conn.execute('SELECT COUNT(*) FROM poems').fetchone()[0]
+            out['total_lines'] = conn.execute('SELECT COUNT(*) FROM lines').fetchone()[0]
+            _dyn = dict((r[0], r[1]) for r in conn.execute(
+                'SELECT dynasty, COUNT(*) FROM poems GROUP BY dynasty'))
+            _idx_dyn = {}
+            for m in pm:
+                _pid = m.get('pid') if isinstance(m, dict) else getattr(m, 'pid', '')
+                # pid 形如 ci.清.xxx / ci.宋.xxx / ci.元.xxx —— 第二段即朝代
+                try:
+                    _d = _pid.split('.')[1]
+                except IndexError:
+                    _d = '?'
+                _idx_dyn[_d] = _idx_dyn.get(_d, 0) + 1
+            for d, tot in _dyn.items():
+                out['by_dynasty'][d] = {'indexed': _idx_dyn.get(d, 0), 'total': tot}
+                if _idx_dyn.get(d, 0) < tot:
+                    out['notes'].append('%s 篇级缺 %d/%d' % (d, tot - _idx_dyn.get(d, 0), tot))
+            out['complete'] = (len(pm) >= out['total_poems']
+                               and len(lm) >= out['total_lines'])
+            if len(pm) < out['total_poems']:
+                out['notes'].append('篇级覆盖 %d/%d（缺 %d）'
+                                    % (len(pm), out['total_poems'], out['total_poems'] - len(pm)))
+            if len(lm) < out['total_lines']:
+                out['notes'].append('句级覆盖 %d/%d（缺 %d）'
+                                    % (len(lm), out['total_lines'], out['total_lines'] - len(lm)))
+        except Exception as e:                                   # noqa: BLE001
+            out['notes'].append('覆盖率对拍失败：%r' % e)
+    return out
+
+
 def _load():
     try:
         import faiss

@@ -98,6 +98,30 @@ _ASK_SCAFFOLD = ('这句话', '这一句', '这句', '那句话', '那一句', '
                  '这个字', '这个词', '这首诗', '这一首', '这首词', '这首诗的')
 
 
+def _read_request_of(question, spec=None):
+    """「是否需要文意解读」的**统一判定**（legacy 与规划路共用；第三轮审查 P1-13）。
+
+    返回 `(content_full, parts)`：
+      · `content_full=True`：用户整体在问内容/情感（→「内容解读」任务）；
+      · `parts=[…]`：开放提问（有什么作用/有何特点…）+ 未理解片段（→「逐条回应」任务）；
+      · 两者可同时给出（先解读内容、再逐条回应）。
+    两路共用同一函数——避免"服务端建了 LLM 实例、某条链却根本没调用"的漂移
+    （审查原话：「不能只在服务端创建 LLM 实例，却没有在执行链里真正使用它」）。
+    """
+    content = bool(retrieve.content_ask_of(question)) or bool(
+        spec is not None and getattr(spec, 'content_ask', False))
+    parts = list(retrieve.open_ask_of(question))
+    if spec is not None:
+        parts += list(getattr(spec, 'open_ask', None) or [])
+        parts += list(getattr(spec, 'unparsed', None) or [])
+    _seen, _uniq = set(), []
+    for x in parts:
+        if x and x not in _seen:
+            _seen.add(x)
+            _uniq.append(x)
+    return content, _uniq
+
+
 def _no_hard_condition(spec):
     """是否**没有任何**可检索的形式条件（朝代/词人/词牌/声情/声律/句脚/数值区间/句级算子）。
 
@@ -1222,13 +1246,13 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     if not _ok:
         return _fail('计划未通过校验：%s'
                      % ('；'.join(str(x) for x in (_pb or [])[:3]) or '未注明'))
-    # ★ 2026-10-09（第三轮审查 P0 实测驱动）：**比较口径归一**（`>`→`>=`、`<`→`<=`）。
-    #   大模型把「高于45%」自然译成 `>`，原样执行会少算（实测 27 vs 真值 59——审查点名的
-    #   规划路反向回归根因）。依据：NL001/NL002 的 truth_sql 为 `ze_ratio>=45`。
-    _op_norm = QP.normalize_ops(pl.get('filters') or {})
+    # ★ 2026-10-09（第三轮审查 P0-6 修订）：**比较口径按措辞归一**（`>`→`>=`、`<`→`<=`）
+    #   ——仅当问句用「至少/不少于/高于/超过/多于/以上」等**含界措辞**（NL001 口径）；
+    #   含「严格/恰好」或无依据时保留原算子。编译器不再做任何全域改写。
+    _op_norm = QP.normalize_ops(pl.get('filters') or {}, question)
     for _st in (pl.get('steps') or []):
         if isinstance(_st, dict) and isinstance(_st.get('filters'), dict):
-            _op_norm += QP.normalize_ops(_st['filters'])
+            _op_norm += QP.normalize_ops(_st['filters'], question)
     # 上一轮结果集：优先服务端会话，其次前端 ctx_pids
     if (pl.get('scope') or {}).get('base') != 'prev_result':
         _p = list(ctx_pids or [])
@@ -1249,6 +1273,11 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     if not res or res.get('frame') is None:
         return _fail('执行器未产出结果帧%s' % (
             ('：' + '；'.join(res.get('problems') or [])[:120]) if res else ''))
+    # ★ 2026-10-09（第三轮审查 P0-3）：执行器**结构化状态**——关键步骤失败（含「语义召回
+    #   未完成」）一律不得产出「已满足条件」式答案 → 回落既有链（route 报告具体原因）。
+    if (res.get('state') or 'EXECUTION_OK') == 'EXECUTION_FAILED':
+        return _fail('执行器关键步骤失败：%s'
+                     % ('；'.join((res.get('problems') or [])[:3]) or '未注明'))
     f = res['frame']
     _probs = list(res.get('problems') or [])
     _dropped = list(pl.get('_dropped') or [])
@@ -1286,14 +1315,36 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     try:
         import queryplan as _QP
         _rpl = _QP.to_plan(retrieve.parse_query(conn, question))
-        _rf = set(_QP._filter_fields(_rpl.get('filters') or {}))
-        _pf = set(_QP._filter_fields(pl.get('filters') or {}))
-        _only_rule, _only_plan = sorted(_rf - _pf), sorted(_pf - _rf)
+        # ★ 2026-10-09（第三轮审查 P1-20）：**结构化对账**（不只比字段名）——把两路
+        #   过滤树都规整成 (field, op, 归一值) 的多重集，比较**值**与**算子**的差异
+        #   （旧版只比 `_filter_fields` 的字段集合，`ze_ratio>=45` vs `ze_ratio>=55`
+        #   会被当成"相同字段"漏报）。
+        def _flatten(node):
+            out = []
+            if not isinstance(node, dict):
+                return out
+            if 'and' in node or 'or' in node:
+                for c in (node.get('and') or node.get('or') or []):
+                    out += _flatten(c)
+            elif 'not' in node:
+                out += _flatten(node['not'])
+            elif 'field' in node:
+                v = node.get('value')
+                if isinstance(v, list):
+                    v = tuple(sorted(str(x) for x in v))
+                out.append((node.get('field'), node.get('op'), str(v)))
+            return out
+        _f_rule = _flatten(_rpl.get('filters') or {})
+        _f_plan = _flatten(pl.get('filters') or {})
+        _only_rule = sorted(set(_f_rule) - set(_f_plan))
+        _only_plan = sorted(set(_f_plan) - set(_f_rule))
         if _only_rule:
-            _notes.append('规则路另识别到条件 %s（本轮**未并入执行**，仅披露；'
-                          '合并策略见 DECISIONS.md D27）' % '、'.join(_only_rule))
+            _notes.append('规则路识别到、计划路**缺失或不同**的条件 %s（本轮**未并入执行**，'
+                          '仅披露；是否重新规划见 DECISIONS.md D27）'
+                          % '、'.join('%s%s%s' % x for x in _only_rule))
         if _only_plan:
-            _notes.append('本计划比规则路多出条件 %s' % '、'.join(_only_plan))
+            _notes.append('本计划比规则路多出的条件 %s'
+                          % '、'.join('%s%s%s' % x for x in _only_plan))
     except Exception:                                        # noqa: BLE001
         pass
 
@@ -1304,27 +1355,48 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     #   实际上从未真正执行**；「文意解读」材料也因此拿不到原文。现改用与既有链**同源**的
     #   `evidence.build_blocks`（同字段口径、带 eid 与逐句原文）；内容/情感类问题给全文
     #   （`with_lines=9999` → 按原序给全篇，见 `evidence.poem_block` 的全文分支）。
+    # ★ 2026-10-09（第三轮审查 P1-13）：全文证据与「文意解读」的判据**统一**——
+    #   内容/情感、开放提问、未理解片段任一命中即给全文（旧版只认 content_ask）。
+    _c_full_pr, _open_parts_pr = _read_request_of(question)
     try:
         if f.kind in ('set', 'single'):
             _rows = [{'pid': p} for p in f.pids[:topk]]
-            _wl = 9999 if retrieve.content_ask_of(question) else 1
+            _wl = 9999 if (_c_full_pr or _open_parts_pr) else 1
             blocks = evidence.build_blocks(conn, _rows, with_lines=_wl)
         else:
             blocks = []
     except Exception:                                            # noqa: BLE001
         blocks = []
     if f.kind == 'scalar':
-        text = '共 %s 篇。' % f.value
+        # ★ 2026-10-09（第三轮审查 P1-8①）：按帧的**语义标签**渲染——
+        #   count → 「共 N 篇」；median/stddev 等 → 「中位数（字数）：X」
+        #   （旧版把所有 scalar 都写成"共 N 篇"）。
+        _lab = getattr(f, 'label', None) or '数值'
+        text = ('共 %s 篇。' % f.value) if _lab == '篇数' else ('%s：%s。' % (_lab, f.value))
     elif f.kind == 'groups' and f.rows:
-        _r = f.rows[0]
+        # ★ 2026-10-09（第三轮审查 P1-8②④）：分组文案用**真实分组字段**；无显式排序时
+        #   按数值降序取"最前者"（确定性——不再被数据库返回顺序左右）。
+        _gf = getattr(f, 'group_field', None) or 'author'
+        _gcn = {'author': '作者', 'cipai': '词牌', 'dynasty': '朝代', 'scene': '声情',
+                'sent_n': '句数', 'source': '来源'}.get(_gf, _gf)
+        _rows_sorted = sorted(f.rows, key=lambda x: -(x.get('value', x.get('n', 0)) or 0))
+        _r = _rows_sorted[0]
         text = '按%s分组，%s为【%s】（%s）。' % (
-            '作者', '最多' if str((pl.get('steps') or [{}])[-1].get('dir') or 'desc') == 'desc' else '最少',
+            _gcn, '最多' if str((pl.get('steps') or [{}])[-1].get('dir') or 'desc') == 'desc' else '最少',
             _r.get('key'), _r.get('value', _r.get('n')))
     elif f.kind == 'rows' and f.rows:
         _r = f.rows[0]
-        text = ('第%s句%s：【%s】' % (_r.get('sent'), '第%s字' % _r.get('pos')
-                                   if _r.get('unit') == 'char' else '整句', _r.get('value'))
-                if _r.get('unit') else json.dumps(_r, ensure_ascii=False))
+        if _r.get('unit'):
+            text = '第%s句%s：【%s】' % (_r.get('sent'), '第%s字' % _r.get('pos')
+                                       if _r.get('unit') == 'char' else '整句', _r.get('value'))
+        elif any(k in _r for k in ('author', 'cipai', 'title')):
+            # ★ 2026-10-09（第三轮审查 P1-10）：project 逐篇投影——把**多行**都如实列出
+            #   （旧版只渲染首行的 json；集合投影后等于把其余篇目丢掉了）。
+            _brief = '；'.join('、'.join('%s=%s' % (k, v) for k, v in list(d.items())[:4])
+                              for d in f.rows[:5])
+            text = '共 %d 篇：%s%s' % (len(f.rows), _brief, '…（更多略）' if len(f.rows) > 5 else '')
+        else:
+            text = json.dumps(_r, ensure_ascii=False)
     elif blocks:
         _b0 = blocks[0]
         text = ('满足条件共 %d 篇，最前者为%s《%s》。'
@@ -1349,11 +1421,12 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     #   不过即静默跳过）。与既有链（`_answer_output`）走**同一条生成通道**，不另造生成任务。
     _cread = None
     if (llm is not None and getattr(llm, 'available', lambda: False)() and blocks
-            and retrieve.content_ask_of(question)):
+            and (_c_full_pr or _open_parts_pr)):
         try:
             _rd = gen.read_content(
                 llm, {'question': question, 'spec': QP.render(pl), 'blocks': blocks},
-                kind or '数值型', BOUNDARIES.get(kind or '数值型', ''))
+                kind or '数值型', BOUNDARIES.get(kind or '数值型', ''),
+                parts=(_open_parts_pr or None), content_full=_c_full_pr)
             if _rd.get('ok'):
                 _t2 = (text + '\n【文意解读（大模型 %s 基于原文写成，非事实结论）】\n%s'
                        % (_rd['model'], _rd['text']))
@@ -1370,6 +1443,40 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
         except Exception as e:                                   # noqa: BLE001
             _cread = {'ok': False, 'model': '—', 'text': '',
                       'problems': ['生成通道异常：%r' % e]}
+    # ★ 2026-10-09（第三轮审查 P0-11）：**以实际计划为真源**做集合身份校验——
+    #   旧版由 serve 侧用另一套规则（legacy spec）重新解释后再宣布"精确"，两者不保证同源；
+    #   混合题（先硬条件、再语义召回）更不能因为"候选都满足硬条件"就归成精确。
+    _sem_used = any((x.get('mode') in ('vector', 'fts') and x.get('executed'))
+                    for x in _rr)
+    _set_check = None
+    if _sem_used:
+        _set_check = {
+            'ok': None, 'checked': True, 'status': 'SEMANTIC_NOT_EXHAUSTIVE',
+            'status_text': '本轮含**语义召回**（%s）——非穷尽：候选集不等于「全部符合主题的作品」。'
+                           % '、'.join('%s %d 篇' % (x.get('mode'), x.get('n', 0))
+                                       for x in _rr if x.get('mode') in ('vector', 'fts')),
+            'agg_status': 'NOT_EXECUTED', 'reason': '按实际计划：语义召回路径（非穷尽）'}
+    elif f.kind in ('set', 'single'):
+        try:
+            import answer_verify as AVERIFY
+            _spec_pl = QP.to_spec(pl, conn)
+            _hit = AVERIFY.hit_pids(conn, _spec_pl)
+            if _hit is not None:
+                _hitset = set(_hit)
+                _extra = [p for p in f.pids if p not in _hitset]
+                _set_check = {
+                    'ok': not _extra, 'checked': True,
+                    'status': 'VERIFIED_DERIVED' if not _extra else 'FAILED',
+                    'status_text': ('按**实际计划**的过滤树独立复算：条件命中 %d 篇，展示 %d 篇%s'
+                                    % (len(_hit), len(f.pids),
+                                       '（全部落在复算集内）' if not _extra
+                                       else '——%d 篇不在复算集内（FAILED）' % len(_extra))),
+                    'extra': _extra[:8], 'missing': [],
+                    'agg_status': 'NOT_EXECUTED', 'reason': '按实际计划（Planner→Plan）复算'}
+        except Exception as e:                                   # noqa: BLE001
+            _set_check = {'ok': None, 'checked': False, 'status': 'NOT_CHECKED',
+                          'status_text': '集合校验未执行（未验证）',
+                          'agg_status': 'NOT_EXECUTED', 'reason': '按计划复算失败：%r' % e}
     return {
         'question': question, 'kind': kind or '规划式检索',
         'spec': QP.render(pl), 'blocks': blocks,
@@ -1386,6 +1493,9 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
         'plan_seconds': res.get('seconds'),
         'retrieve_report': _rr,
         'content_read': _cread,
+        'set_check': _set_check,
+        'semantic_used': bool(_sem_used),
+        'retrieved_pids': list(f.pids[:200]) if _sem_used else None,
     }
 
 
@@ -2595,11 +2705,10 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
     #   通道——大模型基于**原文**作答（标注非事实结论、过四道护栏、不过即静默跳过）。
     #   主人原话：「大模型能理解、原材料在数据中能找到的问题，你都应该给我答出来」。
     #   触发条件要求**有命中篇目**（没有材料可解读，不空跑模型）。
-    # 开放提问（「有什么作用 / 有何特点 …」）与未理解片段合流，逐条交给生成层回应。
-    _open_parts = (list(getattr(spec, 'open_ask', None) or [])
-                   + list(getattr(spec, 'unparsed', None) or []))
-    _need_read = _llm_live and bool(blocks) and (
-        bool(getattr(spec, 'content_ask', False)) or bool(_open_parts))
+    # ★ 2026-10-09（第三轮审查 P1-13）：**统一判定**（与既有链共用 `_read_request_of`）
+    #   ——内容/情感、开放提问、未理解片段三类都触发；`parts` 与 `content_full` 一并传给生成层。
+    _c_full, _open_parts = _read_request_of(question, spec)
+    _need_read = _llm_live and bool(blocks) and bool(_c_full or _open_parts)
     if (narrate or argument or _need_read) and _llm_live and on_engine is not None:
         # 「答案先到」：主检索路的确定性结论（含证据块与护栏结论）此刻已算完，
         # 先如实发给前端；生成段随后边写边补（实测省 1~5 秒干等）。
@@ -2620,7 +2729,7 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
                 llm, {'question': question, 'spec': spec.describe(), 'blocks': blocks},
                 kind, BOUNDARIES[kind],
                 parts=(_open_parts or None),
-                content_full=bool(getattr(spec, 'content_ask', False)),
+                content_full=_c_full,
                 on_delta=on_delta)
             if _read.get('ok'):
                 _t2 = text + '\n【文意解读（大模型 %s 基于原文写成，非事实结论）】\n%s' % (
