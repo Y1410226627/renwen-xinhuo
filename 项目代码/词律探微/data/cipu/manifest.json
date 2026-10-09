@@ -1,0 +1,650 @@
+{
+  "acquired_on": "2026-10-04",
+  "upstream_commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+  "files": [
+    {
+      "file": "LICENSE",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/LICENSE",
+      "status": "ok",
+      "sha256": "ef491c3e5f26d2804bea8157dba4d72ebe7b0ecdb75c0897e0d0b93d738db19a",
+      "bytes": 1063,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "ci_index.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+      "status": "ok",
+      "sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d",
+      "bytes": 442685,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_67.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_67.json",
+      "status": "ok",
+      "sha256": "57eb230e20747f6674296f18f66346087141011c71ff72ef07981e96e97c96dc",
+      "bytes": 6933,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_67_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_67_long.json",
+      "status": "ok",
+      "sha256": "75d3457c873fb5d401a873a1d4b0d4461abf51576cb5542f263da14a20962379",
+      "bytes": 1407,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-67.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=67",
+      "status": "ok",
+      "sha256": "72d7910bf71b72564395183dbaa45a431c1d9cd99d9752835fb97ccfb51cdb23",
+      "bytes": 69680,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_96.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_96.json",
+      "status": "ok",
+      "sha256": "271049349766376ebf0be779783aa00f541eca3f2222486e07d20e9191379604",
+      "bytes": 6556,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_96_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_96_long.json",
+      "status": "ok",
+      "sha256": "541dd9196e9b5283160fdd9ac56cab6256f39eb4f265a91bf6e3526cc0533dde",
+      "bytes": 1280,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-96.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=96",
+      "status": "ok",
+      "sha256": "b346fa2ef532ac1b2ebf4530a9c9d7586975a324691740de1e12312fd729c6b2",
+      "bytes": 72148,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_262.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_262.json",
+      "status": "ok",
+      "sha256": "abe93442cfe96903c26d2b72614c9abe1d81aa88aa450a6fa305f259e141b44d",
+      "bytes": 4748,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_262_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_262_long.json",
+      "status": "ok",
+      "sha256": "e90d0fd32f43effe23f75810b853dc580b9816b4fd889cb15cca16af7a8a44df",
+      "bytes": 3189,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-262.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=262",
+      "status": "ok",
+      "sha256": "0a99c89833e8d0c6f1e9413a7493dd00968736071a4d9a2d61898825a33dd82f",
+      "bytes": 51089,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_273.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_273.json",
+      "status": "ok",
+      "sha256": "515cf6c98de94dc7f28b349cc32ef42433a81d68049ad30c12a3232798b82c26",
+      "bytes": 6281,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_273_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_273_long.json",
+      "status": "unavailable",
+      "error": "curl: (22) The requested URL returned error: 404",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-273.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=273",
+      "status": "ok",
+      "sha256": "f3cb206b6a5f3b8715c038b032250d2cc527299fe77420d2bc2fd62e7bfd4e9b",
+      "bytes": 73736,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_57.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_57.json",
+      "status": "ok",
+      "sha256": "5078e93b97b41cf7dee8779cf5bbabc74ba7373b5817e815e57a75649fde6238",
+      "bytes": 8214,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_57_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_57_long.json",
+      "status": "ok",
+      "sha256": "6bf8ebe0e0aab81873c0239424a9f5eb9f260342fca4cfd64d33d4e4e291cfd2",
+      "bytes": 1222,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-57.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=57",
+      "status": "ok",
+      "sha256": "b4c3704d966ee66b2b8680f95cef98fbf42520ea5d323df1a17383eb8c957f8e",
+      "bytes": 73621,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_126.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_126.json",
+      "status": "ok",
+      "sha256": "6a485d195b443e854c695f0bac23dd262c30f545c93ecb5a30fc69477f43dcc5",
+      "bytes": 4564,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_126_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_126_long.json",
+      "status": "ok",
+      "sha256": "a3068c5ef163850982eed0bfcf34a98e46a4f15d2037d16c7c6462dfd49f510d",
+      "bytes": 1532,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-126.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=126",
+      "status": "ok",
+      "sha256": "45d8f0dc1ec7ba3f3f513c568589c28c380706b499add6a958e59be6457a0bc2",
+      "bytes": 69802,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_304.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_304.json",
+      "status": "ok",
+      "sha256": "ec9026bb136aa3b7712ecca44409a25877095876e53ae662ddc8238be702bcee",
+      "bytes": 5377,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_304_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_304_long.json",
+      "status": "ok",
+      "sha256": "ddd3692e435b9026f09779692f88473a9795f7335c96c73165126b959ac54779",
+      "bytes": 1793,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-304.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=304",
+      "status": "ok",
+      "sha256": "fd1e0e09a0db91f2a3c0b688215210d779b03b222476be74865be839a41c5616",
+      "bytes": 81370,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_246.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_246.json",
+      "status": "ok",
+      "sha256": "0ade8cd4cc3dd8f24dda19f43dcd90e81020d1fb21bb26d3e0b940277f0fd664",
+      "bytes": 18160,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_246_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_246_long.json",
+      "status": "ok",
+      "sha256": "07d314f6205668c28e25575f6ed725eeeb090afdcfcba031bc49e345a48c9c52",
+      "bytes": 6600,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-246.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=246",
+      "status": "ok",
+      "sha256": "8f9ea70ac3e059ffcd1da71464a9c397b81dab9ad7acd475deea6e54b9784c4b",
+      "bytes": 89337,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_271.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_271.json",
+      "status": "ok",
+      "sha256": "62718762f7fad49b6637dc00a122bbc38cc52f29b4802cb7ebd9b37d41570437",
+      "bytes": 13286,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_271_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_271_long.json",
+      "status": "ok",
+      "sha256": "7ac8e612f3c9635255af5b76bcac8076f196ff9e8896961234b3af239e1c38e8",
+      "bytes": 3838,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-271.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=271",
+      "status": "ok",
+      "sha256": "80b00972a91ae9397af34621a94de2cb3db5b9083aab472de051060cdac2decd",
+      "bytes": 85931,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_268.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_268.json",
+      "status": "ok",
+      "sha256": "69997be3f25f53522d938efdc8a48cad2e2dfbbc42a7a7f56420078aca1253d3",
+      "bytes": 1576,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_268_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_268_long.json",
+      "status": "ok",
+      "sha256": "ca3d992be87589c089f8554ccee5a1e7da4e00f70e74e5a7e23325529bdf5d61",
+      "bytes": 1576,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-268.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=268",
+      "status": "ok",
+      "sha256": "31fed063ecaeeb8acf398a50eda4efe159f40b9e828d22c7d86e6420b20e4c8d",
+      "bytes": 73020,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_247.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_247.json",
+      "status": "ok",
+      "sha256": "f364cb0640d2855757b05c8bc49b2ac4a2f93bf23b6418ec2fcdacd2614deea8",
+      "bytes": 10140,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_247_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_247_long.json",
+      "status": "ok",
+      "sha256": "db0e1fdf7f74971d4df8ee5cf275d0b3954486ac57ed23754e188d70f586d9d5",
+      "bytes": 1701,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-247.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=247",
+      "status": "ok",
+      "sha256": "acfc22b5b22e1c107474f33b14dd8439104330a6676cd8d73e5030302ed66c56",
+      "bytes": 85391,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_110.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_110.json",
+      "status": "ok",
+      "sha256": "697f39fe1f3e2ed714cc081b7a1a58a2f40ada2a35a611c254d1522522b7bdfc",
+      "bytes": 9449,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_110_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_110_long.json",
+      "status": "ok",
+      "sha256": "4dc490247992cd2c3c550122431d65648b9a26cc5014b8b067d8d2fe77f4691e",
+      "bytes": 2551,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-110.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=110",
+      "status": "ok",
+      "sha256": "f7a730fd696465c001d1184d6cabe4f8151beb2fe16432d9081f4d0dba2c5c10",
+      "bytes": 79978,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_105.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_105.json",
+      "status": "ok",
+      "sha256": "a0fb82f61b9644979269a4c96c82adbe59d83520076d7beac559be92f86556bb",
+      "bytes": 4788,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_105_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_105_long.json",
+      "status": "ok",
+      "sha256": "bc37b9a99e9e67841313e8c6d10c448bd4ef7a81af078a338dbb2d848336e5f5",
+      "bytes": 1648,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-105.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=105",
+      "status": "ok",
+      "sha256": "40e4ad582f84518b9bf1f29756e12dffde4eec193472fba0eda3bbd9c43fdc69",
+      "bytes": 83489,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_23.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_23.json",
+      "status": "ok",
+      "sha256": "407186839f1acc7e747f5a85f6f24ee01c6ea780ec006500198658b228d575de",
+      "bytes": 4379,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_23_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_23_long.json",
+      "status": "ok",
+      "sha256": "ee48f284ffbf945972b44ca9fb771c4938e903005bece2ad96bb250a360c88e7",
+      "bytes": 3410,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-23.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=23",
+      "status": "ok",
+      "sha256": "0f59434f5e0672bd9959ff7a09d597ce34e518416e0502d31f8348710edf8d03",
+      "bytes": 748831,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_109.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_109.json",
+      "status": "ok",
+      "sha256": "bafdfe17136ec855ea365e684ed566e2325626b3aa8006fa90bdde1aff0d2fe6",
+      "bytes": 3221,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_109_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_109_long.json",
+      "status": "ok",
+      "sha256": "1fdd6a0d6ded772e9914bf07bb803a31a80fc3139462a500deed40cfe03a580f",
+      "bytes": 1648,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-109.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=109",
+      "status": "ok",
+      "sha256": "fd5a7660804a6166246a0fdf8699b46562591d669b0e2165e3dc004b91a32c3d",
+      "bytes": 74471,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_28.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_28.json",
+      "status": "ok",
+      "sha256": "d02a5145934514075587f5ec3f825b93e0848e0a517a20dd55b465c71f5b655a",
+      "bytes": 13146,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_28_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_28_long.json",
+      "status": "ok",
+      "sha256": "c0e46600e2c8a6ebc0a0a7073b47d5f18c2da7edc538e9fe07770e875fdbaf3b",
+      "bytes": 5048,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-28.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=28",
+      "status": "ok",
+      "sha256": "6fbee5d0d63cc4aa2375895c9aac046a829c98f9afaac766ae7b75e739ff6114",
+      "bytes": 65449,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_295.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_295.json",
+      "status": "ok",
+      "sha256": "3b0de1d35bfbcc3c0a372b3caae5a33811b0721ecd1511a23ed64323ef522c89",
+      "bytes": 5485,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_295_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_295_long.json",
+      "status": "ok",
+      "sha256": "273f28b42406ae8eda8e56ce17ff7364c65217a1cc333a8f065376dffae54471",
+      "bytes": 3562,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-295.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=295",
+      "status": "ok",
+      "sha256": "637b38272f18a1ab8bd34e274956f60aeb8717d0cb8a968ca4b3bd4a55a25c1a",
+      "bytes": 75849,
+      "license": "public primary webpage; no blanket redistribution permission inferred",
+      "commit": null,
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_543.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_543.json",
+      "status": "ok",
+      "sha256": "a7600f9c8045b76ae24edddebe43e343fe5d0d5f21100fa8e7cfd1192e3628d2",
+      "bytes": 17422,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_543_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_543_long.json",
+      "status": "ok",
+      "sha256": "98e81cdd0e4e84175a0a4d705091bd42abd9ddd1e62bf97adfce21521c376510",
+      "bytes": 5025,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-543.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=543",
+      "status": "unavailable",
+      "error": "curl: (22) The requested URL returned error: 429\ncurl: (22) The requested URL returned error: 429",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_516.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_516.json",
+      "status": "ok",
+      "sha256": "851e1283588e513b09b1d79a213af8420ddef54b5b3b2fa9c95725523482075f",
+      "bytes": 20482,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_516_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_516_long.json",
+      "status": "ok",
+      "sha256": "6fb60cbb62122de5905017f02c7368a611ac982876e76dfed80919827d52029a",
+      "bytes": 8278,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-516.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=516",
+      "status": "unavailable",
+      "error": "curl: (22) The requested URL returned error: 429\ncurl: (22) The requested URL returned error: 429",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_614.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_list/cipai_614.json",
+      "status": "ok",
+      "sha256": "3c1669f2ad479c62655bf1f07ab273f2691836f1f819c2dbb22092230e9d6328",
+      "bytes": 30867,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "cipai_614_long.json",
+      "url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_long/cipai_614_long.json",
+      "status": "ok",
+      "sha256": "a85eceda54528021fc16e0230a1227027e5b66d067a2e67b7b91c83cd8127944",
+      "bytes": 7565,
+      "license": "MIT",
+      "commit": "1744e87f850c2205bc231bfdd858256036c0e4db",
+      "acquired_on": "2026-10-04"
+    },
+    {
+      "file": "souyun-614.html",
+      "url": "https://sou-yun.cn/QueryCiTune.aspx?id=614",
+      "status": "unavailable",
+      "error": "curl: (22) The requested URL returned error: 429\ncurl: (22) The requested URL returned error: 429",
+      "acquired_on": "2026-10-04"
+    }
+  ],
+  "summary": {
+    "canonical_tunes": 20,
+    "normalized_forms": 144,
+    "reference_review_status_counts": {
+      "passed": 104,
+      "pending": 39,
+      "failed": 1
+    },
+    "self_structure_checks_all_pass": true,
+    "primary_pages_received": 17,
+    "primary_pages_unavailable": 3,
+    "license_file": "raw/LICENSE",
+    "no_original_book_facsimiles_verified": true
+  },
+  "generated_outputs": [
+    {
+      "file": "normalized-rules.json",
+      "sha256": "9429eaa4809033ff4e1d7a971efaef8864ae294a04ffe1415d3351ebc181cdb3",
+      "bytes": 554911
+    },
+    {
+      "file": "tune-registry.json",
+      "sha256": "0bbb39f8c8eac511b40773acf54cdbe4b35ad508f6b9f0629a0c46c280c25396",
+      "bytes": 33001
+    },
+    {
+      "file": "verification-failures.json",
+      "sha256": "0cbf7606b56a3be52d9da30a26bb2d06d21b7ce3be7a0ce935cb0d1875c8316a",
+      "bytes": 164469
+    },
+    {
+      "file": "research_expansion.py",
+      "sha256": "aa4dd2c8e14c408b5ee8862efc80119dbe86e2994de0c0303df596d7b4b4d97c",
+      "bytes": 9918
+    }
+  ]
+}

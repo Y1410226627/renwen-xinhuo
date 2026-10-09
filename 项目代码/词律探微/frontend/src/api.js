@@ -82,6 +82,39 @@ export async function getJson(path, params) {
   });
 }
 
+/* ⚠ 2026-10-09 新增（研究库批次）：**写接口**（本项目首次引入 POST；见 DECISIONS D32）。
+ *   服务端约定（web/serve.py do_POST + solve/research.py）：
+ *     · 请求体 JSON（≤1 MB），成功回 `{ok:true, result:{…}}`，失败回 `{error:{code,message}}`；
+ *     · 所有写接口支持 `client_token` **幂等**——「同一次用户操作」复用同一个 token，
+ *       重复提交（刷新重发/网络重试）返回**第一次**的结果，不会记两遍；
+ *     · 写接口只在本地服务下可用（离线打开的页面仅作展示）。
+ *   `newToken()`：为「一次用户操作」生成幂等键（点击时生成一次，重试时复用）。 */
+export async function postJson(path, body) {
+  const b = base();
+  if (b === null) {
+    throw new Error('离线模式：研究库的写入功能需要本地服务（python web/serve.py）');
+  }
+  return withTimeout(ASK_TIMEOUT_MS, '接口 ' + path, async (signal) => {
+    const r = await fetch(b + path, {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    });
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* 解析失败按状态码报 */ }
+    if (!r.ok) {
+      const msg = (j && j.error && j.error.message) ? j.error.message : ('HTTP ' + r.status);
+      throw new Error('写接口 ' + path + ' 失败：' + msg);
+    }
+    return j;
+  });
+}
+
+export function newToken() {
+  return 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 export const api = {
   llm: () => getJson('/api/llm'),
   examples: () => getJson('/api/examples'),
@@ -96,6 +129,34 @@ export const api = {
   catalog: (top) => getJson('/api/catalog', { top }),
   /* 实体身份判定（2026-10-09 新增）：exact／ambiguous／unavailable + 近似提示。 */
   identify: (kind, text) => getJson('/api/identify', { kind, text }),
+
+  /* ─────────── 研究库（2026-10-09 新增；功能 1/6/7/8/9/11/12/13/15/18） ─────────── */
+  /* 文献摘录（功能 6，append-only）：列表 / 单条版本链。 */
+  materials: (all) => getJson('/api/materials', all ? { all: '1' } : {}),
+  material: (material_id) => getJson('/api/material', { material_id }),
+  /* 研究事实（功能 7）：可按 poem_pid / material_id 过滤。 */
+  facts: (opt) => getJson('/api/facts', opt || {}),
+  /* 个人录入（功能 12）：三态过滤 draft / material_sample / source_matched。 */
+  works: (state) => getJson('/api/works', state ? { state } : {}),
+  /* 批量导入批次对账（功能 13）。 */
+  importBatches: () => getJson('/api/import/batches'),
+  /* 冻结快照（功能 1）：列表 / 回查（回查**原文返回、不重算**，附「依赖已陈旧」标注）。 */
+  snapshots: (n) => getJson('/api/snapshots', { n }),
+  snapshot: (id) => getJson('/api/snapshots/' + encodeURIComponent(id)),
+  /* 研究库概况（各表行数）/ 决策事件（审计）。 */
+  researchSummary: () => getJson('/api/research/summary'),
+  decisions: (opt) => getJson('/api/research/decisions', opt || {}),
+  /* 读音裁定（功能 8）：候选 / 决策史。 */
+  pronCandidates: (pid, line, pos) => getJson('/api/pronounce/candidates', { pid, line, pos }),
+  pronDecisions: (pid) => getJson('/api/pronounce/decisions', { pid }),
+  /* 词谱对照（功能 9）：谱库列表 / 三行对照。 */
+  cipuList: () => getJson('/api/cipu/list'),
+  cipuCompare: (pid, opt) => getJson('/api/cipu/compare', Object.assign({ pid }, opt || {})),
+  /* 录入体检（功能 11，只读）。 */
+  intake: (title, cipai, content) => getJson('/api/intake', { title, cipai, content }),
+  /* 文本版本链 / 元数据修订史（功能 15）。 */
+  textVersions: (pid, scope) => getJson('/api/text_versions', { pid, scope }),
+  metaRevisions: (pid, scope) => getJson('/api/meta_revisions', { pid, scope }),
   /* SSE 流式问答：由调用方传入 onFrame(type, payload)；返回 Promise，deliver 完即 resolve。 */
   askStream(q, opt = {}, onFrame) {
     const b = base();
@@ -169,4 +230,22 @@ export const api = {
       throw e;
     }).finally(() => { if (timer) { clearTimeout(timer); } });
   }
+};
+
+/* 写接口助手（2026-10-09 新增）：与 `api` 分开导出——调用处一眼能看出「这是写操作」。
+ * 统一由调用方传 `client_token`（`newToken()` 生成），重复提交返回第一次的结果。 */
+export const post = {
+  material: (d) => postJson('/api/materials', d),
+  materialRevision: (d) => postJson('/api/material_revisions', d),
+  materialWithdraw: (d) => postJson('/api/materials/withdraw', d),
+  fact: (d) => postJson('/api/facts', d),
+  factWithdraw: (d) => postJson('/api/facts/withdraw', d),
+  pronDecide: (d) => postJson('/api/pronounce/decide', d),
+  pronWithdraw: (d) => postJson('/api/pronounce/withdraw', d),
+  work: (d) => postJson('/api/works', d),
+  workVerify: (d) => postJson('/api/works/verify', d),
+  importBatch: (d) => postJson('/api/import', d),
+  importRollback: (d) => postJson('/api/import/rollback', d),
+  textVersion: (d) => postJson('/api/text_versions', d),
+  metaRevision: (d) => postJson('/api/meta_revisions', d)
 };

@@ -43,10 +43,17 @@ solve/                        交付链（**答案的唯一来源**，不 import
     vector_index.py / llm_embed.py  真向量检索（SQLite 为真源、向量为派生索引）
     answer_verify.py 集合身份校验（五态）+ 聚合复算（三态）
     entity_resolve.py 实体解析层（作者/词牌/题名收口，替代 `rescue_*` 补丁链）
+    ── 研究库批次（2026-10-09；**默认零影响**，未使用即逐字节如旧）──
+    research.py    研究库（`data/research.db`）：摘录/事实/读音裁定/个人录入/导入批次/版本链/决策事件/幂等键
+    snapshot.py    冻结式问答快照（`data/snapshots/`；回查不重算 + 陈旧标注）
+    cipu.py        词谱对照（`data/cipu/` 144 体；三行对照；来源红线「搜韵公开转写（未核原书）」）
+    intake.py      录入体检（只读：题名当正文/句读/词牌体式匹配）
 
 web/   演示页与后端服务
-├── serve.py         本地服务：/api/* + 静态页；问答页取 web/dist/ask/，离线视图取 data/vue/
-├── test_api.py      服务端门禁（140 项）
+├── serve.py         本地服务：/api/*（含写接口 POST，见 接口文档 §3.4）+ 静态页；问答页取 web/dist/ask/，离线视图取 data/vue/
+├── test_api.py      服务端门禁（143 项）
+├── test_research.py 研究库门禁（89 项；功能 1/6/7/8/11/12/13/15/18）
+├── test_cipu.py     词谱门禁（23 项；功能 9）
 ├── build_views.py   生成离线视图**数据**（pack.js/graph.json/rev.js）+ 门禁用的 JSON
 ├── vmload.js        门禁共用的 vm 装载器（受控 require，加载 core 真源）
 ├── test_ui.js / test_render.js / verify_views.js   前端门禁

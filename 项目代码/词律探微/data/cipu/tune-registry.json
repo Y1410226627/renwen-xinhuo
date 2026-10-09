@@ -1,0 +1,997 @@
+[
+  {
+    "tune_index": 67,
+    "canonical_tune_name": "长相思",
+    "verified_aliases": [
+      "长相思"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "长相思",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=67].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 5
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 6,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 6,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=67",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "长相思",
+        "tune_index": 67,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 96,
+    "canonical_tune_name": "浣溪沙",
+    "verified_aliases": [
+      "浣溪沙"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "浣溪沙",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=96].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 5
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 6,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 6,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=96",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "浣溪沙",
+        "tune_index": 96,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 262,
+    "canonical_tune_name": "木兰花令",
+    "verified_aliases": [
+      "木兰花令",
+      "木兰花"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "木兰花令",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=262].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 3
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 2
+      }
+    },
+    "verified_form_count": 5,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 5,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=262",
+    "alias_ambiguity_notes": [
+      "木兰花/木兰花令名称存在谱书和时期差异，不能建立全局一对一替换。",
+      "262钦谱55/52/54字古体与273钦谱56字七言八句为不同规范条目，不以别名重复计数。",
+      "262龙谱格二为56字，句式与玉楼春全同，但原谱说明宫调可能不同；保留谱书/体式身份。"
+    ],
+    "alias_candidates": [
+      {
+        "alias": "木兰花令",
+        "tune_index": 262,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "木兰花",
+        "tune_index": 262,
+        "state": "context_dependent",
+        "source_ref": "raw/souyun-262.html",
+        "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=262",
+        "scope": "wood family; authority/form must be selected",
+        "support_kind": "primary tune description"
+      },
+      {
+        "alias": "木兰花令",
+        "tune_index": 273,
+        "state": "candidate",
+        "source_ref": "raw/souyun-262.html",
+        "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=262",
+        "scope": "56字七言八句仅可候选关联，不能认定全调相同",
+        "support_kind": "primary Longpu prose says pingze and sentence form identical to 玉楼春"
+      }
+    ]
+  },
+  {
+    "tune_index": 273,
+    "canonical_tune_name": "玉楼春",
+    "verified_aliases": [
+      "玉楼春",
+      "木兰花"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "玉楼春",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=273].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 4
+      },
+      "龙榆生词谱": {
+        "available": false,
+        "reason": "source file unavailable",
+        "http_observation": "curl: (22) The requested URL returned error: 404"
+      }
+    },
+    "verified_form_count": 4,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 4,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=273",
+    "alias_ambiguity_notes": [
+      "木兰花/木兰花令名称存在谱书和时期差异，不能建立全局一对一替换。",
+      "262钦谱55/52/54字古体与273钦谱56字七言八句为不同规范条目，不以别名重复计数。",
+      "262龙谱格二为56字，句式与玉楼春全同，但原谱说明宫调可能不同；保留谱书/体式身份。"
+    ],
+    "alias_candidates": [
+      {
+        "alias": "玉楼春",
+        "tune_index": 273,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "木兰花",
+        "tune_index": 273,
+        "state": "context_dependent",
+        "source_ref": "raw/souyun-273.html",
+        "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=273",
+        "scope": "wood family; authority/form must be selected",
+        "support_kind": "primary tune description"
+      },
+      {
+        "alias": "木兰花令",
+        "tune_index": 262,
+        "state": "candidate",
+        "source_ref": "raw/souyun-262.html",
+        "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=262",
+        "scope": "56字七言八句仅可候选关联，不能认定全调相同",
+        "support_kind": "primary Longpu prose says pingze and sentence form identical to 玉楼春"
+      }
+    ]
+  },
+  {
+    "tune_index": 57,
+    "canonical_tune_name": "如梦令",
+    "verified_aliases": [
+      "如梦令"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "如梦令",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=57].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 6
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 7,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 7,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=57",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "如梦令",
+        "tune_index": 57,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 126,
+    "canonical_tune_name": "清平乐",
+    "verified_aliases": [
+      "清平乐"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "清平乐",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=126].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 3
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 4,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 4,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=126",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "清平乐",
+        "tune_index": 126,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 304,
+    "canonical_tune_name": "蝶恋花",
+    "verified_aliases": [
+      "蝶恋花"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "蝶恋花",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=304].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 3
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 4,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 4,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=304",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "蝶恋花",
+        "tune_index": 304,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 246,
+    "canonical_tune_name": "临江仙",
+    "verified_aliases": [
+      "临江仙"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "临江仙",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=246].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 11
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 4
+      }
+    },
+    "verified_form_count": 14,
+    "unverified_form_count": 1,
+    "available_normalized_form_count": 15,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=246",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "临江仙",
+        "tune_index": 246,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 271,
+    "canonical_tune_name": "虞美人",
+    "verified_aliases": [
+      "虞美人"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "虞美人",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=271].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 7
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 2
+      }
+    },
+    "verified_form_count": 9,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 9,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=271",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "虞美人",
+        "tune_index": 271,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 268,
+    "canonical_tune_name": "鹧鸪天",
+    "verified_aliases": [
+      "鹧鸪天"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "鹧鸪天",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=268].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 1
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 2,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 2,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=268",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "鹧鸪天",
+        "tune_index": 268,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 247,
+    "canonical_tune_name": "浪淘沙令",
+    "verified_aliases": [
+      "浪淘沙令"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "浪淘沙令",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=247].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 6
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 7,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 7,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=247",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "浪淘沙令",
+        "tune_index": 247,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 110,
+    "canonical_tune_name": "卜算子",
+    "verified_aliases": [
+      "卜算子",
+      "缺月挂疏桐"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "卜算子",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=110].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "缺月挂疏桐",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=110].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 7
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 2
+      }
+    },
+    "verified_form_count": 8,
+    "unverified_form_count": 1,
+    "available_normalized_form_count": 9,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=110",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "卜算子",
+        "tune_index": 110,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "缺月挂疏桐",
+        "tune_index": 110,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 105,
+    "canonical_tune_name": "菩萨蛮",
+    "verified_aliases": [
+      "菩萨蛮",
+      "重叠金"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "菩萨蛮",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=105].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "重叠金",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=105].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 3
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 4,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 4,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=105",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "菩萨蛮",
+        "tune_index": 105,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "重叠金",
+        "tune_index": 105,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 23,
+    "canonical_tune_name": "忆江南",
+    "verified_aliases": [
+      "忆江南",
+      "江南好",
+      "望江南"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "忆江南",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=23].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "江南好",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=23].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "望江南",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=23].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 3
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 3
+      }
+    },
+    "verified_form_count": 5,
+    "unverified_form_count": 1,
+    "available_normalized_form_count": 6,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=23",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "忆江南",
+        "tune_index": 23,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "江南好",
+        "tune_index": 23,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "望江南",
+        "tune_index": 23,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 109,
+    "canonical_tune_name": "减字木兰花",
+    "verified_aliases": [
+      "减字木兰花",
+      "减字木兰",
+      "减兰"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "减字木兰花",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=109].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "减字木兰",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=109].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "减兰",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=109].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 2
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 1
+      }
+    },
+    "verified_form_count": 3,
+    "unverified_form_count": 0,
+    "available_normalized_form_count": 3,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=109",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "减字木兰花",
+        "tune_index": 109,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "减字木兰",
+        "tune_index": 109,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "减兰",
+        "tune_index": 109,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 28,
+    "canonical_tune_name": "南乡子",
+    "verified_aliases": [
+      "南乡子"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "南乡子",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=28].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 9
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 4
+      }
+    },
+    "verified_form_count": 12,
+    "unverified_form_count": 1,
+    "available_normalized_form_count": 13,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=28",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "南乡子",
+        "tune_index": 28,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 295,
+    "canonical_tune_name": "踏莎行",
+    "verified_aliases": [
+      "踏莎行"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "踏莎行",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=295].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 3
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 2
+      }
+    },
+    "verified_form_count": 4,
+    "unverified_form_count": 1,
+    "available_normalized_form_count": 5,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=295",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "踏莎行",
+        "tune_index": 295,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 543,
+    "canonical_tune_name": "八声甘州",
+    "verified_aliases": [
+      "八声甘州"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "八声甘州",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=543].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 7
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 2
+      }
+    },
+    "verified_form_count": 0,
+    "unverified_form_count": 9,
+    "available_normalized_form_count": 9,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=543",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "八声甘州",
+        "tune_index": 543,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 516,
+    "canonical_tune_name": "水调歌头",
+    "verified_aliases": [
+      "水调歌头"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "水调歌头",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=516].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 8
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 3
+      }
+    },
+    "verified_form_count": 0,
+    "unverified_form_count": 11,
+    "available_normalized_form_count": 11,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=516",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "水调歌头",
+        "tune_index": 516,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  },
+  {
+    "tune_index": 614,
+    "canonical_tune_name": "念奴娇",
+    "verified_aliases": [
+      "念奴娇",
+      "酹江月",
+      "大江东去"
+    ],
+    "alias_evidence": [
+      {
+        "alias": "念奴娇",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=614].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "酹江月",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=614].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      },
+      {
+        "alias": "大江东去",
+        "source_ref": "raw/ci_index.json",
+        "field_path": "$[idx=614].names",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "raw_sha256": "024c924966b6e784ec22467d50dc689ffb3999ee9e1082a6b2b71d64a0833f9d"
+      }
+    ],
+    "authority_availability": {
+      "钦定词谱": {
+        "available": true,
+        "raw_forms": 12
+      },
+      "龙榆生词谱": {
+        "available": true,
+        "raw_forms": 3
+      }
+    },
+    "verified_form_count": 0,
+    "unverified_form_count": 15,
+    "available_normalized_form_count": 15,
+    "source_url": "https://sou-yun.cn/QueryCiTune.aspx?id=614",
+    "alias_ambiguity_notes": [],
+    "alias_candidates": [
+      {
+        "alias": "念奴娇",
+        "tune_index": 614,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "酹江月",
+        "tune_index": 614,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      },
+      {
+        "alias": "大江东去",
+        "tune_index": 614,
+        "state": "source_listed",
+        "source_ref": "raw/ci_index.json",
+        "source_url": "https://cdn.jsdelivr.net/gh/hulbji/couyun@1744e87f850c2205bc231bfdd858256036c0e4db/couyun/ci_pu/ci_index.json",
+        "scope": null
+      }
+    ]
+  }
+]

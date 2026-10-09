@@ -3,7 +3,7 @@
 > 本文件由 `frontend/tools/gen-docs.mjs` **从组件源码自动抽取**，请勿手改。
 > 改动组件后运行 `npm run docs`（或 `npm run docs:check` 校验）重新生成。
 
-共 6 个组件。
+共 7 个组件。
 
 ---
 
@@ -103,6 +103,27 @@
 | 名称 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `mode` | `String` | `'offline'` | — |
+
+### emits
+
+（无）
+
+### slots
+
+（无）
+
+---
+
+## ResearchView
+
+**文件**：`src/views/ResearchView.vue`　·　**用途**：「研究库」视图（2026-10-09 新增；功能 1/6/7/8/9/11/12/13/15/18 的统一入口）
+
+### props
+
+| 名称 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `stamp` | `String` | `''` | — |
+| `dataNote` | `String` | `'data/research.db（研究库）'` | — |
 
 ### emits
 

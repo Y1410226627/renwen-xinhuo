@@ -48,7 +48,8 @@ export default defineConfig(({ mode }) => {
               parse: path.resolve(dir, 'src', 'parse.html'),
               browse: path.resolve(dir, 'src', 'browse.html'),
               graph: path.resolve(dir, 'src', 'graph.html'),
-              review: path.resolve(dir, 'src', 'review.html')
+              review: path.resolve(dir, 'src', 'review.html'),
+              research: path.resolve(dir, 'src', 'research.html')
             }
           }
         : {

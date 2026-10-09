@@ -17,6 +17,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import retrieve                                            # noqa: E402
 from pronounce import Pronouncer, default_overrides_path   # noqa: E402
+try:
+    import research as _RS                                 # noqa: E402  （篇级读音裁定派生，功能 8）
+except Exception:                                          # noqa: BLE001
+    _RS = None
 
 _ENG = None
 
@@ -141,7 +145,7 @@ def poem_block(conn, pid, top_lines=1, spec=None):
                      for r0 in _all]
         else:
             lines = [(r0[0], r0[1], r0[2], r0[3], r0[4], r0[5], r0[6], []) for r0 in _all]
-    return {
+    out = {
         'pid': pid, 'dynasty': dyn, 'author': author, 'cipai': cipai, 'title': title,
         'source': source, 'sent_n': sent_n, 'han_len': han_len, 'ping': ping, 'ze': ze,
         'ze_ratio': ze_ratio, 'scene': scene, 'change': change, 'longest_len': longest_len,
@@ -152,6 +156,20 @@ def poem_block(conn, pid, top_lines=1, spec=None):
                    'tail': tl, 'matched': bool(rs), 'match_reasons': rs}
                   for i, t, hl, p, z, pz, tl, rs in lines],
     }
+    # ⚠ 2026-10-09（功能 8）：该篇若有人工读音裁定 → 展示值按裁定修正
+    #   （不改语料库、不改交付链；裁定层任何故障都绝不拖垮问答链）。
+    #   未曾裁定的篇（绝大多数）在这里**原样返回** —— 逐字节等价于旧输出（零回归）。
+    if _RS is not None:
+        try:
+            _rc = _RS.readonly_conn()
+            if _rc is not None:
+                _ls2, _adj = _RS.apply_pron_to_lines(_rc, pid, out['lines'])
+                if _adj:
+                    out['lines'] = _ls2
+                    out['pron_adjusted'] = _adj
+        except Exception:                                      # noqa: BLE001
+            pass
+    return out
 
 
 def build_blocks(conn, rows, with_lines=1, spec=None):

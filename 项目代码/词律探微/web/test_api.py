@@ -26,11 +26,16 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, 'solve'))
+
+# ⚠ 2026-10-09：快照隔离（功能 1）——本门禁会跑 q_ask，而 q_ask 现在会落「冻结快照」；
+#   指向临时目录，避免污染真实 data/snapshots/（必须在 import serve 之前设置）。
+os.environ.setdefault('LVC_SNAPSHOT_DIR', tempfile.mkdtemp(prefix='lvc_snap_gate_'))
 
 import serve as S                        # noqa: E402
 import aggregate as AGG                  # noqa: E402

@@ -67,19 +67,26 @@ sys.path.insert(0, os.path.join(ROOT, 'solve'))
 import aggregate as AGG                  # noqa: E402
 import answer_verify as AVERIFY          # noqa: E402  （集合身份校验，2026-10-08 新增）
 import ask as ASK                        # noqa: E402
+import cipu as CIPU                      # noqa: E402  （词谱对照，2026-10-09 功能 9）
 import context as CONTEXT                # noqa: E402  （服务端会话语境，2026-10-08 新增）
 import entity_resolve as ENT             # noqa: E402  （实体身份判定，2026-10-09 新增 /api/identify）
 import evidence as EV                    # noqa: E402
 import gen as GEN                        # noqa: E402
 import guard as GUARD                    # noqa: E402
 import llm as LLM_MOD                    # noqa: E402
+import pronounce as PR_MOD               # noqa: E402  （读音候选/字位，2026-10-09 功能 8）
+import research as RSRCH                 # noqa: E402  （研究库，2026-10-09 新增；功能 6/7/8/12/13/15/18）
 import retrieve as RT                    # noqa: E402
 import safety as SAFETY                  # noqa: E402
+import snapshot as SNAP                  # noqa: E402  （冻结式问答快照，2026-10-09 功能 1）
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer   # noqa: E402
 from urllib.parse import urlparse, parse_qs                          # noqa: E402
 
 DB = os.path.join(ROOT, 'data', 'corpus.db')
 DATA = os.path.join(ROOT, 'data')
+# 研究库（用户档案柜：摘录/事实/读音裁定/个人录入/版本链）。**与只读语料库分离**，绝不混写。
+# 路径可用 `LVC_RESEARCH_DB` 覆盖：门禁测试用临时库跑、部署时可迁移数据目录。
+RESEARCH_DB = os.environ.get('LVC_RESEARCH_DB') or os.path.join(DATA, 'research.db')
 # Vue3+Vite 构建产物（D15 前端架构）。问答页在 web/dist/ask/；离线四视图在 data/vue/。
 DIST_ASK = os.path.join(HERE, 'dist', 'ask')
 DIST_VIEWS = os.path.join(DATA, 'vue')
@@ -186,6 +193,25 @@ def get_conn():
         c.row_factory = sqlite3.Row
         _TLS.conn = c
     return c
+
+
+def get_research_conn():
+    """研究库的**线程本地连接**（与 get_conn 同模式）。
+
+    ⚠ 与会话语料库不同，研究库有**写操作**：并发由 `research._LOCK` +
+    `BEGIN IMMEDIATE` 在模块内统一串行化（见 `solve/research.py` 三条纪律），
+    此处只管「每线程一条连接」。
+    """
+    c = getattr(_TLS, 'rconn', None)
+    if c is None:
+        c = RSRCH.connect(RESEARCH_DB)
+        _TLS.rconn = c
+    return c
+
+
+def get_research_conn_ro():
+    """研究库的**只读**连接（线程本地；**库不存在返回 None**——展示路径绝不建库）。"""
+    return RSRCH.readonly_conn(RESEARCH_DB)
 
 
 def _num(v, cast=float):
@@ -909,6 +935,188 @@ def _store_turn(session, q, spec, out, result_pids):
                              store_pids, _tot, result_kind=_kind)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 研究库写接口（2026-10-09 首度引入写操作，见 DECISIONS D32）
+#   · 分发器 `q_research_write()`：统一参数校验；业务函数在 `solve/research.py`
+#     （可被门禁/脚本直接调用，不依赖 HTTP）；
+#   · 抛 ValueError → 400、LookupError → 404（do_POST 统一落）；
+#   · `client_token` 由各业务函数做**幂等**（同 token 重复提交返回同一结果）。
+# ═══════════════════════════════════════════════════════════════════════════
+def q_research_write(path, data):
+    """写接口统一入口：`path` 路由、`data` 为已解析的 JSON dict。"""
+    conn = get_research_conn()
+    if path == '/api/text_versions':
+        pid = str(data.get('pid') or '').strip()
+        content = data.get('content')
+        if not pid or not isinstance(content, str) or not content.strip():
+            raise ValueError('pid 与 content 为必填（content 不得为空）')
+        return RSRCH.add_text_version(
+            conn, pid, content, scope=str(data.get('scope') or 'corpus'),
+            version_type=str(data.get('version_type') or 'manual'),
+            actor=str(data.get('actor') or 'human'), note=str(data.get('note') or ''),
+            parent_id=data.get('parent_id'), client_token=data.get('client_token'))
+    if path == '/api/meta_revisions':
+        pid = str(data.get('pid') or '').strip()
+        field = str(data.get('field') or '').strip()
+        if not pid or not field or 'new_value' not in data:
+            raise ValueError('pid、field、new_value 为必填')
+        return RSRCH.add_meta_revision(
+            conn, pid, field, data.get('new_value'), old_value=data.get('old_value'),
+            scope=str(data.get('scope') or 'corpus'),
+            actor=str(data.get('actor') or 'human'), basis=str(data.get('basis') or ''),
+            why=str(data.get('why') or ''), client_token=data.get('client_token'))
+    if path == '/api/materials':
+        title = str(data.get('title') or '').strip()
+        content = data.get('content')
+        if not title or not isinstance(content, str) or not content.strip():
+            raise ValueError('title 与 content 为必填')
+        return RSRCH.add_material(
+            conn, title, content, kind=str(data.get('kind') or 'book'),
+            author=str(data.get('author') or ''), year=str(data.get('year') or ''),
+            source_url=str(data.get('source_url') or ''), note=str(data.get('note') or ''),
+            locator=str(data.get('locator') or ''), actor=str(data.get('actor') or 'human'),
+            client_token=data.get('client_token'))
+    if path == '/api/material_revisions':
+        if data.get('material_id') is None:
+            raise ValueError('material_id 为必填')
+        return RSRCH.add_material_revision(
+            conn, data.get('material_id'), str(data.get('content') or ''),
+            locator=str(data.get('locator') or ''), note=str(data.get('note') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    if path == '/api/materials/withdraw':
+        if data.get('material_id') is None:
+            raise ValueError('material_id 为必填')
+        return RSRCH.withdraw_material(conn, data.get('material_id'),
+                                       why=str(data.get('why') or ''),
+                                       actor=str(data.get('actor') or 'human'),
+                                       client_token=data.get('client_token'))
+    if path == '/api/facts':
+        return RSRCH.add_fact(
+            conn, str(data.get('statement') or ''), material_id=data.get('material_id'),
+            locator=str(data.get('locator') or ''), poem_pid=data.get('poem_pid'),
+            line_idx=data.get('line_idx'), span_start=data.get('span_start'),
+            span_end=data.get('span_end'), evidence=str(data.get('evidence') or ''),
+            actor=str(data.get('actor') or 'human'), corpus_conn=get_conn(),
+            client_token=data.get('client_token'))
+    if path == '/api/facts/withdraw':
+        if data.get('fact_id') is None:
+            raise ValueError('fact_id 为必填')
+        return RSRCH.withdraw_fact(conn, data.get('fact_id'), why=str(data.get('why') or ''),
+                                   actor=str(data.get('actor') or 'human'),
+                                   client_token=data.get('client_token'))
+    if path == '/api/pronounce/decide':
+        try:
+            line_i = int(data.get('line'))
+            char_p = int(data.get('pos'))
+            tone_v = int(data.get('tone'))
+        except (TypeError, ValueError):
+            raise ValueError('line / pos / tone 必须是整数')
+        return RSRCH.add_pron_decision(
+            conn, str(data.get('pid') or ''), line_i, char_p,
+            str(data.get('reading') or ''), tone_v,
+            basis=str(data.get('basis') or ''), why=str(data.get('why') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    if path == '/api/pronounce/withdraw':
+        if data.get('decision_id') is None:
+            raise ValueError('decision_id 为必填')
+        return RSRCH.withdraw_pron_decision(
+            conn, data.get('decision_id'), why=str(data.get('why') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    if path == '/api/works':
+        return RSRCH.add_personal_work(
+            conn, str(data.get('title') or ''), str(data.get('content') or ''),
+            author=str(data.get('author') or ''), cipai=str(data.get('cipai') or ''),
+            verification_state=str(data.get('verification_state') or 'draft'),
+            source=str(data.get('source') or ''),
+            source_material_id=data.get('source_material_id'),
+            source_locator=str(data.get('source_locator') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    if path == '/api/works/verify':
+        if data.get('work_id') is None:
+            raise ValueError('work_id 为必填')
+        return RSRCH.set_work_verification(
+            conn, data.get('work_id'), str(data.get('state') or ''),
+            source=str(data.get('source') or ''),
+            source_material_id=data.get('source_material_id'),
+            source_locator=str(data.get('source_locator') or ''),
+            why=str(data.get('why') or ''), actor=str(data.get('actor') or 'human'),
+            client_token=data.get('client_token'))
+    if path == '/api/import':
+        files = data.get('files')
+        if not isinstance(files, list) or not files:
+            raise ValueError('files 为必填（[{name, rows:[…]}]），且不得为空')
+        return RSRCH.import_rows(conn, str(data.get('tag') or ''), files,
+                                 note=str(data.get('note') or ''),
+                                 client_token=data.get('client_token'))
+    if path == '/api/import/rollback':
+        if data.get('batch_id') is None:
+            raise ValueError('batch_id 为必填')
+        return RSRCH.rollback_import_batch(
+            conn, data.get('batch_id'), why=str(data.get('why') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    raise LookupError('未知写接口：%s' % path)
+
+
+_PRON_OV = None
+
+
+def _pron_overrides():
+    """字级标定表的覆盖表（懒加载；只读，供读音候选合并展示用）。"""
+    global _PRON_OV
+    if _PRON_OV is None:
+        try:
+            import pronounce as PR
+            _PRON_OV = PR.Pronouncer.default().overrides
+        except Exception:                                      # noqa: BLE001
+            _PRON_OV = {}
+    return _PRON_OV
+
+
+def q_pron_candidates(pid, line_idx, char_pos):
+    """读音候选（功能 8）：该字位的**多来源候选** + 语料基线 + 当前裁定 + 该字位裁定史。
+
+    来源：`pypinyin 异读` ∪ `字级标定表` ∪ `篇级现有裁定`（后者单独列在 current_decision）。
+    """
+    if not pid:
+        raise ValueError('pid 为必填')
+    if line_idx is None or char_pos is None:
+        raise ValueError('line 与 pos 为必填整数')
+    c = get_conn()
+    row = c.execute('SELECT text, pz FROM lines WHERE pid=? AND idx=?',
+                    (pid, int(line_idx))).fetchone()
+    if row is None:
+        raise ValueError('找不到该句：pid=%s idx=%s' % (pid, line_idx))
+    text, pz = row['text'] or '', row['pz'] or ''
+    ch = PR_MOD.char_at(text, int(char_pos))
+    if ch is None:
+        raise ValueError('第 %d 句没有第 %d 个汉字' % (int(line_idx) + 1, int(char_pos)))
+    base_pz = pz[int(char_pos)] if int(char_pos) < len(pz) else ''
+    cands = PR_MOD.candidates(ch)
+    for c0 in cands:
+        c0['source'] = 'pypinyin'
+    seen = {x['reading'] for x in cands}
+    ov = _pron_overrides().get(ch)
+    if ov:
+        m = re.search(r'([1-4])\s*$', str(ov))
+        if m and str(ov) not in seen:
+            cands.append({'reading': str(ov), 'tone': int(m.group(1)), 'source': '字级标定表'})
+    cur, hist = None, []
+    rc = get_research_conn_ro()
+    if rc is not None:
+        try:
+            for d in RSRCH.effective_pron_decisions(rc, pid):
+                if d['line'] == int(line_idx) and d['pos'] == int(char_pos):
+                    cur = d
+            _subj = RSRCH.pron_subject(pid, int(line_idx), int(char_pos))
+            hist = [h for h in RSRCH.list_pron_decisions(rc, pid)
+                    if (h.get('subject') or '') == _subj]
+        except Exception:                                      # noqa: BLE001
+            cur, hist = None, []
+    return {'pid': pid, 'line': int(line_idx), 'pos': int(char_pos), 'char': ch,
+            'base_pz': base_pz, 'candidates': cands,
+            'current_decision': cur, 'history': hist}
+
+
 def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None,
           ctx_pids=None, sid=None, carry=False):
     t0 = time.time()
@@ -947,6 +1155,14 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
                           'from_fallback': bool(cinfo.get('fallback')),
                           'pids_used': cinfo.get('pids_used'),
                           'note': cinfo.get('note')}
+    # ⑥ 冻结快照（功能 1）：把本轮整体冻进 data/snapshots/ —— 只抄录、不重算；
+    #    快照失败绝不拖垮问答（本地盘写失败也要能答题）。
+    try:
+        out['snapshot_id'] = SNAP.capture(
+            out, q, _result_pids_of(out), spec=spec, sid=sid,
+            turn_no=(len(session.turns) if session is not None else None), conn=conn)
+    except Exception as e:                                     # noqa: BLE001
+        sys.stderr.write('  ! 快照落盘失败（不影响问答）：%r\n' % e)
     return out
 
 
@@ -1037,6 +1253,13 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
                                   'from_fallback': bool(cinfo.get('fallback')),
                                   'pids_used': cinfo.get('pids_used'),
                                   'note': cinfo.get('note')}
+            # ⑤ 冻结快照（功能 1，与 /api/ask 同一口径）——失败不拖垮流式问答。
+            try:
+                fin['snapshot_id'] = SNAP.capture(
+                    fin, q, _result_pids_of(fin), spec=spec, sid=sid,
+                    turn_no=(len(session.turns) if session is not None else None), conn=conn)
+            except Exception as e:                             # noqa: BLE001
+                sys.stderr.write('  ! 快照落盘失败（不影响问答）：%r\n' % e)
             emit('final', fin)
         except Exception as exc:
             sys.stderr.write('[sse][%s] worker 异常：%s: %s\n' % (rid, type(exc).__name__, exc))
@@ -1102,6 +1325,17 @@ def q_parse(pid):
     out['longest_seq'] = [int(x) for x in _ls] if isinstance(_ls, (list, tuple)) else []
     out['lines'] = lines
     out['raw'] = d.get('raw')
+    # ⚠ 2026-10-09（功能 8）：该篇若有人工读音裁定 → 展示值按裁定修正（不改语料库）。
+    #   无裁定 / 研究库不存在时**原样返回**（零回归）。
+    _rc = get_research_conn_ro()
+    if _rc is not None:
+        try:
+            _ls2, _adj = RSRCH.apply_pron_to_lines(_rc, pid, lines)
+            if _adj:
+                out['lines'] = _ls2
+                out['pron_adjusted'] = _adj
+        except Exception as e:                                 # noqa: BLE001
+            sys.stderr.write('  ! 读音裁定应用失败（不影响解析）：%r\n' % e)
     return out
 
 
@@ -1169,6 +1403,47 @@ class H(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *a):
         sys.stderr.write('  · %s\n' % (fmt % a))
+
+    def do_POST(self):
+        """**写接口**（2026-10-09 起本项目首次引入写操作；见 DECISIONS D32）。
+
+        边界与纪律（和只读 GET 的区别都在这里写清）：
+          · 只服务 `/api/text_versions`、`/api/meta_revisions` 等**已登记**的研究库路径，
+            其余一律 404——不开放任意写；
+          · 请求体 JSON、上限 1 MB；解析失败 400；
+          · 写接口统一支持 `client_token` 幂等（同 token 重复提交返回**第一次**的结果，
+            不重复执行）——由 `solve/research.py::run_idempotent` 一处兜底；
+          · 服务默认绑定 127.0.0.1（`--host` 可改），写接口设计为**本地单机**使用。
+        """
+        self._sse_started = False
+        u = urlparse(self.path)
+        try:
+            n = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            n = 0
+        if n < 0 or n > (1 << 20):
+            return self._send({'error': {'code': 'BODY_TOO_LARGE',
+                                         'message': '请求体超过 1 MB 上限'}}, code=413)
+        raw = self.rfile.read(n) if n else b''
+        try:
+            data = json.loads(raw.decode('utf-8')) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            return self._send({'error': {'code': 'BAD_JSON',
+                                         'message': '请求体必须是 UTF-8 的 JSON 对象'}}, code=400)
+        if not isinstance(data, dict):
+            return self._send({'error': {'code': 'BAD_JSON',
+                                         'message': '请求体必须是 JSON 对象'}}, code=400)
+        try:
+            result = q_research_write(u.path, data)
+            return self._send({'ok': True, 'result': result})
+        except ValueError as e:
+            return self._send({'error': {'code': 'BAD_PARAM', 'message': str(e)}}, code=400)
+        except LookupError as e:
+            return self._send({'error': {'code': 'NOT_FOUND_WRITE', 'message': str(e)}}, code=404)
+        except Exception as e:                                  # noqa: BLE001
+            sys.stderr.write('  ! POST %s 失败：%r\n' % (u.path, e))
+            return self._send({'error': {'code': 'INTERNAL',
+                                         'message': '写入失败：%s' % e}}, code=500)
 
     def do_GET(self):
         # ⚠ 2026-10-04：`_sse_started` 是「本连接已发过 SSE 响应头」的标记（见 except 处）。
@@ -1275,6 +1550,134 @@ class H(BaseHTTPRequestHandler):
             if u.path == '/api/identify':
                 # 实体身份判定（2026-10-09 新增）：exact／ambiguous／unavailable 三态 + 近似提示。
                 return self._send(ENT.identify(get_conn(), g('kind') or 'cipai', g('text')))
+            if u.path == '/api/text_versions':
+                # 文本版本链（功能 15，只读回查；写入走 POST /api/text_versions）。
+                if not g('pid'):
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': 'pid 为必填'}}, code=400)
+                return self._send({'ok': True, 'result': RSRCH.list_text_versions(
+                    get_research_conn(), g('pid'), g('scope') or None)})
+            if u.path == '/api/meta_revisions':
+                # 元数据修订史（功能 15，只读回查）。
+                if not g('pid'):
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': 'pid 为必填'}}, code=400)
+                return self._send({'ok': True, 'result': RSRCH.list_meta_revisions(
+                    get_research_conn(), g('pid'), g('scope') or None)})
+            if u.path == '/api/materials':
+                # 文献摘录列表（功能 6；`all=1` 含已撤回）。
+                return self._send({'ok': True, 'result': RSRCH.list_materials(
+                    get_research_conn(), include_withdrawn=g('all') == '1')})
+            if u.path == '/api/material':
+                # 单个材料 + 全部版本链（功能 6 验收：可完整回溯）。
+                mid = _num(g('material_id'), int)
+                if not mid:
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': 'material_id 为必填'}}, code=400)
+                chain = RSRCH.get_material_chain(get_research_conn(), mid)
+                if chain is None:
+                    return self._send({'error': {'code': 'NOT_FOUND',
+                                                 'message': '材料 %s 不存在' % mid}}, code=404)
+                return self._send({'ok': True, 'result': chain})
+            if u.path == '/api/facts':
+                # 研究事实列表（功能 7；可按 poem_pid / material_id 过滤）。
+                return self._send({'ok': True, 'result': RSRCH.list_facts(
+                    get_research_conn(), poem_pid=g('poem_pid') or None,
+                    material_id=_num(g('material_id'), int),
+                    include_withdrawn=g('all') == '1')})
+            if u.path == '/api/research/summary':
+                # 研究库概况（各表行数）。
+                return self._send({'ok': True, 'result': RSRCH.summary(get_research_conn())})
+            if u.path == '/api/pronounce/candidates':
+                # 读音候选（功能 8）：多来源候选 + 当前裁定 + 该字位裁定史。
+                try:
+                    return self._send({'ok': True, 'result': q_pron_candidates(
+                        g('pid'), _num(g('line'), int), _num(g('pos'), int))})
+                except ValueError as e:
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': str(e)}}, code=400)
+            if u.path == '/api/pronounce/decisions':
+                # 某篇读音决策全史（select + withdraw；功能 8 验收「完整回溯」）。
+                if not g('pid'):
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': 'pid 为必填'}}, code=400)
+                _rc0 = get_research_conn_ro()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_pron_decisions(_rc0, g('pid')) if _rc0 is not None else [])})
+            if u.path == '/api/works':
+                # 个人录入列表（功能 12；?state=draft/material_sample/source_matched 过滤）。
+                rc1 = get_research_conn_ro()
+                if rc1 is None:
+                    return self._send({'ok': True, 'result': [],
+                                       'note': '研究库尚未建立（还没有任何录入）'})
+                try:
+                    return self._send({'ok': True, 'result': RSRCH.list_personal_works(
+                        rc1, state=g('state') or None)})
+                except ValueError as e:
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': str(e)}}, code=400)
+            if u.path == '/api/import/batches':
+                # 批量导入批次对账（功能 13）。
+                rc2 = get_research_conn_ro()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_import_batches(rc2) if rc2 is not None else [])})
+            if u.path == '/api/research/decisions':
+                # 决策事件总表（可按 kind / subject 过滤）——研究审计入口（功能 8/12/13 共用）。
+                rc3 = get_research_conn_ro()
+                if rc3 is None:
+                    return self._send({'ok': True, 'result': []})
+                return self._send({'ok': True, 'result': RSRCH.list_decisions(
+                    rc3, kind=g('kind') or None, subject=g('subject') or None,
+                    limit=_num(g('limit'), int) or 200)})
+            if u.path == '/api/cipu/list':
+                # 谱库覆盖的词牌一览（功能 9）。来源声明随体携带（红线）。
+                return self._send({'ok': True, 'result': CIPU.list_tunes(),
+                                   'source_note': CIPU.SOURCE_NOTE})
+            if u.path == '/api/cipu':
+                # 某词牌的全部体（含逐句规则与例词）。
+                tune = g('tune')
+                if not tune:
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': 'tune 为必填'}}, code=400)
+                canon, cands = CIPU.resolve_tune(tune)
+                if canon is None:
+                    return self._send({'ok': True, 'result': {'status': 'no_tune',
+                        'asked': tune, 'candidates': cands,
+                        'available_tunes': [t['tune'] for t in CIPU.list_tunes()],
+                        'source_note': CIPU.SOURCE_NOTE}})
+                return self._send({'ok': True, 'result': {
+                    'status': 'ok', 'tune': canon,
+                    'forms': [CIPU.form_detail(f) for f in CIPU.forms_of(canon)],
+                    'source_note': CIPU.SOURCE_NOTE}})
+            if u.path == '/api/cipu/compare':
+                # **三行对照**（功能 9）：作品原字 / 规范 / 谱书例词。
+                if not g('pid'):
+                    return self._send({'error': {'code': 'BAD_PARAM',
+                                                 'message': 'pid 为必填'}}, code=400)
+                res = CIPU.compare_pid(get_conn(), g('pid'),
+                                       tune=g('tune') or None,
+                                       form=_num(g('form'), int))
+                if res is None:
+                    return self._send({'error': {'code': 'NOT_FOUND',
+                                                 'message': '没有这一篇：%s' % g('pid')}},
+                                      code=404)
+                return self._send({'ok': True, 'result': res})
+            if u.path == '/api/intake':
+                # 录入输入体检（功能 11）：**只读**，不写任何库。
+                import intake as INTAKE
+                return self._send({'ok': True, 'result': INTAKE.check(
+                    g('title'), g('content'), cipai=g('cipai'))})
+            if u.path == '/api/snapshots':
+                # 历史快照列表（功能 1）。默认最近 20 条。
+                return self._send({'ok': True, 'result': SNAP.list_recent(
+                    _num(g('n'), int) or 20)})
+            if u.path.startswith('/api/snapshots/'):
+                # 快照回查（功能 1）：**原文返回、不重算**；附「依赖已陈旧」标注。
+                snap = SNAP.load(u.path[len('/api/snapshots/'):])
+                if snap is None:
+                    return self._send({'error': {'code': 'NOT_FOUND',
+                                                 'message': '快照不存在'}}, code=404)
+                return self._send({'ok': True, 'result': snap})
             if u.path == '/api/llm':
                 c = get_llm()
                 return self._send({'available': c.available(), 'model': c.name,
@@ -1289,7 +1692,9 @@ class H(BaseHTTPRequestHandler):
                 return self._send(EXAMPLES)
             # 静态视图：优先提供 Vue 构建产物（data/vue/），回退旧版手写视图（data/*.html）。
             # 两种产物文件同名，因此「构建了就自动用新版」，评审机没跑构建也不至于 404。
-            for name in ('parse.html', 'browse.html', 'graph.html', 'review.html', 'index.html'):
+            # （research.html 为 2026-10-09 新增的「研究库」页——在线专用，离线打开会如实提示。）
+            for name in ('parse.html', 'browse.html', 'graph.html', 'review.html',
+                         'index.html', 'research.html'):
                 if u.path == '/' + name:
                     for base in (DIST_VIEWS, DATA):
                         p = os.path.join(base, name)

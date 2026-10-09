@@ -42,7 +42,8 @@ async function main() {
     { file: '/views/ParseView.vue', name: '逐字解析 ParseView（离线）', must: ['词律探微'], props: { mode: 'offline' } },
     { file: '/views/ParseView.vue', name: '多条件检索 ParseView（在线）', must: ['词律探微'], props: { mode: 'online' } },
     { file: '/views/GraphView.vue', name: '知识图谱 GraphView', must: ['词律探微'], props: {} },
-    { file: '/views/ReviewView.vue', name: '校订队列 ReviewView', must: ['词律探微'], props: {} }
+    { file: '/views/ReviewView.vue', name: '校订队列 ReviewView', must: ['词律探微'], props: {} },
+    { file: '/views/ResearchView.vue', name: '研究库 ResearchView', must: ['词律探微', '研究库'], props: {} }
   ];
 
   for (const v of views) {

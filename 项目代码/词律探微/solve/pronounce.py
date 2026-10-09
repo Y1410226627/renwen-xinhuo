@@ -132,3 +132,48 @@ class Pronouncer:
 def default_overrides_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, 'data', 'pron_overrides.json')
+
+
+def char_at(text, pos):
+    """取 `text` 中第 `pos` 个**汉字**（0 起，跳过标点/空白）；越界返回 None。
+
+    「字位」= 汉字序号——与 `corpus.db` 的 `lines.pz` 串下标**同一口径**
+    （pz 只含平/仄且与汉字一一对应，已在全库抽样验证）。
+    """
+    k = -1
+    for c in (text or ''):
+        if _KNOWN_RE.match(c):
+            k += 1
+            if k == pos:
+                return c
+    return None
+
+
+def candidates(ch):
+    """单字**读音候选**（功能 8「多来源」的基础源之一）：pypinyin 异读全集。
+
+    返回 `[{'reading': 'chang2', 'tone': 2}, …]`：去重、只保留 tone 1..4
+    （轻声/无调不是可裁定项——与 `research.add_pron_decision` 的校验同一口径）；
+    取不到候选时返回空表（调用方如实展示「无候选」，绝不编造）。
+    """
+    out, seen = [], set()
+    if not (ch and len(ch) == 1 and _KNOWN_RE.match(ch)):
+        return out
+    try:
+        opts = pinyin(ch, style=Style.TONE3, heteronym=True, errors='default')[0]
+    except Exception:                                            # noqa: BLE001
+        opts = []
+    for py in (opts or []):
+        py = str(py or '').strip()
+        m = _TONE_RE.search(py)
+        if not m:
+            continue
+        t = int(m.group(1))
+        if t == 5:
+            t = 0
+        if t == 0 or py in seen:
+            continue
+        seen.add(py)
+        out.append({'reading': py, 'tone': t})
+    out.sort(key=lambda x: (x['tone'], x['reading']))
+    return out
