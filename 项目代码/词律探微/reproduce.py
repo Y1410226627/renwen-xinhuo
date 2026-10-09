@@ -20,8 +20,46 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-D = r'D:\桌面\人文薪火\数据\初赛数据\薪火人文-清词-1000题库-V5版本'
-CORPUS = r'D:\桌面\人文薪火\数据\语料'
+
+
+def _project_root():
+    """仓库根（含 `数据/` 与 `项目代码/`）：默认由本文件位置推得，可用 `LVC_PROJECT_ROOT` 覆盖。
+
+    ⚠ 原实现把题集/语料写成 `D:\桌面\人文薪火\…` **绝对路径**——评委拿到开源副本
+      （目录名不同、盘符不同）会直接失败，与「成果可复现、可推广」相悖。此处改为相对定位。
+    """
+    env = os.environ.get('LVC_PROJECT_ROOT')
+    if env and os.path.isdir(env):
+        return env
+    return os.path.dirname(os.path.dirname(ROOT))
+
+
+def _questions_dir():
+    """题集目录：优先 `LVC_QUESTIONS_DIR`，否则在 `数据/初赛数据/` 下自动发现。"""
+    env = os.environ.get('LVC_QUESTIONS_DIR')
+    if env and os.path.isdir(env):
+        return env
+    base = os.path.join(_project_root(), '数据', '初赛数据')
+    if os.path.isdir(base):
+        subs = [os.path.join(base, n) for n in sorted(os.listdir(base))
+                if os.path.isdir(os.path.join(base, n))]
+        for p in subs:
+            if os.path.exists(os.path.join(p, '公开测试集_700题.jsonl')):
+                return p
+        if subs:
+            return subs[0]
+    return base
+
+
+def _corpus_dir():
+    env = os.environ.get('LVC_CORPUS')
+    if env and os.path.isdir(env):
+        return env
+    return os.path.join(_project_root(), '数据', '语料')
+
+
+D = _questions_dir()
+CORPUS = _corpus_dir()
 PUB_Q = os.path.join(D, '公开测试集_700题.jsonl')
 SEC_Q = os.path.join(D, '保密验证集_300题_题面.jsonl')
 SEC_G = os.path.join(D, '保密验证集_300题_答案.jsonl')

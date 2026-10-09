@@ -94,6 +94,26 @@ UP = r'(?:高于|大于|多于|超过|超出|不低于|不少于|不小于|不�
 # ⚠ 2026-10-03：补「不小于/不亚于/以上」——口语里很常见，缺了它整条数值条件会**静默丢失**
 #   （实测「前后段变化幅度不小于二十」→ 范围从 1393 篇变成全库 58769 篇）。
 DOWN = r'(?:低于|小于|少于|不足|不到|不超过|不高于|不大于|不重于|至多|以下|≤|<=)'
+
+# ───────────────────── 开放措辞的**数值同义词声明表**（2026-10-08 第二轮） ─────────────────────
+# 为什么是「表」而不是「又一层 if/else」：审查（deepseek B13 / GPT P0-8）反对的是
+# 「为了支持新问法继续新增分支」。这里把「指标别名 / 方向词 / 量词」都写成**数据**，
+# 新增一种说法 = 在表里加一行，解析器代码不动。方向词与量词仍复用既有的 UP / DOWN。
+# 每行 = (rng 键, 指标的别名正则, 方向词)
+NUM_SYNONYM_TABLE = (
+    ('ze_min',     r'(?:仄声|仄字|仄)(?:比例|占比|比重|字占比|字比例|声比例|声占比)?', UP),
+    ('ze_max',     r'(?:仄声|仄字|仄)(?:比例|占比|比重|字占比|字比例|声比例|声占比)?', DOWN),
+    ('len_min',    r'(?:字数|篇幅|全篇字数|总字数|字)',                           UP),
+    ('len_max',    r'(?:字数|篇幅|全篇字数|总字数|字)',                           DOWN),
+    ('sent_min',   r'(?:句数|句子数|句)',                                        UP),
+    ('sent_max',   r'(?:句数|句子数|句)',                                        DOWN),
+    ('change_min', r'变化(?:值|幅度)?',                                          UP),
+    ('change_max', r'变化(?:值|幅度)?',                                          DOWN),
+    ('thr_min',    r'(?:阈值|长句阈值)',                                         UP),
+    ('thr_max',    r'(?:阈值|长句阈值)',                                         DOWN),
+)
+# 数字后可选的**量词/单位**（「45%」「45个百分点」「40字」「八句」）
+NUM_UNIT = r'\s*(?:%|％|个百分点|个字|字|句|首|篇)?'
 PZ_RE = re.compile(r'^[平仄?？]{3,}$')     # 声律模式：整串只由 平/仄/？（任意）组成
 SCENES = {'后段上升': ('上升', '升高', '抬高', '走高', '趋于上升'), '后段下降': ('下降', '降低', '走低', '趋于下降'),
           '前后持平': ('持平', '不变', '平稳', '两段持平')}
@@ -1188,6 +1208,7 @@ def _parse_core(conn, text, keep_names=False):
     # ⚠ **安全前瞻 `(?![亿萬])`**：万一出现范围外的更大单位（亿/萬），宁可**整条不匹配**
     #   （条件丢弃 → 会体现在 unparsed 里），也**绝不许**把「一亿」截成 1（2026-10-02 收尾修复）。
     NUM = r'(\d+(?:\.\d+)?|[零一二三四五六七八九十百千万两]+)(?![亿萬])'
+
     n_num = 0
     # ① 区间口语**先于**单值判（「五到八句」不能被别的模式吃掉）
     for pat, lo_key, hi_key in (
@@ -1228,39 +1249,27 @@ def _parse_core(conn, text, keep_names=False):
                      (r'(?:阈值|长句阈值)\s*%s\s*%s' % (DOWN, NUM), 'thr_max')):
         n_num += take(pat, key, int)
     # ⚠ 2026-10-08 第二轮（开放措辞基准 `tests/nl_paraphrase.jsonl` 实测驱动）：
-    #   上面那批模式要求「指标词 + 方向词 + 数字」**紧邻且词形固定**，于是
-    #     「仄声**占比**超过 45**个百分点**」（占比≠比例、单位是「个百分点」不是 %）→ 整条漏；
-    #     「仄声比例**在 45% 以上**」（方向词在数字**之后**）→ 整条漏；
-    #     「篇幅不少于 40**字**」（数字后带量词）→ 整条漏。
-    #   实测：开放措辞基准 40 条里有 6 条栽在这类同义改写上。
+    #   上面那批模式要求「指标词 + 方向词 + 数字」紧邻且词形固定，于是
+    #   「仄声**占比**超过 45**个百分点**」「仄声比例**在 45% 以上**」「篇幅不少于 40**字**」
+    #   这类同义改写会整条漏（基准集 40 条里 6 条栽在这）。
     #
-    #   ★ 本块的两条自律（这是它**不可能**造成 1000 题回归的原因）：
-    #     ① **只填空**：`if key not in spec.rng` —— 上面已定下的值**绝不覆盖**；
+    #   ★ 关键是：这里**只是查表**——同义词写在模块级声明表 `NUM_SYNONYM_TABLE` 里，
+    #     **加一个同义词是改数据、不是改代码**，与「在解析器里再堆一层 if/else」划清界限
+    #     （审查 B13/GPT P0-8 反对的正是后者）。
+    #   ★ 两条自律（这是它不可能造成 1000 题回归的原因）：
+    #     ① **只填空**：`if key not in spec.rng` —— 上面已定下的值绝不覆盖；
     #     ② **只加词形**：不改动任何既有模式的匹配结果与算子口径（UP 仍是 >=、DOWN 仍是 <=）。
-    _ALIAS = {
-        'ze_min': (r'(?:仄声|仄字|仄)(?:比例|占比|比重|字占比|字比例|声比例|声占比)?', UP),
-        'ze_max': (r'(?:仄声|仄字|仄)(?:比例|占比|比重|字占比|字比例|声比例|声占比)?', DOWN),
-        'len_min': (r'(?:字数|篇幅|全篇字数|总字数|字)', UP),
-        'len_max': (r'(?:字数|篇幅|全篇字数|总字数|字)', DOWN),
-        'sent_min': (r'(?:句数|句子数|句)', UP),
-        'sent_max': (r'(?:句数|句子数|句)', DOWN),
-        'change_min': (r'变化(?:值|幅度)?', UP),
-        'change_max': (r'变化(?:值|幅度)?', DOWN),
-        'thr_min': (r'(?:阈值|长句阈值)', UP),
-        'thr_max': (r'(?:阈值|长句阈值)', DOWN),
-    }
-    _UNIT = r'\s*(?:%|％|个百分点|个字|字|句|首|篇)?'
-    for key, (metric, direc) in _ALIAS.items():
+    for key, metric, direc in NUM_SYNONYM_TABLE:
         if key in spec.rng:
             continue
         cast = float if key.startswith('ze') else int
-        # 方向词在数字**之前**（超过45个百分点）
-        n_num += take(r'%s\s*%s\s*(%s)%s' % (metric, direc, NUM, _UNIT), key, cast)
+        # 方向词在数字**之前**（超过 45 个百分点）
+        n_num += take(r'%s\s*%s\s*(%s)%s' % (metric, direc, NUM, NUM_UNIT), key, cast)
         if key in spec.rng:
             continue
-        # 方向词在数字**之后**（45% 以上）；「以上/以下」这类后置方向词才这么写
-        n_num += take(r'%s\s*(%s)%s\s*(?:以上|以下|及以上|及以下|以内)' % (metric, NUM, _UNIT),
-                      key, cast)
+        # 方向词在数字**之后**（45% 以上）
+        n_num += take(r'%s\s*(%s)%s\s*(?:以上|以下|及以上|及以下|以内)'
+                      % (metric, NUM, NUM_UNIT), key, cast)
 
     # 声律模式：整串只由 平/仄/？ 组成且长度 ≥3 的 token（如「仄仄平平」）
     for tok in re.split(r'[\s，,、；;：:]+', rest):
@@ -2987,59 +2996,18 @@ def _patch_parse(text, spec):
 
 
 def _lift_known_names(conn, spec):
-    """**已知实体回填**（只填空、不覆盖）——修「实体粘连」导致的整条条件丢失。
+    """已知实体回填 —— **委托** `entity_resolve.lift()`（唯一的实体解析层）。
 
-    实测（开放措辞基准 `tests/nl_paraphrase.jsonl`）：
-        「清代临江仙一共有多少首」→ 词牌**没被认出**，退化成「词面=临江仙一共有」
-        「纳兰性德写了几首词」    → 词人**没被认出**，退化成「词面=纳兰性德写了几首词」
-    根因：`_parse_core` 有一条刻意的兵险逻辑——**整串不含分隔符时视为「正文片段」**，
-    于是「临江仙一共有」「纳兰性德写了几首词」被整体当词面，不再查名单。
-    这条逻辑保护的是「不要把任意串当人名」，**不宜推翻**；但它可以被**补**：
-    名单里真实存在的词牌/词人，若作为**前缀**出现在残留词面里，就把它抬出来。
-
-    ★ 三条自律（保证**不可能**造成 1000 题回归）：
-      ① **只填空**：`cipai_any`/`author_any` 任一非空就**完全不动**；
-      ② **只认真名**：候选必须来自库里的 `cipai` / `authors` 表，且达到频次门槛（防脏词牌）；
-      ③ **前缀锚定**：必须以残留词面的**开头**匹配，避免从句子中段捞出无关实体。
+    实现已迁到 `solve/entity_resolve.py`。迁走的理由（审查 GPT §3.1⑦）：
+    实体识别若分散在 `retrieve.py` 里逐个 `rescue_*`，就会变成
+    `rescue_title / rescue_author / rescue_cipai / rescue_xxx` 的补丁链；
+    收口成一个模块后，**加一类实体只需改一处声明**（`entity_resolve.candidates`）。
     """
-    if spec.cipai_any or spec.author_any:
-        return spec
     try:
-        cipais = [(r[0], r[1]) for r in conn.execute(
-            'SELECT cipai, n FROM cipai WHERE n>=? AND length(cipai) BETWEEN 2 AND 5', (10,))]
-        authors = [(r[0], r[1]) for r in conn.execute(
-            'SELECT author, n FROM authors WHERE length(author)>=3')]
+        import entity_resolve
+        return entity_resolve.lift(conn, spec)
     except Exception:                                            # noqa: BLE001
         return spec
-    kws = list(spec.keywords or [])
-    if not kws:
-        return spec
-    cipais.sort(key=lambda x: (-len(x[0]), -x[1]))
-    authors.sort(key=lambda x: (-len(x[0]), -x[1]))
-    picked = None
-    for kw in kws:
-        for name, _n in cipais:
-            if kw.startswith(name) and len(kw) > len(name):
-                picked = ('cipai', name, kw)
-                break
-        if picked:
-            break
-        for name, _n in authors:
-            if kw.startswith(name) and len(kw) > len(name):
-                picked = ('author', name, kw)
-                break
-        if picked:
-            break
-    if not picked:
-        return spec
-    kind, name, kw = picked
-    if kind == 'cipai':
-        spec.cipai_any.append(name)
-    else:
-        spec.author_any.append(name)
-    _rest = kw[len(name):]
-    spec.keywords = [w for w in kws if w != kw] + ([_rest] if len(_rest) >= 2 else [])
-    return _finalize(spec)
 
 
 def parse_query(conn, text):

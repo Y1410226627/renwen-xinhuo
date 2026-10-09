@@ -695,7 +695,7 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
 
 ### 三、`PlanExecutor` + 溯源 DAG（GPT #3、#15、Phase 6）
 
-- 新增 `solve/plan_exec.py`：**16 个步骤算子**（filter/sort/limit/group_by/aggregate/argmax/
+- 新增 `solve/plan_exec.py`：**22 个步骤算子**（filter/sort/limit/group_by/aggregate/argmax/median/stddev/mode/rank/project/similar_to/
   count/extract/pair/locate/intersect/union/diff/anchor/annotate/materialize_as）
   + 3 种召回模式（sql/fts/vector）+ 6 个聚合指标，**全部复用** `retrieve`/`aggregate`/`pairing`
   （编排层，不是第二实现）。
@@ -767,7 +767,7 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
 | `omission_check` | **9 类 0 不一致** |
 | `invariant_check` | **0 违反** |
 | `queryplan` 自检 | 对齐 + 布尔树 6 用例 + 往返 5 条 **全过** |
-| `plan_exec` 自检 | **10 项全过**（逐步 vs 独立复算） |
+| `plan_exec` 自检 | **15 项全过**（逐步 vs 独立复算，含 median/stddev/rank/project/mode/similar_to） |
 | `planner --selftest` | **4 项全过**（契约 / 无效实体 / NOT 语义 / 优雅降级） |
 | `answer_verify` | 五态 status + 聚合三态，自检含「语义题不得显示 ✓」断言 |
 | `nl_benchmark` | 40 条跑通、与基线**无回退** |
@@ -807,3 +807,23 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
   本项目目标域是清词，故加此开关，现已启动**清词全量篇级索引**的构建。
 
 - **状态**：✅ 已修。
+
+## D27 📌 实测记录（2026-10-09）：开放措辞基准 · 默认路 vs 规划路
+
+| 指标 | 默认（`LVC_PLANNER=rule`） | 规划路（`LVC_PLANNER=plan`） |
+| --- | --- | --- |
+| 整体通过 | **20/40** | **28/40** |
+| ① 条件覆盖 Coverage | 27/40 | **33/40** |
+| ② 集合身份 SetIdentity | 14/29 | **20/29** |
+| ③ 计数正确 AnswerCorrect | 2/5 | **5/5** |
+| 耗时 | 4.6 秒 | 107.6 秒（约 2.7 秒/题，含 LLM） |
+
+- **规划路明确解决的**：跨值 OR（NL017/018）、NOT 与排除（NL040/015/016）、计数（NL007/033/034）、
+  句脚「愁」（NL012）、题名变体（NL024）等——即此前「数据库里有答案却答不出」的主力题型。
+- **规划路当前仍失手的**：`NL001/NL002`（数值阈值，规划路 27 vs 真值 59，**反向回归**）、
+  `NL014`（∀ 句脚仄 → 0）、`NL020`（区间被并成 OR）、`NL025`（句脚平仄为仄 → 8 vs 18675）、
+  `NL027`(pz) / `NL029`(consist) / `NL030`(tail_each) / `NL031`(parity) / `NL035`(longest_len) / `NL036`(f_ratio) / `NL037`(abs_change) 漏条件。
+- **结论（不擅自切默认）**：规划路净收益 +8 项，但存在**个例反向回归**，因此
+  **默认仍为 `rule`（零回归生命线）**；是否切换应采用文档所述的 **Phase 4「规则候选 + 模型候选 → 仲裁」**
+  （`ask._arbitrate()` 已具备覆盖率/一致性仲裁骨架，`LVC_PLANNER=plan` 即启用规划路），
+  并逐条消解上表失手项后再改默认。这是下一步最高价值的改进项。

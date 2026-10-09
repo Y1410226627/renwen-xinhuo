@@ -15,7 +15,7 @@
 | 1 | `solve/README.md` | **实现与自检总纲**：当前状态、每条命令怎么复现、口径演变、踩过的坑 |
 | 2 | `DECISIONS.md` | **决策表**：已接受/已拒绝/已暂缓，以及**为什么没选另一种改法**（防重复试错） |
 | 3 | `GLOSSARY.md` | **术语与措辞禁忌**：哪些话我们**不该说**（如「仄声越多越悲壮」） |
-| 4 | `朋友项目对照分析与可借鉴清单.md` | 与本项目**互补**的另一条线（F1 严谨层）能借什么 |
+| 4 | `外部审查处置表.md` | 外部审查**逐项处置与状态**（已修／未做及理由）；第二轮架构重构见 `DECISIONS.md` D26 与 `solve/README.md` §49 |
 
 ---
 
@@ -31,9 +31,18 @@ solve/                        交付链（**答案的唯一来源**，不 import
 ├── pairing.py   配对题
 ├── official.py  官方「甲乙两篇对比」题识别
 ├── ask.py       **问答链**（检索 + 证据 + 四道护栏）    ← 与上列**互不导入**
-└── retrieve.py  五路检索（词面/元数据/全文/数值/声律模式）
+└── retrieve.py  多路检索（词面/元数据/全文/数值/声律模式/向量）
     guard.py     四道护栏（数字/引用/无据/边界）
     answer_reason.py 拒答理由八态（附加层，只读结果）
+    ── 第二轮架构重构：**默认关闭、按需启用**（开启后对交付答案零影响）──
+    queryplan.py   **Query Plan（执行真源）**：`LEAF_SCHEMA` 26 字段 + 布尔树编译 + to_plan/from_plan/to_spec
+    planner.py     LLM 规划器：Prompt 由 `LEAF_SCHEMA` **现场生成**；无效实体→恒假哨兵（绝不剪枝成全库）
+    plan_exec.py   计划执行器：**22 算子** + `ProvDAG` 溯源（`LVC_PLANNER=plan` 时接管主链）
+    context.py     服务端会话语境：完整结果集 + 指代分类 + EXACT/SEMANTIC 区分
+    fusion.py      RRF 名次融合 + 可选精排（`LVC_RERANK=1`）
+    vector_index.py / llm_embed.py  真向量检索（SQLite 为真源、向量为派生索引）
+    answer_verify.py 集合身份校验（五态）+ 聚合复算（三态）
+    entity_resolve.py 实体解析层（作者/词牌/题名收口，替代 `rescue_*` 补丁链）
 
 web/   演示页与后端服务
 ├── serve.py         本地服务：/api/* + 静态页；问答页取 web/dist/ask/，离线视图取 data/vue/

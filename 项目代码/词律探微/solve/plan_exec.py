@@ -244,6 +244,9 @@ class Executor:
             'union': self._op_union, 'diff': self._op_diff,
             'anchor': self._op_anchor, 'annotate': self._op_annotate,
             'materialize_as': self._op_materialize,
+            'median': self._op_median, 'stddev': self._op_stddev,
+            'mode': self._op_mode, 'rank': self._op_rank,
+            'project': self._op_project, 'similar_to': self._op_similar_to,
         }.get(op)
         if fn is None:
             self.problems.append('未知步骤算子：%r' % op)
@@ -531,6 +534,105 @@ class Executor:
         return self._mk(Frame(self.dag, 'set', ordered, scores=scores, note='annotate:vector'),
                         'annotate', f, '语义重排 %d 篇' % len(hits), time.time() - t0)
 
+    def _numeric_values(self, f, field):
+        """当前集合在 `field` 上的数值列表（表达式走**白名单**，接受用户串）。"""
+        expr = _order_expr(field) or _order_expr('ze_ratio')
+        parts, args = _pid_filter_sql(f.pids)
+        if not parts:
+            return []
+        rows = self.conn.execute('SELECT %s FROM poems p WHERE %s'
+                                 % (expr, ' OR '.join(parts)), args).fetchall()
+        return [r[0] for r in rows if r[0] is not None]
+
+    def _op_median(self, f, st):
+        """中位数（审查 Top8：把 median 从「特殊入口」变成**算子**）。"""
+        t0 = time.time()
+        if f.kind != 'set' or not f.pids:
+            return f
+        import statistics
+        vals = self._numeric_values(f, st.get('of') or 'ze_ratio')
+        val = round(statistics.median(vals), 4) if vals else None
+        return self._mk(Frame(self.dag, 'scalar', value=val, note='median'),
+                        'median', f, '中位数（n=%d）' % len(vals), time.time() - t0)
+
+    def _op_stddev(self, f, st):
+        """总体标准差（同为算子化）。"""
+        t0 = time.time()
+        if f.kind != 'set' or not f.pids:
+            return f
+        import statistics
+        vals = self._numeric_values(f, st.get('of') or 'han_len')
+        val = round(statistics.pstdev(vals), 4) if vals else None
+        return self._mk(Frame(self.dag, 'scalar', value=val, note='stddev'),
+                        'stddev', f, '标准差（n=%d）' % len(vals), time.time() - t0)
+
+    def _op_mode(self, f, st):
+        """众数：按 field 分组取计数最大的一组（组合已有算子，不新增分支语义）。"""
+        t0 = time.time()
+        f1 = self._op_group_by(f, st)
+        f2 = self._op_aggregate(f1, {'metric': 'count', 'field': st.get('field') or 'author'})
+        out = self._op_argmax(f2, {'by': 'value', 'dir': 'desc'})
+        out.note = 'mode'
+        return out
+
+    def _op_rank(self, f, st):
+        """给分组表按 `by`（默认 value）排名，名次写入每行 `rank`。"""
+        t0 = time.time()
+        if f.kind != 'groups':
+            self.problems.append('rank 需要 groups 帧（先 group_by+aggregate）')
+            return f
+        key = st.get('by') or 'value'
+        rev = (st.get('dir') or 'desc') == 'desc'
+        rows = sorted(f.rows, key=lambda r: (r.get(key) is None,
+                                             -(r.get(key) or 0) if rev else (r.get(key) or 0)))
+        out = []
+        for i, r in enumerate(rows, 1):
+            r2 = dict(r)
+            r2['rank'] = i
+            out.append(r2)
+        return self._mk(Frame(self.dag, 'groups', pids=f.pids, rows=out, note='rank'),
+                        'rank', f, '', time.time() - t0)
+
+    def _op_project(self, f, st):
+        """取字段（单篇→明细行；供「那首是谁写的」）。字段走**白名单**。"""
+        t0 = time.time()
+        pids = f.pids[:1] if f.kind in ('set', 'single') else ([f.single] if f.single else [])
+        allow = {'author': 'author', 'cipai': 'cipai', 'title': 'title', 'dynasty': 'dynasty',
+                 'han_len': 'han_len', 'sent_n': 'sent_n', 'ze_ratio': 'ze_ratio',
+                 'scene': 'scene', 'pid': 'pid', 'source': 'source'}
+        fields = list(st.get('fields') or ['author', 'cipai', 'title'])
+        cols = [allow[x] for x in fields if x in allow]
+        rows = []
+        if pids and cols:
+            row = self.conn.execute('SELECT %s FROM poems WHERE pid=?'
+                                    % ','.join(cols), (pids[0],)).fetchone()
+            if row:
+                rows = [dict(zip(cols, row))]
+        return self._mk(Frame(self.dag, 'rows', pids=pids,
+                              single=(pids[0] if pids else None), rows=rows, note='project'),
+                        'project', f, '取字段 %s' % ','.join(cols), time.time() - t0)
+
+    def _op_similar_to(self, f, st):
+        """「与这首/这段话主题相近」（向量）。不可用则**如实记 problem**，不伪造。"""
+        t0 = time.time()
+        pid = st.get('pid') or (f.pids[0] if f.pids else None)
+        q = st.get('q') or ''
+        try:
+            import vector_index as VI
+            if not VI.available():
+                self.problems.append('similar_to：向量索引不可用（%s）' % VI.why())
+                return f
+            tk = int(st.get('topk') or max(self.topk, 10))
+            allow = set(f.pids) if (f.pids and st.get('restrict')) else None
+            hits = (VI.similar(pid, topk=tk, allow=allow) if pid
+                    else VI.search(q, topk=tk, allow=allow))
+        except Exception as e:                                   # noqa: BLE001
+            self.problems.append('similar_to 失败：%s: %s' % (type(e).__name__, e))
+            return f
+        pids = [p for p, _s in (hits or [])]
+        return self._mk(Frame(self.dag, 'set', pids, scores=dict(hits or {}), note='similar_to'),
+                        'similar_to', f, '语义相近 %d 篇' % len(pids), time.time() - t0)
+
     def _op_materialize(self, f, st):
         name = st.get('name') or ('s%d' % (len(self.named) + 1))
         self.named[name] = f
@@ -709,7 +811,70 @@ def selftest(conn):
                        "p.pid NOT IN (SELECT pid FROM lines WHERE substr(pz,-1,1)='仄')").fetchone()[0]
     _chk('多步⑦ line_q(∄句脚仄) 计数', r['frame'].value, ref)
 
-    # ── ⑧ 溯源 DAG 可用性 ──
+    # ── ⑨ 新增算子：median / stddev / rank / project / mode（独立复算对照）──
+    import statistics as _st
+    plan = QP.empty_plan()
+    plan['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    plan['steps'] = [{'op': 'median', 'of': 'han_len'}]
+    r = execute(conn, plan)
+    ref = [x[0] for x in conn.execute("SELECT han_len FROM poems WHERE dynasty='清'")]
+    _chk('多步⑨ median(han_len) 清', r['frame'].value, round(_st.median(ref), 4))
+
+    plan = QP.empty_plan()
+    plan['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    plan['steps'] = [{'op': 'stddev', 'of': 'han_len'}]
+    r = execute(conn, plan)
+    _chk('多步⑩ stddev(han_len) 清', r['frame'].value, round(_st.pstdev(ref), 4))
+
+    plan = QP.empty_plan()
+    plan['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    plan['steps'] = [{'op': 'group_by', 'field': 'author'},
+                     {'op': 'aggregate', 'metric': 'count', 'field': 'author'},
+                     {'op': 'rank', 'by': 'value', 'dir': 'desc'}]
+    r = execute(conn, plan)
+    rk = sorted(r['frame'].rows, key=lambda x: x['rank'])[:1]
+    ref = conn.execute("SELECT p.author, COUNT(*) c FROM poems p WHERE p.dynasty='清' "
+                       "GROUP BY p.author ORDER BY c DESC, p.author LIMIT 1").fetchone()
+    _chk('多步⑪ rank 第 1 名', (rk[0]['key'] if rk else None, rk[0]['rank'] if rk else None),
+         (ref[0], 1))
+
+    _p1 = conn.execute("SELECT pid FROM poems WHERE dynasty='清' ORDER BY pid LIMIT 1").fetchone()[0]
+    plan = QP.empty_plan()
+    plan['scope'] = {'base': 'corpus'}
+    plan['filters'] = {'field': 'pid', 'op': 'in', 'value': [_p1]}
+    plan['steps'] = [{'op': 'project', 'fields': ['author', 'cipai', 'title']}]
+    r = execute(conn, plan)
+    ref = conn.execute('SELECT author, cipai, title FROM poems WHERE pid=?', (_p1,)).fetchone()
+    got = r['frame'].rows[0] if r['frame'].rows else {}
+    _chk('多步⑫ project(author,cipai,title)', (got.get('author'), got.get('cipai'), got.get('title')),
+         (ref[0], ref[1], ref[2]))
+
+    plan = QP.empty_plan()
+    plan['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    plan['steps'] = [{'op': 'mode', 'field': 'cipai'}]
+    r = execute(conn, plan)
+    ref = conn.execute("SELECT p.cipai, COUNT(*) c FROM poems p WHERE p.dynasty='清' "
+                       "GROUP BY p.cipai ORDER BY c DESC, p.cipai LIMIT 1").fetchone()
+    rows = r['frame'].rows
+    _chk('多步⑬ mode(cipai) 清', (rows[0]['key'] if rows else None,
+                                   rows[0]['value'] if rows else None), (ref[0], ref[1]))
+
+    plan = QP.empty_plan()
+    plan['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    plan['steps'] = [{'op': 'limit', 'n': 1},
+                     {'op': 'similar_to', 'restrict': True, 'topk': 3}]
+    r = execute(conn, plan)
+    ok9 = isinstance(r['problems'], list)     # 无向量索引时必须**如实记 problem**而非崩
+    print('%s 多步⑭ similar_to 无索引时优雅降级：problems=%s' % ('✓' if ok9 else '✗', r['problems']))
+    ok_all = ok_all and ok9
+
+    # ── ⑧ 溯源 DAG 可用性（**重跑本用例自己的计划**；避免被上面新插用例的 r 覆盖）──
+    plan = QP.empty_plan()
+    plan['intent'] = 'count'
+    plan['filters'] = {'and': [{'field': 'dynasty', 'op': '=', 'value': '清'},
+                               {'field': 'line_q', 'op': '=',
+                                'value': {'op': '∄', 'pred': ['tail_pz', '仄']}}]}
+    r = execute(conn, plan)
     prov = r['dag'].render(r['frame'].prov)
     ok8 = ('corpus' in prov or 'sql.filter' in prov) and 'count' in prov
     ok_all = ok_all and ok8

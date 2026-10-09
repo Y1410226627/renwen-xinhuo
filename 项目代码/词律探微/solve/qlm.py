@@ -713,7 +713,9 @@ def plan_mode():
     见文件头注释「理解层三条路」。
     """
     m = (os.environ.get('LVC_PLANNER') or 'rule').strip().lower()
-    return m if m in ('rule', 'llm', 'planner') else 'rule'
+    if m in ('plan', 'planner'):     # 两种写法同义（ask 侧用 'plan'）
+        return 'planner'
+    return m if m in ('rule', 'llm') else 'rule'
 
 
 def understand(conn, llm, question, context=None, temperature=0.0, max_tokens=400):

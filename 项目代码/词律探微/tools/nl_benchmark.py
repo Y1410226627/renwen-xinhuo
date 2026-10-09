@@ -110,7 +110,15 @@ def run_case(conn, case, mode='rule', llm=None, verbose=False):
     except Exception as e:                                       # noqa: BLE001
         res.update(ok=False, err='解析异常：%s: %s' % (type(e).__name__, e))
         return res
-    got = _fields_of(spec)
+    plan = None
+    if mode == 'plan' and llm is not None:
+        try:
+            import planner as PL
+            plan = PL.plan(conn, llm, q)
+        except Exception:                                        # noqa: BLE001
+            plan = None
+    got = _fields_of(spec, plan)
+    res['plan_ok'] = bool(plan)
     want = set(case.get('fields') or [])
     res['fields_got'] = sorted(got)
     res['fields_want'] = sorted(want)
@@ -125,10 +133,20 @@ def run_case(conn, case, mode='rule', llm=None, verbose=False):
             truth = None
             res['err'] = '基准集真值 SQL 出错：%s' % e
         if truth is not None:
-            try:
-                hit = R.hit_pids_of_spec(conn, spec)
-            except Exception:                                    # noqa: BLE001
-                hit = None
+            hit = None
+            if plan and plan.get('filters'):      # 规划路：以 Plan 的布尔过滤树为准
+                try:
+                    import queryplan as QP
+                    w, a = QP.compile_filters(conn, plan['filters'])
+                    hit = [r[0] for r in conn.execute(
+                        'SELECT p.pid FROM poems p WHERE %s' % w, a)]
+                except Exception:                                # noqa: BLE001
+                    hit = None
+            if hit is None:
+                try:
+                    hit = R.hit_pids_of_spec(conn, spec)
+                except Exception:                                # noqa: BLE001
+                    hit = None
             if hit is None:
                 # 兜底：用引擎自己编的 SQL 取（会标注为「引擎侧」）
                 where, args = R._sql(spec)

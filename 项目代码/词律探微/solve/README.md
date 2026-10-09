@@ -1702,7 +1702,7 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 | 模块 | 角色 |
 | --- | --- |
 | `queryplan.py` | **IR 唯一真源**：`LEAF_SCHEMA`（26 字段）+ `STEP_OPS` + `RETRIEVE_MODES`；由它生成 Planner 的 Prompt；`check_schema_alignment()` 双向防漂移 |
-| `plan_exec.py` | **执行器**：16 步骤算子 + 3 召回模式 + 6 聚合指标 + `ProvDAG` 溯源，复用 `retrieve/aggregate/pairing` |
+| `plan_exec.py` | **执行器**：22 步骤算子（含 median/stddev/mode/rank/project/similar_to）+ 3 召回模式 + 6 聚合指标 + `ProvDAG` 溯源，复用 `retrieve/aggregate/pairing` |
 | `planner.py` | 规划器：Prompt 由 schema 生成；无效实体 → `_not_found`（恒假哨兵），**绝不剪枝成全库** |
 | `vector_index.py` | 双层（篇/句）受限检索 + manifest 五项强校验（`INDEX_VERSION=2`）+ `similar()` |
 | `build_vector_index.py` | 建索引 CLI：全篇嵌入、句级真实现、无重复 embed、断点续跑 |
@@ -1715,7 +1715,7 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 
 | 环境变量 | 默认 | 作用 |
 | --- | --- | --- |
-| `LVC_PLANNER` | `rule` | `plan` 时走 Planner→Plan→Executor 主链 |
+| `LVC_PLANNER` | `rule` | `plan`（别名 `planner`）时走 Planner→Plan→Executor 主链 |
 | `LVC_VECTOR` | 关 | 开启真向量召回（受限检索 + RRF） |
 | `LVC_RERANK` | 关 | 精排（本机 reranker 多文档区分度不足） |
 | `LVC_PZ_GRAM` | 关 | 平仄 n-gram 倒排（实测更慢，默认关） |
@@ -1725,7 +1725,7 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 ```bash
 PY="D:/conda_envs/langchain-env/python.exe"
 "$PY" solve/queryplan.py            # schema 对齐 + 布尔树 6 用例 + 往返 5 条
-"$PY" solve/plan_exec.py            # 执行器 10 项（逐步 vs 独立复算）
+"$PY" solve/plan_exec.py            # 执行器 15 项（逐步 vs 独立复算；含新算子 median/stddev/rank/project/mode/similar_to）
 "$PY" solve/planner.py --selftest   # 契约 / 无效实体 / NOT 语义 / 优雅降级
 "$PY" solve/answer_verify.py        # 五态 status
 "$PY" tools/nl_benchmark.py         # 开放理解基准（对比基线，只许变好）

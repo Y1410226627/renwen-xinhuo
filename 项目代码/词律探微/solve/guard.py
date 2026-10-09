@@ -48,7 +48,10 @@ def _cn_values(s):
     return {str(v), '%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f, '%.1f' % abs(f)}
 
 
-_QUOTE_SPAN_RE = re.compile(r'「[^」]*」|[“"][^”"]*[”"]')
+# ⚠ 2026-10-09 扩：书名号《…》里的数字是**篇名/词牌名**（如《忆秦娥·十六夜望月，次韵和鹓雏》、
+#   《十六字令》），与语料引文同理，**不是系统对数量的断言** —— 一并剥离，消除误报
+#   （`tools/check_extreme.py` 四·护栏通过 实测因「十六」误报而 FAIL）。
+_QUOTE_SPAN_RE = re.compile(r'「[^」]*」|[“"][^”"]*[”"]|《[^》]*》')
 
 
 def _r1(x):

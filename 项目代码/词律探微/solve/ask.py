@@ -2040,7 +2040,7 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     # ⭐ 2026-10-08 第二轮审查 P0-#1：**让 Planner 真正接管主链**。
     #   仅当 `LVC_PLANNER=plan` 时才进入（默认 `rule`/`llm` **完全不调用**，零回归）；
     #   规划路任何环节失败 → 返回 None → **回落到下面这条成熟链路**（不会给出半成品）。
-    if os.environ.get('LVC_PLANNER', 'rule').strip().lower() == 'plan':
+    if os.environ.get('LVC_PLANNER', 'rule').strip().lower() in ('plan', 'planner'):
         _pr = _answer_by_plan(conn, question, topk=topk, llm=llm, context=context,
                               ctx_pids=ctx_pids, kind=kind)
         if _pr is not None:

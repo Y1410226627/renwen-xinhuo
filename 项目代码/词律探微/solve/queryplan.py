@@ -181,6 +181,16 @@ STEP_OPS = {
     'anchor':          '锚定到会话里的单篇 / 集合（来自 context.resolve）',
     'annotate':        '给结果集挂一个派生标注（如 via=vector 的语义相关度）',
     'materialize_as':  '把当前结果集命名保存（供后续 steps 引用）',
+    'median':          '取数值字段的中位数：{"op":"median","of":"han_len"}'
+                       '（of 缺省 ze_ratio；结果是一个数）',
+    'stddev':          '取数值字段的总体标准差：{"of":"han_len"}（结果是一个数）',
+    'mode':            '众数：按 field 分组取**计数最大**的那一组'
+                       '（等价 group_by→aggregate(count)→argmax，但一次写完）',
+    'rank':            '给**分组表**按 by（默认 value）排名，把名次写进每行 rank',
+    'project':         '取字段：{"fields":["author","cipai","title"]}'
+                       '（单篇→明细行，供「那首是谁写的」）',
+    'similar_to':      '与某篇/某段文字**主题相近**（向量）：{"pid":<篇号>} 或 {"q":"秋景"}；'
+                       '向量索引不可用时如实记 problem，绝不伪造',
 }
 
 RETRIEVE_MODES = {
@@ -447,6 +457,26 @@ def from_plan(plan, conn):
         else:
             setattr(spec, k, v)
     return retrieve._finalize(spec)
+
+
+def to_spec(plan, conn):
+    """`from_plan` 的**约定别名**（Planner 路 `qlm.understand` 按此名调用）。
+
+    为什么需要它：`planner.py` 的文件头把对外约定写成
+        `empty_plan() / validate(plan, conn) / to_spec(plan, conn) / from_spec(spec, conn)`，
+    而本模块早期只实现了 `from_plan`。于是 `LVC_PLANNER=planner` 时
+    `queryplan.to_spec(pl, conn)` 必然抛 `AttributeError` → 被上层 except 吞掉 →
+    **永远回落填槽路**（第二轮审查后的遗留缺陷）。此处补上别名，使「约定」与「实现」一致。
+
+    ⚠ 语义与 `from_plan` 完全相同，且**有损**：`steps` 无法用 `QuerySpec` 表达，会被丢弃。
+      需要完整的多步执行请走 `ask._answer_by_plan()`（`LVC_PLANNER=plan`）。
+    """
+    return from_plan(plan, conn)
+
+
+def from_spec(spec, conn=None):
+    """`to_plan` 的**约定别名**（与 `to_spec` 对称，供外部按 planner 约定名调用）。"""
+    return to_plan(spec)
 
 
 def _restore_complex(spec, node):
