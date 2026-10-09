@@ -24,3 +24,7 @@ _*.log
 _*.out
 _*.err
 **/data/_*
+# 运行产物（网页端会话 / 向量索引）：不入仓
+**/data/sessions/
+**/data/vector/
+

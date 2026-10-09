@@ -3023,4 +3023,37 @@ def parse_query(conn, text):
     parse_line_ops(text, spec)
     _patch_parse(text, spec)
     _lift_known_names(conn, spec)          # 已知实体回填（只填空，不覆盖）
-    return _flag_ops(spec, text)
+    return _flag_ops(spec, text)
+
+
+# ───────────────────── 内容/情感类「语义请求词」（2026-10-09） ─────────────────────
+# 由来（主人截图实测）：「浣溪沙·二月望夜是谁写的？多少字？…**主要内容和思想感情是什么**？」
+#   —— 「主要内容」「思想感情」被当成**词面检索词**去搜（显然搜不到，还污染结果），
+#   而问句真正要的「内容/情感」层完全没有回应（只回了一句「不涉及内容或思想感情的实质分析」）。
+# 处置：① 这类词是**请求**不是**条件**，必须从 `keywords/semantic` 里剔除；
+#       ② 「原文」本身就是内容层最可靠的依据 —— 由 `ask.answer` 把**全文逐句（原序）**列进证据块。
+CONTENT_ASK_WORDS = (
+    '主要内容', '中心思想', '思想感情', '思想情感', '情感基调', '情感', '思想', '主旨', '主题',
+    '意境', '含义', '寓意', '什么意思', '讲了什么', '说的是什么', '表达了什么', '写了什么',
+    '赏析', '鉴赏', '大意', '内容',
+)
+_CONTENT_ASK_RE = re.compile('|'.join(
+    sorted((re.escape(w) for w in CONTENT_ASK_WORDS), key=len, reverse=True)))
+
+
+def content_ask_of(question):
+    """问句是否请求「内容/情感/主题」层面的解答 → 返回命中的请求词列表（无则 []）。
+
+    用途：① 从检索词面里剔除这些词（它们是**请求**，不是**条件**）；
+          ② 令答案把该篇**全文**列入证据块（原文即内容层依据），而不是回一句"不涉及"。
+    """
+    q = str(question or '')
+    if not q:
+        return []
+    out, seen = [], set()
+    for m in _CONTENT_ASK_RE.finditer(q):
+        w = m.group(0)
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out

@@ -129,6 +129,18 @@ def poem_block(conn, pid, top_lines=1, spec=None):
             'SELECT idx,text,han_len,ping,ze,pz,tail FROM lines WHERE pid=? '
             'ORDER BY CAST(ze AS REAL)/(han_len + 0.0) DESC, idx LIMIT ?',
             (pid, top_lines)).fetchall()]
+    # ⭐ 2026-10-09：「请求句数 ≥ 全篇句数」→ **按原序给全文**。
+    #   上面的「命中句优先 / 按仄声占比补齐」是给「只展示若干句」用的；
+    #   而内容/情感类问题要的是**读全文**，顺序被按仄声占比打乱就失去意义。
+    if top_lines >= max(conn.execute('SELECT COUNT(*) FROM lines WHERE pid=?', (pid,))
+                        .fetchone()[0], 1):
+        _all = conn.execute('SELECT idx,text,han_len,ping,ze,pz,tail FROM lines '
+                            'WHERE pid=? ORDER BY idx', (pid,)).fetchall()
+        if with_cond:
+            lines = [(r0[0], r0[1], r0[2], r0[3], r0[4], r0[5], r0[6], reasons.get(r0[0], []))
+                     for r0 in _all]
+        else:
+            lines = [(r0[0], r0[1], r0[2], r0[3], r0[4], r0[5], r0[6], []) for r0 in _all]
     return {
         'pid': pid, 'dynasty': dyn, 'author': author, 'cipai': cipai, 'title': title,
         'source': source, 'sent_n': sent_n, 'han_len': han_len, 'ping': ping, 'ze': ze,

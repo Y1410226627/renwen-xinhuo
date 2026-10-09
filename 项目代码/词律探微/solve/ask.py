@@ -2111,6 +2111,22 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #    而最终既没有分组统计、也没有排序/配对意图 → **如实认账**，绝不拿检索结果冒充答案。
     #    这一条是 2026-10-01 主人运行记录里那个 bug 的「防复发闸」：
     #    当时系统答「融合排序最前者是丁澎」，用户问的却是「哪个词人最多」——答非所问且报「护栏通过」。
+    # ⭐ 2026-10-09（主人截图实测）：「主要内容和思想感情是什么」里的
+    #   「主要内容」「思想感情」是**请求**、不是**检索条件** —— 若留在词面里，
+    #   会拿它们去全文检索（搜不到，还污染结果）。此处剔除，并标记 `content_ask`，
+    #   由下方把该篇**全文**列入证据块作为内容层依据。
+    _cask = retrieve.content_ask_of(question)
+    if _cask:
+        _kw0, _sem0 = list(spec.keywords or []), list(spec.semantic or [])
+        spec.keywords = [k for k in _kw0 if k not in _cask]
+        spec.semantic = [s for s in _sem0 if s not in _cask]
+        if spec.keywords != _kw0 or spec.semantic != _sem0:
+            retrieve._finalize(spec)
+            pnote['notes'] = list(pnote.get('notes') or []) + [
+                '问句中的「%s」属**内容/情感层面的请求**（不是检索条件），已从词面中剔除；'
+                '该篇全文会逐句列在证据块里供判读' % '／'.join(_cask)]
+    spec.content_ask = bool(_cask)
+
     _ge = retrieve._group_extreme_of(question)
     if _ge[0] and not (spec.agg or getattr(spec, 'order_by', None)
                        or getattr(spec, 'pair', None)):
@@ -2198,6 +2214,9 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         return {'question': question, 'spec': spec.describe(), 'kind': kind, 'blocks': [],
                 'answer': text, 'verify': (ok, problems), 'refused': True, 'problems': problems}
 
+    # ⭐ 内容/情感类问题：把**全文**列入证据块（原文即内容层依据）
+    if getattr(spec, 'content_ask', False):
+        with_lines = max(with_lines, 999)
     blocks = evidence.build_blocks(conn, rows, with_lines=with_lines, spec=spec)
     if not blocks:
         # 审查 B1：旧写法直接 `b0 = blocks[0]` → IndexError。无据就**认账**（不许崩，也不许举例冒充）
@@ -2313,6 +2332,14 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         if _ex_line:
             out.append(_ex_line)
     out.append(head)
+    if getattr(spec, 'content_ask', False):
+        # ⭐ 内容/情感层：本系统**不对思想感情下结论**（那是评价性判断，非语料可判定事实），
+        #   但**原文本身就是内容层依据** —— 全文已逐句列在下方证据块，可直接判读；
+        #   若需要模型层面的解读，界面上的「论证辅助草稿」由大模型生成并已过四道护栏。
+        out.append('【内容与情感】本系统按**形式与原文**作答，不对思想感情作结论；'
+                   '该篇**全文已逐句列在下方证据块**中，可直接判读其内容与情感。'
+                   '（如需模型层面的解读，请勾选界面上的**论证辅助草稿**选项——那是**大模型说法**，'
+                   '已过四道护栏，但不作为事实结论。）')
     # ⚠ 2026-10-03：语料里确有**空篇残片**（0 句 / 0 字，元曲 144 篇）。「没有任何一句…」
     #   「每一句都…」这类条件会被它们**平凡**满足（空集里没有反例/每个元素都满足）。
     #   计数与真值口径一致（它们确实在命中集合里），但作为**证据**必须说明白，
