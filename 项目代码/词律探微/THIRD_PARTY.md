@@ -45,3 +45,14 @@ hulbji/couyun @1744e87…
 ```
 
 这一段链路会原样出现在 `solve/cipu.py` 的返回体 `source_note` 字段与前端界面上。
+
+## 推音（tshet-uinh）· beta8 — 2026-10-10 引入
+
+- 来源：Project NK2028《推音》(tshet-uinh)，`vendor/tshet-uinh-beta8.cjs`。
+- 许可：MIT（`vendor/TshetUinh-LICENSE`）。
+- 用途：《广韵》字头候选（音韵地位/反切/韵目/直音/释义）的**离线数据源**，
+  由 `node tools/export_tshet_uinh.mjs` 导出到 `data/rhyme/tshet_uinh.json`
+  （覆盖本语料 7,711 字中的 5,147 个广韵收录字 / 8,399 条），供「逐字研读」的字位候选展示。
+- 口径红线：《广韵》候选为**历史音韵参考，只展示、不参与平仄计算**——本系统平仄按
+  普通话四声（题库口径），人工裁定只收普通话读音；不据广韵韵目宣称押韵、不作清代语音推断。
+- 词谱数据（既有）：couyun（MIT）——见 data/cipu/README.md。

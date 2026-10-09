@@ -237,6 +237,7 @@ def solve(question, cls=None):
         errors.append('数据不足，无法计算（缺少 %s）' % cls)
     return {'ok': not errors and bool(ans), 'cls': cls, 'ans': ans,
             'located': {k: v.loc for k, v in located.items()},
+            'sources': sorted({getattr(v, 'source', '') for v in located.values()}),
             'parts': parts, 'errors': errors, 'paths': paths}
 
 
@@ -248,8 +249,38 @@ def _signed(v):
     return ('%+.1f' % v)
 
 
+#: **分来源核验声明**（2026-10-10，竞品对照图5 对齐）——官方题答案尾部按语料来源
+#: 逐项声明核验范围。措辞描述的是**本项目**的实际核验情况（不是转录方承诺）：
+#: 语料是本地固定快照、正文未作底本校勘、单篇创作年代未核；平仄为引擎按普通话四声预计算。
+_SOURCE_NOTES = {
+    'poetry-source': 'poetry-source（诗词基础转录）：来源核验范围——本地固定快照与原文 hash、'
+                     '署名字段照录；正文未作底本校勘，单篇创作年代未核；词牌名为来源自带，未核推定。',
+    'chinese-poetry': 'chinese-poetry（数字转录）：来源核验范围——本地固定快照与正文 hash、'
+                      '来源署名/身份照录；体裁与朝代为来源分类信息，未作独立学术核定；'
+                      '正文未作底本校勘，单篇创作年代未核。',
+}
+
+
 def render(res):
-    """把引擎答案按**官方标准答案的措辞**渲染成文本（措辞照抄题库，不自创词形）。"""
+    """把引擎答案按**官方标准答案的措辞**渲染成文本（措辞照抄题库，不自创词形）。
+
+    尾部附**分来源核验声明**（2026-10-10）：答案涉及的每一篇都按它的语料来源注明
+    「核验范围与未核事项」——不因「来源标注存在」就冒充已核原书。"""
+    txt = _render_body(res)
+    try:
+        _srcs = sorted(str(s) for s in (res.get('sources') or []) if s)
+        _notes = [_SOURCE_NOTES[s] for s in _srcs if s in _SOURCE_NOTES]
+        _unk = [s for s in _srcs if s not in _SOURCE_NOTES]
+        if _unk:
+            _notes.append('其它来源（%s）：核验范围同上——本地快照照录，未核原书。' % '、'.join(_unk))
+        if _notes:
+            txt += '\n【来源与核验范围】' + '；'.join(_notes)
+    except Exception:                                          # noqa: BLE001
+        pass
+    return txt
+
+
+def _render_body(res):
     a, b = res['ans'].get('甲'), res['ans'].get('乙')
     cls = res['cls']
     if cls == 'C1':

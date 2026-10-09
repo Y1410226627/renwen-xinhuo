@@ -478,9 +478,17 @@ async function onCharClick(ev) {
   } catch (e) { candErr.value = String(e.message || e); cand.value = { line: Number(li), pos: Number(pos), char: t.textContent, candidates: [], history: [] }; }
 }
 
+function pickCand(c0) {
+  if (!cand.value) { return; }
+  // 进入「登记选读」状态：理由在**面板内**填写（不再用弹窗），保存时走决策事件
+  cand.value = Object.assign({}, cand.value, {
+    picking: c0, whyDraft: (cand.value.whyDraft || '')
+  });
+}
+
 async function decide(c0) {
   if (!cand.value || !curDetailPid.value) { return; }
-  const why = window.prompt('选读依据（可留空；会写进决策事件）', '') || '';
+  const why = (cand.value.whyDraft || '').trim();
   try {
     const r = await fetch('/api/research/write', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -494,6 +502,7 @@ async function decide(c0) {
     const j = await r.json();
     if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '选读失败'); }
     UI.toast('已登记选读（决策事件）');
+    cand.value = Object.assign({}, cand.value, { picking: null });
     await refreshCand();
   } catch (e) { candErr.value = String(e.message || e); }
 }
@@ -770,34 +779,63 @@ onMounted(() => {
       <!-- 字位候选 + 人工选读（竞品「逐字研读」的对应能力，2026-10-10） -->
       <div v-if="cand" class="pv-cand">
         <h3>字位 {{ cand.line + 1 }} 句 · 第 {{ cand.pos + 1 }} 字「{{ cand.char }}」
-          <small class="dim">基线平仄 {{ cand.base_pz || '—' }}</small></h3>
+          <small class="dim">基线平仄 {{ cand.base_pz || '—' }}（普通话口径）</small></h3>
         <p v-if="candErr" class="bad">✗ {{ candErr }}</p>
+
+        <h4>普通话候选 <small class="dim">（可人工选定；平仄按普通话四声派生）</small></h4>
         <table class="cp-table">
           <thead><tr><th>读音</th><th>声调</th><th>平仄</th><th>来源</th><th></th></tr></thead>
           <tbody>
-            <tr v-for="c0 in cand.candidates" :key="c0.reading">
+            <tr v-for="c0 in cand.candidates" :key="c0.reading"
+                :class="{ cur: cand.current_decision && cand.current_decision.reading === c0.reading }">
               <td>{{ c0.reading }}</td>
               <td class="num">{{ c0.tone }}</td>
               <td>{{ c0.tone >= 3 ? '仄' : '平' }}</td>
               <td class="dim">{{ c0.source }}</td>
-              <td>
-                <button type="button" class="mini" :disabled="!online"
-                        @click="decide(c0)">选定</button>
-              </td>
+              <td><button type="button" class="mini" :disabled="!online"
+                          @click="pickCand(c0)">选定</button></td>
             </tr>
             <tr v-if="!(cand.candidates || []).length">
               <td colspan="5" class="dim">（该字只有一种读音，无可选项）</td>
             </tr>
           </tbody>
         </table>
+        <p v-if="cand.picking" class="dim">正在为「{{ cand.picking.reading }}」登记选读——
+          <input v-model="cand.whyDraft" placeholder="选读依据（可留空；写进决策事件）" style="width:320px">
+          <button type="button" class="mini" :disabled="!online" @click="decide(cand.picking)">保存选读</button>
+          <button type="button" class="mini" @click="cand.picking = null">放弃更改</button>
+        </p>
+
         <div v-if="cand.current_decision" class="pv-cur">
           当前生效裁定：<b>{{ cand.current_decision.reading }}</b>
           （{{ cand.current_decision.pz }}）
           <button type="button" class="mini danger" :disabled="!online"
                   @click="withdraw(cand.current_decision)">撤回</button>
         </div>
-        <div v-if="(cand.history || []).length" class="dim">
-          裁定史：{{ cand.history.length }} 条（select / withdraw 全留痕）
+
+        <h4>《广韵》候选 <small class="dim">（历史音韵参考·只读——不改变普通话平仄口径）</small></h4>
+        <p v-if="cand.guangyun_note" class="dim">{{ cand.guangyun_note }}</p>
+        <table v-if="(cand.guangyun || []).length" class="cp-table">
+          <thead><tr><th>音韵地位</th><th>反切</th><th>直音</th><th>释义（截 160 字）</th><th>平仄（中古）</th></tr></thead>
+          <tbody>
+            <tr v-for="(g, gi) in cand.guangyun" :key="gi">
+              <td>{{ g.desc }}</td>
+              <td>{{ g.fanqie || '—' }}</td>
+              <td>{{ g.zhiyin || '—' }}</td>
+              <td class="dim">{{ g.gloss || '—' }}</td>
+              <td>{{ g.pz || '—' }}<small class="dim">（{{ g.sheng }}声·{{ g.yun }}韵）</small></td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="dim">（《广韵》未收录此字，或导出数据中无此字条目）</p>
+
+        <div v-if="(cand.history || []).length" class="pv-hist">
+          <h4>决策历史（select / withdraw 全留痕）</h4>
+          <div v-for="h in cand.history" :key="h.id" class="dim">
+            #{{ h.id }} {{ h.action }} {{ (h.payload || {}).reading || '' }}
+            <span v-if="h.why">（{{ h.why }}）</span>
+            <span class="dim">{{ h.created_at || '' }}</span>
+          </div>
         </div>
         <p><button type="button" class="mini" @click="cand = null">收起</button></p>
       </div>
@@ -813,6 +851,18 @@ onMounted(() => {
 .pv-form { margin-top: 6px; }
 .pv-hint { margin: 10px 0 0; }
 .pv-sorthint { margin: 0 0 6px; }
+/* 字位候选面板（竞品「逐字研读」对应能力，2026-10-10） */
+.pv-cand { border-top: 1px solid var(--bd, #ddd); margin-top: 10px; padding-top: 8px; }
+.pv-cand h3 { margin: 4px 0; }
+.pv-cand h4 { margin: 10px 0 4px; font-size: 14px; }
+.pv-cand .cp-table { width: 100%; border-collapse: collapse; margin: 4px 0 8px; }
+.pv-cand .cp-table th, .pv-cand .cp-table td {
+  border-bottom: 1px solid var(--bd, #ddd); padding: 3px 6px; text-align: left; font-size: 13px; }
+.pv-cand .cp-table .num { text-align: right; }
+.pv-cand tr.cur td { background: var(--hl, #fff7e6); }
+.pv-cur { margin: 6px 0; }
+.pv-hist { font-size: 12px; }
+.pv-hist h4 { margin: 6px 0 2px; }
 
 /* 加载 / 错误 / 空态：三种状态各有明确文案与不刺眼的配色 */
 .loading { margin: 4px 0; color: var(--ink2); }

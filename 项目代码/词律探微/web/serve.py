@@ -1125,6 +1125,25 @@ def _pron_overrides():
     return _PRON_OV
 
 
+#: 《广韵》字头候选（vendor/tshet-uinh 导出，懒加载；只读）。
+#: 文件：`data/rhyme/tshet_uinh.json`（由 `node tools/export_tshet_uinh.mjs` 生成，
+#: 覆盖语料 7,711 字里的 5,147 个广韵收录字）。**只作历史音韵参考展示**。
+_GUANGYUN = {}
+
+
+def _guangyun_of(ch):
+    global _GUANGYUN
+    if not _GUANGYUN:
+        try:
+            import json as _json
+            _p = os.path.join(DATA, 'rhyme', 'tshet_uinh.json')
+            if os.path.exists(_p):
+                _GUANGYUN = _json.load(open(_p, encoding='utf-8'))
+        except Exception:                                      # noqa: BLE001
+            _GUANGYUN = {}
+    return _GUANGYUN.get(ch) or []
+
+
 def q_pron_candidates(pid, line_idx, char_pos):
     """读音候选（功能 8）：该字位的**多来源候选** + 语料基线 + 当前裁定 + 该字位裁定史。
 
@@ -1165,8 +1184,16 @@ def q_pron_candidates(pid, line_idx, char_pos):
                     if (h.get('subject') or '') == _subj]
         except Exception:                                      # noqa: BLE001
             cur, hist = None, []
+    # ★ 2026-10-10（竞品对照）：**《广韵》候选**（vendor/tshet-uinh，MIT · Project NK2028）——
+    #   反切/韵目/声调/释义的历史音韵参考。**只展示、不参与平仄计算**：本系统平仄按
+    #   **普通话四声**（题库口径），人工裁定也只收普通话读音——这条红线照抄竞品同款表述
+    #   （「广韵候选是历史音韵参考，候选不等于此处已确定读音」）且更明确。
+    _gy = _guangyun_of(ch)
     return {'pid': pid, 'line': int(line_idx), 'pos': int(char_pos), 'char': ch,
-            'base_pz': base_pz, 'candidates': cands,
+            'base_pz': base_pz, 'candidates': cands, 'guangyun': _gy,
+            'guangyun_note': ('《广韵》候选为历史音韵参考（来源：推音 tshet-uinh，MIT）；'
+                              '候选不等于此处已确定读音，**不改变本系统的普通话平仄口径**——'
+                              '人工裁定仍按普通话四声登记。'),
             'current_decision': cur, 'history': hist}
 
 

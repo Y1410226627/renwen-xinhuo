@@ -42,10 +42,21 @@
       <h3>② 谱书体式 <small class="dim">（谱库共 {{ tuneCount }} 个词牌；当前作品词牌：{{ res.cipai }}）</small></h3>
       <p v-if="res.status !== 'ok'" class="cp-err">该词牌未在谱库中（可换一篇，或看下方候选）。</p>
       <template v-else>
+        <!-- ★ 2026-10-10（竞品图2 对齐）：体式分「句数相合 / 其它」两组，各带来源头 -->
+        <h4 v-if="formsMatched.length" class="dim">匹配的词谱（句数相合）</h4>
         <div class="cp-forms">
-          <button v-for="f in forms" :key="f.form" type="button"
+          <button v-for="f in formsMatched" :key="f.form" type="button"
                   :class="{ on: curForm === f.form }" @click="pickForm(f.form)">
             {{ f.authority || '体' }} {{ f.form }} · {{ f.n_lines }}句/{{ f.n_chars }}字
+            <small v-if="f.header" class="dim">· {{ String(f.header).slice(0, 14) }}</small>
+          </button>
+        </div>
+        <h4 v-if="formsOther.length" class="dim">其它词谱</h4>
+        <div class="cp-forms">
+          <button v-for="f in formsOther" :key="f.form" type="button"
+                  :class="{ on: curForm === f.form }" @click="pickForm(f.form)">
+            {{ f.authority || '体' }} {{ f.form }} · {{ f.n_lines }}句/{{ f.n_chars }}字
+            <small v-if="f.header" class="dim">· {{ String(f.header).slice(0, 14) }}</small>
           </button>
         </div>
         <p v-if="formWhy" class="dim">自动选中理由：{{ formWhy }}</p>
@@ -70,17 +81,22 @@
         <span v-if="(s.extra_lines || []).length" class="bad">多句 {{ s.extra_lines.join('、') }}</span>
       </div>
       <div v-for="row in rows" :key="row.line" class="cp-line">
-        <div class="cp-no">第 {{ row.line + 1 }} 句<span v-if="row.ending" class="tag">韵</span></div>
-        <div class="cp-tri">
-          <div class="cp-chars">
-            <span v-for="c in row.cells" :key="c.pos"
-                  :class="['sw-cell', c.verdict]" :title="tip(c)">{{ c.char }}</span>
+        <div class="cp-no">第 {{ row.line + 1 }} 句<span v-if="row.ending" class="tag">韵</span>
+          <small class="dim">例：{{ row.example || '—' }}</small></div>
+        <!-- ★ 2026-10-10（竞品图2 对齐）：**逐字竖排三行**——原字 / 谱书规范 / 作品实际，
+             每列一字上下对齐；实际行与规范不符的字标红。 -->
+        <div class="cp-grid">
+          <div v-for="c in row.cells" :key="c.pos" class="cp-col">
+            <div class="cp-char">{{ c.char }}</div>
+            <div class="cp-rulech" :class="{ any: c.rule === '中' }">{{ c.rule }}</div>
+            <div class="cp-actual" :class="c.verdict">{{ c.pz || '·' }}</div>
           </div>
-          <div class="cp-rule">
-            <span v-for="c in row.cells" :key="'r' + c.pos"
-                  :class="['sw-cell', 'rule-' + c.rule]">{{ c.rule }}</span>
+          <div v-if="row.n_chars_poem > row.n_chars_rule" class="cp-col extra">
+            <div v-for="k in (row.n_chars_poem - row.n_chars_rule)" :key="'e' + k" class="cp-char dim">＋</div>
           </div>
-          <div class="cp-example dim">例：{{ row.example || '—' }}</div>
+          <div v-if="row.n_chars_rule > row.n_chars_poem" class="cp-col extra">
+            <div v-for="k in (row.n_chars_rule - row.n_chars_poem)" :key="'m' + k" class="cp-rulech dim">缺</div>
+          </div>
         </div>
         <div class="cp-meta dim">
           作品平仄 {{ row.poem_pz || '—' }}　｜　规范 {{ row.rule_tones || '—' }}
@@ -123,6 +139,15 @@ const tuneCount = ref(0);
 const rows = computed(() => (res.value && res.value.rows) || []);
 const s = computed(() => (res.value && res.value.summary) || {});
 const formWhy = computed(() => (res.value && res.value.form_why) || '');
+/* 体式分组：句数与作品相合的排前（竞品「匹配的词谱 / 其它词谱」） */
+const formsMatched = computed(() => {
+  const n = res.value && res.value.summary ? res.value.summary.n_lines_poem : null;
+  return (n == null) ? [] : forms.value.filter(f => f.n_lines === n);
+});
+const formsOther = computed(() => {
+  const n = res.value && res.value.summary ? res.value.summary.n_lines_poem : null;
+  return (n == null) ? [] : forms.value.filter(f => f.n_lines !== n);
+});
 const curFormHeader = computed(() => {
   const f = (forms.value || []).find(x => x.form === curForm.value);
   return f ? (f.header || f.source_url || '') : '';
@@ -204,11 +229,16 @@ function tip(c) {
 .cp-line { border-top: 1px solid var(--bd, #e5e5e5); padding: 8px 0; }
 .cp-no { font-size: 13px; margin-bottom: 4px; }
 .cp-no .tag { margin-left: 6px; padding: 0 4px; border: 1px solid #bbb; border-radius: 3px; font-size: 12px; }
-.cp-chars { font-size: 20px; line-height: 1.5; letter-spacing: 2px; }
-.cp-rule { font-size: 14px; letter-spacing: 2px; margin: 2px 0; color: #555; }
-.sw-cell { display: inline-block; min-width: 20px; text-align: center; padding: 0 2px; border-radius: 3px; }
-.rule-中 { color: #888; }
-.cp-example { font-size: 13px; }
+.cp-grid { display: flex; flex-wrap: wrap; gap: 2px 0; margin: 4px 0; }
+.cp-col { display: flex; flex-direction: column; align-items: center; min-width: 26px; }
+.cp-col.extra { opacity: .55; }
+.cp-char { font-size: 19px; line-height: 1.4; }
+.cp-rulech { font-size: 13px; color: #555; }
+.cp-rulech.any { color: #999; }
+.cp-actual { font-size: 13px; }
+.cp-actual.match { color: #2a7; }
+.cp-actual.mismatch { color: #b33; font-weight: 600; }
+.cp-actual.any { color: #888; }
 .cp-meta { font-size: 12px; margin-top: 2px; }
 .cp-src { margin-top: 8px; font-size: 12px; color: #a60; }
 .off-note { color: #a60; }
