@@ -178,6 +178,7 @@ class Executor:
         self.dag = ProvDAG()
         self.problems = []
         self.named = {}          # materialize_as 的命名帧
+        self.retrieve_report = []      # ★ retrieve 各路召回的**执行报告**（是否执行/召回了多少）
 
     # -------------------------------------------------- 入口
     def run(self):
@@ -187,6 +188,13 @@ class Executor:
         except Exception as e:                                   # noqa: BLE001
             self.problems.append('初始帧构造失败：%s: %s' % (type(e).__name__, e))
             return None
+        # 0) ★ retrieve（2026-10-09 修，第三轮审查 P0）：执行 plan['retrieve'] 的
+        #    **多路召回**——「理解层说了（vector/fts），执行层照做」。纯 sql 时零变化。
+        try:
+            f = self._retrieve(f)
+        except Exception as e:                                   # noqa: BLE001
+            self.problems.append('retrieve 执行失败：%s: %s（已按 SQL 候选继续）'
+                                 % (type(e).__name__, e))
         # 1) 显式 steps（Planner 产出）
         for i, st in enumerate(self.plan.get('steps') or []):
             try:
@@ -207,7 +215,8 @@ class Executor:
         f = self._by_intent(f)
         self.problems = [p for p in self.problems if p]
         return {'frame': f, 'dag': self.dag, 'problems': self.problems,
-                'named': self.named, 'seconds': round(time.time() - t0, 4)}
+                'named': self.named, 'seconds': round(time.time() - t0, 4),
+                'retrieve_report': self.retrieve_report}
 
     # -------------------------------------------------- 初始帧
     def _seed(self):
@@ -231,6 +240,102 @@ class Executor:
         pids = [r[0] for r in self.conn.execute('SELECT pid FROM poems')]
         nid = self.dag.add('scope.corpus', [], '全库', 'set', len(pids), time.time() - t0)
         return Frame(self.dag, 'set', pids, note='corpus', prov=nid)
+
+    # -------------------------------------------------- 多路召回（retrieve 的真正执行）
+    def _retrieve(self, f):
+        """执行 `plan['retrieve']`——「**理解层说了，执行层照做**」的落点（第三轮审查 P0）。
+
+        `retrieve` 条目：`{"mode": "sql"|"vector"|"fts", "q": "…", "topk": N}`（见 queryplan.RETRIEVE_MODES）。
+          · 纯 `sql`（**默认**，也是 planner 在无语义条件时给的）：本函数**不做任何事**——
+            seed 的布尔过滤就是 SQL 路 → 既有行为**逐字节不变**；
+          · `vector`：**候选集内**受限语义召回 `vector_index.search(q, allow=f.pids)`；
+          · `fts`   ：候选集内**全文短语**召回（多词计分，可独立复算）；
+          · 多路 → RRF 名次融合（fusion.rrf，k=60）→ 候选帧，**上限 500**（候选≠全集，如实截断）。
+        索引不可用 / 召回为空 → **如实进 problems 与 retrieve_report**（绝不假装执行过）。
+        """
+        items = [x for x in (self.plan.get('retrieve') or []) if isinstance(x, dict)]
+        active = [x for x in items if (str(x.get('mode') or 'sql')) in ('vector', 'fts')]
+        if not active:
+            return f                                     # 纯 sql：零变化
+        t0 = time.time()
+        allow = set(f.pids)
+        channels = []
+        for x in active:
+            mode = str(x.get('mode'))
+            q = str(x.get('q') or self.question or '').strip()
+            tk = int(x.get('topk') or max(self.topk * 10, 50))
+            if mode == 'vector':
+                try:
+                    import vector_index as VI
+                    if not VI.available():
+                        why = (VI.why() or '未知原因')[:80]
+                        self.problems.append('retrieve.vector 未执行：向量索引不可用（%s）' % why)
+                        self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
+                                                     'n': 0, 'executed': False, 'why': why})
+                        continue
+                    hits = VI.search(q, topk=tk, allow=allow)
+                    pids = [p for p, _s in hits]
+                    self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
+                                                 'n': len(pids), 'executed': True,
+                                                 'allow_n': len(allow)})
+                    if pids:
+                        channels.append(pids)
+                except Exception as e:                   # noqa: BLE001
+                    self.problems.append('retrieve.vector 执行失败：%r' % e)
+                    self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
+                                                 'n': 0, 'executed': False, 'why': repr(e)})
+            elif mode == 'fts':
+                try:
+                    pids = self._fts_in(allow, q, tk)
+                    self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk,
+                                                 'n': len(pids), 'executed': True,
+                                                 'allow_n': len(allow)})
+                    if pids:
+                        channels.append(pids)
+                except Exception as e:                   # noqa: BLE001
+                    self.problems.append('retrieve.fts 执行失败：%r' % e)
+                    self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk,
+                                                 'n': 0, 'executed': False, 'why': repr(e)})
+        if not channels:
+            if self.retrieve_report:
+                self.dag.add('retrieve.none', [f.prov], '召回未产生候选（如实记录）',
+                             'set', 0, time.time() - t0)
+            return f                                     # 保持原帧（空就是空，不硬造）
+        if len(channels) == 1:
+            merged = list(channels[0])
+        else:
+            import fusion
+            merged = fusion.ranked(fusion.rrf(channels))
+        cap = 500                                        # 候选上限：语义候选是**候选**，不是全集
+        truncated = len(merged) > cap
+        merged = merged[:cap]
+        modes = '+'.join(sorted(set(str(x.get('mode')) for x in active)))
+        nid = self.dag.add('retrieve.%s' % modes, [f.prov],
+                           '候选集内召回（%d 路，RRF 融合%s）'
+                           % (len(channels), '，已截断至 %d' % cap if truncated else ''),
+                           'set', len(merged), time.time() - t0)
+        out = Frame(self.dag, 'set', merged, note='retrieve', prov=nid)
+        out.truncated = truncated
+        return out
+
+    def _fts_in(self, allow, q, tk):
+        """候选集内**全文短语**召回：多词 OR 计分（命中句数降序、pid 升序 → **可独立复算**）。"""
+        import re as _re2
+        terms = [t for t in _re2.split(r'[\s,，、;；/]+', q or '') if len(t) >= 2][:8]
+        if not terms and q:
+            terms = [q]
+        if not terms:
+            return []
+        parts, args = _pid_filter_sql(list(allow), alias='l')
+        if not parts:
+            return []
+        where = '(%s) AND (%s)' % (' OR '.join(['l.text LIKE ?'] * len(terms)),
+                                   ' OR '.join(parts))
+        largs = ['%' + t + '%' for t in terms] + list(args) + [max(1, int(tk))]
+        rows = self.conn.execute(
+            'SELECT l.pid, COUNT(DISTINCT l.idx) AS c FROM lines l WHERE %s '
+            'GROUP BY l.pid ORDER BY c DESC, l.pid LIMIT ?' % where, largs).fetchall()
+        return [r[0] for r in rows]
 
     # -------------------------------------------------- 算子派发
     def _step(self, f, st):
@@ -879,6 +984,42 @@ def selftest(conn):
     ok8 = ('corpus' in prov or 'sql.filter' in prov) and 'count' in prov
     ok_all = ok_all and ok8
     print('%s 溯源 DAG 可回溯到根：%s' % ('✓' if ok8 else '✗', prov.replace('\n', ' ← ')))
+
+    # ── ⑯ **retrieve 执行**（第三轮审查 P0：证明「计划里的召回命令确实影响结果」）──
+    import vector_index as _VI
+    _qing = set(x[0] for x in conn.execute("SELECT pid FROM poems WHERE dynasty='清'"))
+    plan = QP.empty_plan()
+    plan['intent'] = 'list'
+    plan['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    plan['retrieve'] = [{'mode': 'vector', 'q': '秋景、萧瑟、秋日愁绪', 'topk': 20}]
+    rv = execute(conn, plan)
+    rep = rv.get('retrieve_report') or []
+    if _VI.available():
+        okv1 = bool(rep) and rep[0].get('executed') is True
+        _chk('⑯ retrieve.vector 已执行且报告', okv1, True)
+        # 独立复算：帧 == 受限检索（同一 q、同一候选集）的前 20
+        _hits = [p for p, _s in _VI.search('秋景、萧瑟、秋日愁绪', topk=20, allow=_qing)]
+        _chk('⑯ 与受限检索独立复算逐篇一致', list(rv['frame'].pids), _hits)
+        _chk('⑯ 召回全部落在候选集内', set(rv['frame'].pids) <= _qing, True)
+        _chk('⑯ 溯源出现 retrieve 节点',
+             any('retrieve' in n['op'] for n in rv['dag'].to_list()), True)
+    else:
+        _chk('⑯ 索引不可用时如实报告（不假装执行）',
+             bool(rep) and rep[0].get('executed') is False
+             and any('retrieve.vector' in p for p in rv['problems']), True)
+    # ⑰ fts 路：与独立 SQL 复算逐篇一致
+    plan2 = dict(plan, retrieve=[{'mode': 'fts', 'q': '明月 孤灯', 'topk': 10}])
+    rf = execute(conn, plan2)
+    _ref = [x[0] for x in conn.execute(
+        "SELECT l.pid FROM lines l WHERE l.pid IN (SELECT pid FROM poems WHERE dynasty='清') "
+        "AND (l.text LIKE '%明月%' OR l.text LIKE '%孤灯%') "
+        "GROUP BY l.pid ORDER BY COUNT(DISTINCT l.idx) DESC, l.pid LIMIT 10")]
+    _chk('⑰ fts 召回与独立 SQL 复算一致', list(rf['frame'].pids), _ref)
+    # ⑰ 纯 sql：零变化（无报告、帧=过滤集）
+    plan3 = dict(plan, retrieve=[{'mode': 'sql'}])
+    rs = execute(conn, plan3)
+    _chk('⑰ 纯 sql 计划零变化（无召回报告）', rs.get('retrieve_report'), [])
+    _chk('⑰ 纯 sql 帧=过滤集', len(rs['frame'].pids), len(_qing))
     print('自检：%s' % ('全部通过' if ok_all else '存在失败'))
     return ok_all
 

@@ -8,6 +8,10 @@ set PY=%LVC_PYTHON%
 if not exist "%PY%" set PY=D:\conda_envs\langchain-env\python.exe
 if not exist "%PY%" set PY=python
 
+rem Enable the planner-based route (Planner - Plan - Executor) by default.
+rem Every answer reports which route it actually used (see route.used in /api/ask).
+if "%LVC_PLANNER%"=="" set "LVC_PLANNER=plan"
+
 echo Starting local QA web app (browser will open automatically)...
 echo Close this window to stop the server.
 echo.

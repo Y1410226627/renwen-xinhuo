@@ -90,6 +90,13 @@ VAGUE_ASK_RE = re.compile(
     r'风格|最好|最差|哪个好|更优美|更胜|评价|有名|著名|经典|推荐|'
     r'为什么|为何|开心|伤心|难过|寂寞|豪放|婉约|清丽|悲凉|欢快|忧愁|好听)')
 
+#: 问话脚手架（指代/谦辞——**语义上是「指着材料说话」的动作，不是检索内容**）。
+#: 2026-10-09（主人实测驱动）：仅在内容/开放请求命中时随同从词面剔除
+#: （见 `_answer_impl` 的 `_scaffold`）——否则「教他故意欠分明 这句话是什么意思」
+#: 会把「这句话」当检索词去搜正文（0 命中、污染结果）。
+_ASK_SCAFFOLD = ('这句话', '这一句', '这句', '那句话', '那一句', '那句',
+                 '这个字', '这个词', '这首诗', '这一首', '这首词', '这首诗的')
+
 
 def _no_hard_condition(spec):
     """是否**没有任何**可检索的形式条件（朝代/词人/词牌/声情/声律/句脚/数值区间/句级算子）。
@@ -1177,7 +1184,7 @@ def _understanding_status(spec):
 
 
 def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=None,
-                    session=None, kind=None):
+                    session=None, kind=None, trace=None):
     """**「规划式理解」主链**（第二轮审查 P0-#1）：Planner → Plan → Validator → Executor。
 
     为什么必须单独走一条：旧主链是 `理解 → QuerySpec → 单条 SQL → 排序`，
@@ -1185,27 +1192,43 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     即便 `qlm.plan_mode()=='planner'` 让模型产出了 Plan，`from_plan` 回落到 spec 时
     那些 steps 也会被丢掉——于是「Planner 已实现但没真正接管执行」（审查 §5）。
 
-    本函数让 Plan **真正执行**：`plan_exec.execute()` 逐步产出帧并留下溯源 DAG。
+    本函数让 Plan **真正执行**：`plan_exec.execute()` 逐步产出帧并留下溯源 DAG，
+    其中 `plan['retrieve']`（vector/fts 召回）由执行器的 `_retrieve` 落实（第三轮审查 P0）。
 
-    ⚠ 启用条件（**默认完全不启用**）：环境变量 `LVC_PLANNER=plan`。
+    ⚠ 启用条件：环境变量 `LVC_PLANNER=plan`。
       · 默认（`rule` / `llm`）时，`answer()` **根本不会调用本函数** → 1000 题零回归；
       · 本函数内部任何环节失败（模型不可用 / Plan 不合法 / 执行器报错）都返回 **None**，
-        由 `answer()` **回落到既有成熟链路**——宁可不用，也不给半成品。
+        由 `answer()` 回落到既有成熟链路——**且失败原因写入 `trace`**
+        （第三轮审查 P0：不许静默回落，要让「为什么走了旧路」可见）。
     """
+    def _fail(why):
+        if trace is not None:
+            trace['used'] = 'legacy'
+            trace['why'] = why
+        return None
+
     try:
         import queryplan as QP
         import planner as PL
         import plan_exec as PX
-    except Exception:                                            # noqa: BLE001
-        return None
+    except Exception as e:                                       # noqa: BLE001
+        return _fail('规划链路模块导入失败：%r' % e)
     if not (llm and llm.available()):
-        return None
+        return _fail('大模型不可用（规划器需要大模型；规划路已回落）')
     pl = PL.plan(conn, llm, question, context=context)
     if not isinstance(pl, dict):
-        return None
+        return _fail('规划器未产出合法计划（JSON 解析失败或为空）')
     _ok, _pb = QP.validate(pl, conn)
     if not _ok:
-        return None
+        return _fail('计划未通过校验：%s'
+                     % ('；'.join(str(x) for x in (_pb or [])[:3]) or '未注明'))
+    # ★ 2026-10-09（第三轮审查 P0 实测驱动）：**比较口径归一**（`>`→`>=`、`<`→`<=`）。
+    #   大模型把「高于45%」自然译成 `>`，原样执行会少算（实测 27 vs 真值 59——审查点名的
+    #   规划路反向回归根因）。依据：NL001/NL002 的 truth_sql 为 `ze_ratio>=45`。
+    _op_norm = QP.normalize_ops(pl.get('filters') or {})
+    for _st in (pl.get('steps') or []):
+        if isinstance(_st, dict) and isinstance(_st.get('filters'), dict):
+            _op_norm += QP.normalize_ops(_st['filters'])
     # 上一轮结果集：优先服务端会话，其次前端 ctx_pids
     if (pl.get('scope') or {}).get('base') != 'prev_result':
         _p = list(ctx_pids or [])
@@ -1221,16 +1244,38 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
             pl['scope'] = {'base': 'prev_result', 'ctx': _p}
     try:
         res = PX.execute(conn, pl, session=session, question=question, topk=topk)
-    except Exception:                                            # noqa: BLE001
-        return None
+    except Exception as e:                                       # noqa: BLE001
+        return _fail('执行器异常：%r' % e)
     if not res or res.get('frame') is None:
-        return None
+        return _fail('执行器未产出结果帧%s' % (
+            ('：' + '；'.join(res.get('problems') or [])[:120]) if res else ''))
     f = res['frame']
     _probs = list(res.get('problems') or [])
     _dropped = list(pl.get('_dropped') or [])
     _nf = list(pl.get('_not_found') or [])
     _notes = ['以「查询计划」方式作答（Planner → Plan → Executor，共 %d 步）'
               % len(res['dag'].to_list())]
+    # ★ 2026-10-09（第三轮审查 P0「运行状态透明」）：**召回执行报告**——
+    #   vector/fts 有没有真的执行、召回多少，逐路如实披露（含「未执行」的原因）。
+    _rr = list(res.get('retrieve_report') or [])
+    if trace is not None:
+        trace['retrieve_report'] = _rr
+        trace['plan_seconds'] = res.get('seconds')
+    for _x in _rr:
+        if _x.get('executed'):
+            # 候选集规模如实带出（审查第 2 节：先 SQL 定候选集、再候选集内召回；
+            # 报告要把「在 N 篇候选集内召回 M 篇」这条链说全）。
+            _an = _x.get('allow_n')
+            _notes.append('召回（%s）执行：q=「%s」，%s召回 %d 篇（%s）'
+                          % (_x.get('mode'), _x.get('q'),
+                             ('在 %s 篇候选集内' % _an) if _an is not None else '',
+                             _x.get('n', 0),
+                             '候选集内受限检索' if _x.get('mode') == 'vector' else '全文短语'))
+        else:
+            _notes.append('召回（%s）**未执行**：%s' % (_x.get('mode'), _x.get('why') or '未知原因'))
+    if _op_norm:
+        _notes.append('数值比较已按基准口径归一 %d 处（> → ≥、< → ≤；依据 NL001/NL002 口径）'
+                      % _op_norm)
     for x in _dropped:
         _notes.append('计划里有条件未能落地：%s' % x)
     for x in _nf:
@@ -1253,8 +1298,19 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
         pass
 
     # ---- 按帧形态产出答案（**复用**既有证据块 `items_of` 与护栏 `guard`，不另写一套口径）----
+    # ⚠ 2026-10-09 修（第三轮审查排障中发现）：plan 路的证据块原先用 `retrieve.items_of`
+    #   （**简结构**：无 `eid`/`lines`/`raw`）——直接后果是 `guard.verify` 因 `block['lines']`
+    #   抛 KeyError、被下方 except 兜成「（护栏未执行：规划路渲染异常）」：**规划路的护栏
+    #   实际上从未真正执行**；「文意解读」材料也因此拿不到原文。现改用与既有链**同源**的
+    #   `evidence.build_blocks`（同字段口径、带 eid 与逐句原文）；内容/情感类问题给全文
+    #   （`with_lines=9999` → 按原序给全篇，见 `evidence.poem_block` 的全文分支）。
     try:
-        blocks = retrieve.items_of(conn, f.pids[:topk]) if f.kind in ('set', 'single') else []
+        if f.kind in ('set', 'single'):
+            _rows = [{'pid': p} for p in f.pids[:topk]]
+            _wl = 9999 if retrieve.content_ask_of(question) else 1
+            blocks = evidence.build_blocks(conn, _rows, with_lines=_wl)
+        else:
+            blocks = []
     except Exception:                                            # noqa: BLE001
         blocks = []
     if f.kind == 'scalar':
@@ -1278,11 +1334,42 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
                 if not _nf else
                 '现有语料未见支持：条件中引用的%s在语料里查无。' % '、'.join(_nf))
     else:
-        return None
+        return _fail('结果帧形态（%s）无法渲染为答案' % f.kind)
+    # ⚠ 2026-10-09：plan 路文本补**边界声明**（与既有链 `_answer_output` 同款文案）——
+    #   护栏④（类型化边界）此前因证据块结构异常被 except 兜成「未执行」、**从未真正检查**；
+    #   块结构修好后（见上），这里必须给出与问句类型匹配的边界声明，否则整案过不了护栏。
+    text = text + ('\n【推断边界｜%s问句】%s'
+                   % (kind, BOUNDARIES.get(kind or '数值型', BOUNDARIES['数值型'])))
     try:
         _g_ok, _g_pb = guard.verify(text, blocks, boundary_kind=kind)
     except Exception:                                            # noqa: BLE001
         _g_ok, _g_pb = True, ['（护栏未执行：规划路渲染异常）']
+    # ⭐ 2026-10-09（第三轮审查 P0-3）：**内容/情感类问题在规划路同样接「文意解读」**——
+    #   定位作品（blocks 已含全文）→ 大模型基于原文解释（标注非事实结论、过四道护栏、
+    #   不过即静默跳过）。与既有链（`_answer_output`）走**同一条生成通道**，不另造生成任务。
+    _cread = None
+    if (llm is not None and getattr(llm, 'available', lambda: False)() and blocks
+            and retrieve.content_ask_of(question)):
+        try:
+            _rd = gen.read_content(
+                llm, {'question': question, 'spec': QP.render(pl), 'blocks': blocks},
+                kind or '数值型', BOUNDARIES.get(kind or '数值型', ''))
+            if _rd.get('ok'):
+                _t2 = (text + '\n【文意解读（大模型 %s 基于原文写成，非事实结论）】\n%s'
+                       % (_rd['model'], _rd['text']))
+                _ok2, _p2 = guard.verify(_t2, blocks, boundary_kind=kind,
+                                         allow=_nums(_rd['model']))
+                if _ok2:
+                    text, _g_ok, _g_pb, _cread = _t2, _ok2, _p2, _rd
+                else:
+                    _cread = dict(_rd, ok=False,
+                                  problems=(list(_rd['problems']) + list(_p2))[:5]
+                                  or ['合并后未过护栏'])
+            else:
+                _cread = _rd
+        except Exception as e:                                   # noqa: BLE001
+            _cread = {'ok': False, 'model': '—', 'text': '',
+                      'problems': ['生成通道异常：%r' % e]}
     return {
         'question': question, 'kind': kind or '规划式检索',
         'spec': QP.render(pl), 'blocks': blocks,
@@ -1297,7 +1384,42 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
         'provenance_text': res['dag'].render(f.prov),
         'notes': _notes, 'dropped': _dropped, 'not_found': _nf,
         'plan_seconds': res.get('seconds'),
+        'retrieve_report': _rr,
+        'content_read': _cread,
     }
+
+
+def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=False,
+           argument=False, llm_parse=False, llm_policy='always', on_delta=None,
+           on_engine=None, context=None, ctx_pids=None):
+    """执行一次完整问答（**对外入口**）；返回体带 `route`——**本次实际走了哪条路**。
+
+    ⭐ 2026-10-09 加（第三轮审查 P0「运行状态透明」）：
+      · `route.used`：`plan`（规划路）/ `legacy`（既有成熟链）/ `official`（官方题型链）；
+      · `route.planner_enabled`：环境变量是否开启规划路（未开启时附开启方式）；
+      · `route.fallback_reason`：规划路启用但失败时的**具体原因**（不再静默回落）；
+      · `route.retrieve_report`：规划路 `retrieve` 各路召回的**执行报告**
+        （哪路执行了、召回多少、未执行的原因）。
+    """
+    trace = {}
+    mode = os.environ.get('LVC_PLANNER', 'rule').strip().lower()
+    _enabled = mode in ('plan', 'planner')
+    res = _answer_impl(conn, question, topk=topk, with_lines=with_lines, kind=kind,
+                       llm=llm, narrate=narrate, argument=argument, llm_parse=llm_parse,
+                       llm_policy=llm_policy, on_delta=on_delta, on_engine=on_engine,
+                       context=context, ctx_pids=ctx_pids, trace=trace)
+    route = {'planner_enabled': _enabled,
+             'used': trace.get('used') or 'legacy',
+             'attempted': bool(_enabled),
+             'fallback_reason': trace.get('fallback_reason'),
+             'retrieve_report': list(trace.get('retrieve_report') or []),
+             'plan_seconds': trace.get('plan_seconds')}
+    if not _enabled:
+        route['note'] = ('规划路未启用（设环境变量 LVC_PLANNER=plan 可启用；'
+                         '`启动问答网页.bat` 已默认开启规划路）')
+    if isinstance(res, dict):
+        res.setdefault('route', route)
+    return res
 
 
 def understand(conn, question, llm=None, llm_parse=False, llm_policy='always', context=None,
@@ -1968,10 +2090,10 @@ def _answer_pair(conn, question, spec, pnote, kind='数值型', llm=None, narrat
             'safety': {'ok': True}}
 
 
-def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=False,
-           argument=False, llm_parse=False, llm_policy='always', on_delta=None,
-           on_engine=None, context=None, ctx_pids=None):
-    """执行一次完整问答，返回 dict（回答文本、证据块、护栏结论、问句类型、是否拒答）。
+def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=False,
+                 argument=False, llm_parse=False, llm_policy='always', on_delta=None,
+                 on_engine=None, context=None, ctx_pids=None, trace=None):
+    """执行一次完整问答（**内部实现**；对外入口见文件下方的 `answer()`，它负责加「路线报告」）。
 
     `llm_parse=True` 时先让大模型理解问句（条件经引擎校验），否则用规则解析。
     `llm` 给一个 `llm.LLM` 实例且 `narrate/argument` 为真时，会在**确定性模板之外**
@@ -2014,6 +2136,8 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         if _official.looks_official(question):
             _r = _official.solve(question)
             if _r.get('ok'):
+                if trace is not None:
+                    trace['used'] = 'official'
                 _txt = _official.render(_r)
                 # ⚠ 2026-10-06 修（外部审查 P1-10）：官方题型原先直接声称 verify 通过、
                 #   以「未经问答链四道护栏」为理由放行。现改走**官方独立验证器**
@@ -2034,6 +2158,8 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
                                      'ans': _r.get('ans'), 'errors': _r.get('errors') or []},
                         'safety': {'ok': True}}
             # 识别成官方题但没算出来（定位失败等）→ 如实说明，不拿检索结果冒充
+            if trace is not None:
+                trace['used'] = 'official'
             _t = ('现有语料未见支持：这是官方「甲乙两篇对比」题（%s），但本次未能完成定位/计算——%s。'
                   '请核对题面里的作者、词牌与首句是否与本机语料一致。'
                   % (_r.get('cls') or '类别未判定', '；'.join(_r.get('errors') or ['原因未知'])))
@@ -2058,9 +2184,17 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #   规划路任何环节失败 → 返回 None → **回落到下面这条成熟链路**（不会给出半成品）。
     if os.environ.get('LVC_PLANNER', 'rule').strip().lower() in ('plan', 'planner'):
         _pr = _answer_by_plan(conn, question, topk=topk, llm=llm, context=context,
-                              ctx_pids=ctx_pids, kind=kind)
+                              ctx_pids=ctx_pids, kind=kind, trace=trace)
         if _pr is not None:
+            if trace is not None:
+                trace['used'] = 'plan'
             return _pr
+        # ★ 2026-10-09（第三轮审查 P0「运行状态透明」）：**不再静默回落**——
+        #   规划路失败时把**具体原因**写进 trace（由 `answer()` 组装成 route.fallback_reason
+        #   回给调用方与界面）。否则「以为在跑新架构、实际悄悄走回旧路」无从察觉。
+        if trace is not None:
+            trace['used'] = 'legacy'
+            trace['fallback_reason'] = trace.get('why') or '规划路失败（原因未注明）'
     spec, pnote = understand(conn, question, llm=llm, llm_parse=llm_parse,
                              llm_policy=llm_policy, context=context, ctx_pids=ctx_pids)
     # ⚠ 2026-10-08 加（实测驱动）：**没有上文却用了强指代词**时如实提示。
@@ -2117,9 +2251,12 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #   由下方把该篇**全文**列入证据块作为内容层依据。
     _cask = retrieve.content_ask_of(question)
     _oask = retrieve.open_ask_of(question)
+    # 问话脚手架（指代/谦辞——**永远不是检索条件**）：仅在内容/开放请求出现时随同剔除，
+    # 避免「教他故意欠分明 这句话是什么意思」把「这句话」当词面去搜（0 命中、污染结果）。
+    _scaffold = [w for w in _ASK_SCAFFOLD if w in question]
     if _cask or _oask:
         _kw0, _sem0 = list(spec.keywords or []), list(spec.semantic or [])
-        _req = list(_cask) + list(_oask)
+        _req = list(_cask) + list(_oask) + _scaffold
         # ★ 2026-10-09：用**包含判断**剔除——解析器切出的词（如「作用」）可能只是请求短语
         #   （「有什么作用」）的一部分；只做"完全相等"遗漏了这类（主人实测：「词面=作用」拿
         #   两个字去搜正文，荒谬且污染结果）。
@@ -2160,7 +2297,12 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     #    实测旧版对「唐诗里最有名的五言绝句」答「融合排序最前者为 元·关汉卿《钱大尹智宠谢天香》」，
     #    护栏还报「通过」——这正是「答非所问却报通过」，比崩溃更危险。
     if (_no_hard_condition(spec) and not spec.agg and not getattr(spec, 'pair', None)
-            and not getattr(spec, 'order_by', None) and VAGUE_ASK_RE.search(question)):
+            and not getattr(spec, 'order_by', None) and VAGUE_ASK_RE.search(question)
+            # ⭐ 2026-10-09（主人实测驱动）：**内容/情感类请求不拒**——「教他故意欠分明
+            #   这句话是什么意思」这类「指着一句词问意思」的请求，词面能定位到篇
+            #   （全文即材料），应走【内容与情感】+ 文意解读通道；旧版把它当
+            #   「无语义条件的模糊意图」拒掉（答非所问）。**词面为空时仍拒**（没指任何东西）。
+            and not (spec.content_ask and (spec.keywords or spec.semantic))):
         _why = ('问句涉及语料外范围（%s），本系统语料只含清/宋/元三代词作' % spec.unsupported
                 if spec.unsupported else
                 '这句话问的是语义／评价／意图层面，而问句里没有可检索的形式条件')
@@ -2229,6 +2371,26 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
     # ⭐ 内容/情感类问题：把**全文**列入证据块（原文即内容层依据）
     if getattr(spec, 'content_ask', False):
         with_lines = max(with_lines, 999)
+    # ⭐ 2026-10-09（主人实测驱动：「教他故意欠分明 这句话是什么意思」被元曲篇挤掉）：
+    #   **内容类问题 + 词面引用**时，「含词面（精确子串）的篇」必须排在证据块最前——
+    #   它是「那句话」的出处（实测全库仅 1 篇含该句，却排不进前 2）。做法：
+    #   ① 按词面在 lines 里精确找篇（每词 LIMIT 20）；② 把**不在现有结果里**的出处篇
+    #   补到 rows 最前（`items_of` 同口径取行，至多 topk 篇）；③ 其余顺序保持（稳定排序）。
+    if getattr(spec, 'content_ask', False) and spec.keywords:
+        _kw4 = [str(k) for k in spec.keywords if len(str(k)) >= 4][:4]
+        _hit_pids = []
+        for _k in _kw4:
+            for _rr in conn.execute(
+                    'SELECT DISTINCT l.pid FROM lines l WHERE l.text LIKE ? LIMIT 20',
+                    ('%' + _k + '%',)):
+                if _rr[0] not in _hit_pids:
+                    _hit_pids.append(_rr[0])
+        if _hit_pids:
+            _have = set(_r['pid'] for _r in rows)
+            _front = retrieve.items_of(
+                conn, [p for p in _hit_pids if p not in _have][:max(1, int(topk))])
+            if _front:
+                rows = _front + list(rows)
     blocks = evidence.build_blocks(conn, rows, with_lines=with_lines, spec=spec)
     if not blocks:
         # 审查 B1：旧写法直接 `b0 = blocks[0]` → IndexError。无据就**认账**（不许崩，也不许举例冒充）

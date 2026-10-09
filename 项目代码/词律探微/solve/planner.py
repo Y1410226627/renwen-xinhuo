@@ -88,6 +88,9 @@ _SYSTEM_TAIL = (
     '   不要拆成两个 and 叶子（那是「同时」，不是「或者」）。\n'
     '4) **词牌与题名分清**：「蝶恋花·四月一日感粤事」= cipai=["蝶恋花"] + title=["四月一日感粤事"]。\n'
     '5) **不臆造条件**：问句没提的字段一律不要出现在计划里；数字原样照抄（45% → 45）。\n'
+    '6) **数值比较只用 `>=` 与 `<=`**：「高于/超过/至少/不少于」→ `>=`，「低于/少于/至多/\n'
+    '   不超过」→ `<=`（这是本项目的**基准口径**：『超过45个百分点』= >=45）。\n'
+    '   **不要使用 `>` 或 `<`**——执行前会按基准口径强制归一（用 `>` 会被改成 `>=`）。\n'
     '\n'
     '=================  五个示例（复杂问句直接照此措辞）  =================\n'
     '例1（并集/选择）「句脚是「灯」或者「声」的清词」\n'
@@ -379,32 +382,43 @@ def plan(conn, llm, question, context=None):
         if context:
             user = ('【上一轮上下文】%s\n（本轮问句若含指代/省略——如「那里面呢」——请结合上下文补全；'
                     '本轮问句若已自足，则忽略上下文。）\n%s' % (context, user))
-        raw = llm.chat([{'role': 'system', 'content': SYSTEM},
-                        {'role': 'user', 'content': user}], **kw)
-        obj = qlm._json_block(raw)
-        if not isinstance(obj, dict):
-            return None
-        # ---- 归一化：以 IR 的 empty_plan 为底，叠加模型给的计划字段 ----
-        pl = dict(base) if isinstance(base, dict) else {}
-        for k, v in obj.items():
-            pl[k] = v
-        pl['version'] = pl.get('version', 1) or 1
-        if not isinstance(pl.get('filters'), dict):
-            pl['filters'] = {'and': []}
-        if not isinstance(pl.get('retrieve'), list) or not pl['retrieve']:
-            pl['retrieve'] = [{'mode': 'sql'}]
-        if not pl.get('intent'):
-            pl['intent'] = 'list'
-        # ---- 校验（含落地剪枝；落不了地的值被剪掉并记 dropped）----
-        ok, problems = validate(pl, conn)
-        if not ok:
-            return None
-        pl['_raw'] = raw or ''
-        pl['_notes'] = ['计划已通过 queryplan.validate 与落地校验'
-                        + ('（其中 %d 个实体在语料中查无，已按「结果集为空」处理，'
-                           '而非删除条件）' % len(pl.get('_not_found') or [])
-                           if pl.get('_not_found') else '')]
-        return pl
+        # ⭐ 2026-10-09（第三轮审查实测驱动）：**最多两次尝试**——模型输出偶发截断/围栏、
+        #   或计划未过校验（实测约 2/3 的失败来自这两类间歇问题）。第二次把**具体问题**
+        #   回给模型要求修正重发；仍失败才放弃（调用方回落后会如实报告原因）。
+        last_problem = None
+        for _attempt in (1, 2):
+            _user = user if _attempt == 1 else (
+                user + '\n\n【重要】上一次的计划有问题（%s）。请**只输出一个完整、合法的 '
+                       'JSON 对象**（不要任何解释文字 / Markdown 代码块 / 注释），'
+                       '并确保 filters 里的字段与算子都在允许列表内。' % (last_problem or '无法解析'))
+            raw = llm.chat([{'role': 'system', 'content': SYSTEM},
+                            {'role': 'user', 'content': _user}], **kw)
+            obj = qlm._json_block(raw)
+            if not isinstance(obj, dict):
+                last_problem = '无法解析为 JSON'
+                continue
+            # ---- 归一化：以 IR 的 empty_plan 为底，叠加模型给的计划字段 ----
+            pl = dict(base) if isinstance(base, dict) else {}
+            for k, v in obj.items():
+                pl[k] = v
+            pl['version'] = pl.get('version', 1) or 1
+            if not isinstance(pl.get('filters'), dict):
+                pl['filters'] = {'and': []}
+            if not isinstance(pl.get('retrieve'), list) or not pl['retrieve']:
+                pl['retrieve'] = [{'mode': 'sql'}]
+            if not pl.get('intent'):
+                pl['intent'] = 'list'
+            # ---- 校验（含落地剪枝；落不了地的值被剪掉并记 dropped）----
+            ok, problems = validate(pl, conn)
+            if ok:
+                pl['_raw'] = raw or ''
+                pl['_notes'] = ['计划已通过 queryplan.validate 与落地校验'
+                                + ('（其中 %d 个实体在语料中查无，已按「结果集为空」处理，'
+                                   '而非删除条件）' % len(pl.get('_not_found') or [])
+                                   if pl.get('_not_found') else '')]
+                return pl
+            last_problem = '；'.join(str(x) for x in (problems or [])[:5]) or '校验未通过'
+        return None
     except Exception:
         return None               # 硬约束：绝不抛异常
 

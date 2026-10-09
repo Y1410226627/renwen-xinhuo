@@ -226,6 +226,42 @@ def compile_filters(conn, node):
     return retrieve._sql_filters(conn, node)
 
 
+# 比较口径归一表（依据见 `normalize_ops` 的注释；`retrieve._leaf_num` 用同一映射兜底）。
+_CMP_NORM = {'>': '>=', '<': '<='}
+
+
+def normalize_ops(node):
+    """**比较口径归一**（就地修改布尔树，返回归一的叶子数）：`>` → `>=`、`<` → `<=`。
+
+    ⚠ 2026-10-09（第三轮审查 P0 实测驱动）：**依据（铁证）**——官方/基准口径
+    「高于 / 超过 X」= `>= X`、『低于 / 少于 X』= `<= X`：
+    `tests/nl_paraphrase.jsonl` 的 NL001/NL002 truth_sql 为 `p.ze_ratio>=45`，
+    note 明写「『超过45个百分点』= >=45」；经典字段路径（ze_min/ze_max）亦编 `>=`/`<=`。
+    大模型把「高于45%」自然译成 `op='>'`，若原样执行会**少算**
+    （实测「清 临江仙 仄声比例高于45%」：`>=` 59 篇 vs `>` 27 篇——审查点名的反向回归根因）。
+    本函数把**计划本身**归一（前端「理解详情」看到的 op 与执行一致）；
+    `retrieve._leaf_num` 在编译出口再兜一次（防其他入口绕过）。
+    `between` 维持既有闭区间口径，不动。
+    """
+    n = 0
+
+    def _walk(x):
+        nonlocal n
+        if not isinstance(x, dict):
+            return
+        if 'and' in x or 'or' in x:
+            for c in (x.get('and') or x.get('or') or []):
+                _walk(c)
+        elif 'not' in x:
+            _walk(x['not'])
+        elif 'field' in x and x.get('op') in _CMP_NORM:
+            x['op'] = _CMP_NORM[x['op']]
+            n += 1
+
+    _walk(node)
+    return n
+
+
 def _unsupported_leaf(node, out=None):
     """遍历布尔树，收集「本模块 `LEAF_SCHEMA` 不认识」的叶子（供白名单校验）。"""
     out = [] if out is None else out
@@ -810,12 +846,13 @@ def selftest(conn):
                                   {'field': 'author', 'op': '=', 'value': '朱彝尊'}]}}]},
          "SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.cipai='临江仙' "
          "AND p.author NOT IN ('纳兰性德','朱彝尊')"),
-        # 「清代（句中含月 或 含雪）且 字数>50」
+        # 「清代（句中含月 或 含雪）且 字数不低于 50」——⚠ 输入写 `>`，期望 SQL 写 `>=`：
+        #   **比较口径归一**的原地验证（NL001/NL002：『高于/超过』= `>=`；见 normalize_ops）。
         ({'and': [{'field': 'dynasty', 'op': '=', 'value': '清'},
                   {'or': [{'field': 'lines.text', 'op': 'contains', 'value': '月'},
                           {'field': 'lines.text', 'op': 'contains', 'value': '雪'}]},
                   {'field': 'han_len', 'op': '>', 'value': 50}]},
-         "SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.han_len>50 AND "
+         "SELECT COUNT(*) FROM poems p WHERE p.dynasty='清' AND p.han_len>=50 AND "
          "(p.pid IN (SELECT pid FROM lines WHERE text LIKE '%月%') OR "
          " p.pid IN (SELECT pid FROM lines WHERE text LIKE '%雪%'))"),
         # 「清 且 不是 临江仙」（NOT 单叶）

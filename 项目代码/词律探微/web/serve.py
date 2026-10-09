@@ -902,6 +902,31 @@ def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
         if isinstance(note, dict) and note.get('error'):
             out['set_check']['reflect'] = note['error']
     out['understanding_status'] = (note or {}).get('understanding_status')
+    # ★ 2026-10-09（第三轮审查 P1）：**结果状态四态**——「没有查出来」不等于「数据中不存在」：
+    #   · EXACT_EMPTY          ：条件可判定（集合身份复算过）而 0 命中 → **确切的空**；
+    #   · RETRIEVAL_EMPTY      ：0 命中但集合未获复算（自由词面/语义/未验证）→ 只能说「本次没召回到」；
+    #   · UNDERSTANDING_FAILED ：理解未完成且没有可判定的命中集（别把「没听懂」说成「没有」）；
+    #   · SEMANTIC_CANDIDATES  ：语义排序候选（**非穷尽**——不假装是全集）；
+    #   其余有命中且可判定者为 EXACT_OK；拒答为 REFUSED。
+    _sc2 = out.get('set_check') or {}
+    _ck = _sc2.get('status')
+    _us2 = out.get('understanding_status')
+    _empty2 = isinstance(_tot, int) and not isinstance(_tot, bool) and _tot == 0
+    if out.get('refused'):
+        _st = 'REFUSED'
+    elif _ck == 'SEMANTIC_NOT_EXHAUSTIVE':
+        _st = 'SEMANTIC_CANDIDATES'
+    elif _us2 == 'UNDERSTANDING_INCOMPLETE' and not (isinstance(_tot, int) and _tot > 0):
+        _st = 'UNDERSTANDING_FAILED'
+    elif _empty2 and _ck in ('VERIFIED_EXACT', 'VERIFIED_DERIVED'):
+        _st = 'EXACT_EMPTY'
+    elif _empty2:
+        _st = 'RETRIEVAL_EMPTY'
+    elif _ck in ('VERIFIED_EXACT', 'VERIFIED_DERIVED'):
+        _st = 'EXACT_OK'
+    else:
+        _st = 'NOT_CHECKED'
+    out['result_state'] = _st
     return out
 
 
