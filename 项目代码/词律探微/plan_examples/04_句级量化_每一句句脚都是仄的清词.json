@@ -1,0 +1,4 @@
+{"version":1,"intent":"list","scope":{"base":"corpus"},
+ "filters":{"and":[{"field":"dynasty","op":"in","value":["清"]},
+                   {"field":"line_q","op":"=","value":{"op":"∀","pred":["tail_pz","仄"]}}]},
+ "retrieve":[{"mode":"sql"}],"steps":[],"operation":null,"context":{},"evidence":{}}

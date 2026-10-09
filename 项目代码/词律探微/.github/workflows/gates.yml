@@ -34,6 +34,10 @@ jobs:
         run: |
           python -m compileall -q solve tools
           python -m py_compile $(find . -name '*.py' -not -path './frontend/node_modules/*')
+      # ⭐ 小语料 fixture 门禁（外部审查 #19 的替代方案）：CI 不拉 160 MB 语料，
+      #   但用随仓库分发的 tests/fixture/corpus_mini.db 对「检索 ↔ 独立 SQL」做端到端回归。
+      - name: 小语料 fixture 门禁（检索 ↔ 独立 SQL 端到端）
+        run: python tools/fixture_gate.py
       - name: 自检（programmatic asserts；语料节在缺语料时自动 SKIP）
         env:
           # 指向不存在的路径：显式让语料相关节走 SKIP（不依赖 runner 上的偶然目录）

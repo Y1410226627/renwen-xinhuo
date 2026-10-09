@@ -1235,6 +1235,22 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
         _notes.append('计划里有条件未能落地：%s' % x)
     for x in _nf:
         _notes.append('计划里引用了语料中查无的实体：%s' % x)
+    # ── 规则路对照（Phase 4「规则候选 + 模型候选 → 仲裁」的**低风险前置**）──
+    #   只**如实披露**两路条件差集，**不改本轮执行结果**：盲目合并可能把规划路
+    #   已经答对的题重新带偏（实测 NL020 区间被规则路读成 24111）。见 DECISIONS D27。
+    try:
+        import queryplan as _QP
+        _rpl = _QP.to_plan(retrieve.parse_query(conn, question))
+        _rf = set(_QP._filter_fields(_rpl.get('filters') or {}))
+        _pf = set(_QP._filter_fields(pl.get('filters') or {}))
+        _only_rule, _only_plan = sorted(_rf - _pf), sorted(_pf - _rf)
+        if _only_rule:
+            _notes.append('规则路另识别到条件 %s（本轮**未并入执行**，仅披露；'
+                          '合并策略见 DECISIONS.md D27）' % '、'.join(_only_rule))
+        if _only_plan:
+            _notes.append('本计划比规则路多出条件 %s' % '、'.join(_only_plan))
+    except Exception:                                        # noqa: BLE001
+        pass
 
     # ---- 按帧形态产出答案（**复用**既有证据块 `items_of` 与护栏 `guard`，不另写一套口径）----
     try:

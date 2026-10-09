@@ -144,3 +144,21 @@ if __name__ == '__main__':
               '在条件〔…〕下共命中 6 篇；但按本题要求的统计口径，这些篇目里没有可用于该统计量的数据…'):
         r = classify({'answer': t, 'refused': '语料外' in t, 'total': 0 if '0 篇' in t else None})
         print(json.dumps(r, ensure_ascii=False))
+
+
+# ───────── 与 `answer_verify` 的五态对齐（2026-10-09） ─────────
+# 为什么加：`answer_verify.set_check.status` 与本文的 `Reason` 是**两套字面**，
+# 上层要合并展示时必须自己翻译。这里给一个**只读映射**（不改任何既有判定），
+# 使「已验证／未验证／不支持／查无」在一条链上同名同义。
+_STATUS_TO_REASON = {
+    'VERIFIED_EXACT': 'ok',
+    'VERIFIED_DERIVED': 'ok',
+    'SEMANTIC_NOT_EXHAUSTIVE': 'not_found',   # 语义排序不存在可判定的完整命中集
+    'NOT_CHECKED': 'partial',
+    'FAILED': 'partial',
+}
+
+
+def reason_from_status(status):
+    """`answer_verify.set_check.status` → 本模块 `Reason` 取值（未知状态返回 None）。"""
+    return _STATUS_TO_REASON.get(status)

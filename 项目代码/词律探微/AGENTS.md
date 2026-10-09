@@ -106,7 +106,9 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 | `tools/corpus_manifest.py` | **语料来源冻结**：相对路径 + SHA256 + 条数；`--verify` 报缺失/多出/哈希变 | ✅ 只读 |
 | `tools/uncertainty_report.py` | **可存疑清单**：覆写字/空片/异读翻转平仄的篇数 | ✅ 只读 |
 | `tools/snapshot_answers.py` | **答案版本化** + 逐版差异（`--diff`） | ✅ 旁路 |
-| `solve/answer_reason.py` | **拒答理由八态**（附加字段 `reason`） | ✅ 只读结果 |
+| `solve/answer_reason.py` | **拒答理由八态**（附加字段 `reason`）+ `reason_from_status()` 与 `answer_verify` 五态对齐 | ✅ 只读结果 |
+| `tools/fixture_gate.py` | **小语料 fixture 门禁**：CI 无语料也能跑「检索 ↔ 独立 SQL」端到端（`tests/fixture/corpus_mini.db`） | ✅ 只读 |
+| `tools/cipai_clean.py` | **词牌白名单**派生数据（频次门槛，只读；不改 corpus.db） | ✅ 只读 |
 
 ## 五、本轮修掉的一个真缺陷：**「题名当词原文」**
 

@@ -1,0 +1,8 @@
+{"version":1,"intent":"aggregate","scope":{"base":"corpus"},
+ "filters":{"and":[{"field":"dynasty","op":"in","value":["清"]},
+                   {"field":"lines.text","op":"contains","value":"月"}]},
+ "retrieve":[{"mode":"sql"}],
+ "steps":[{"op":"group_by","field":"author"},
+          {"op":"aggregate","metric":"count","field":"author"},
+          {"op":"argmax","by":"value","dir":"desc"}],
+ "operation":null,"context":{},"evidence":{}}

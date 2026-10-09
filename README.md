@@ -35,6 +35,10 @@
 │  │  └─ vue\                       ← 离线视图（Vue 构建产物 + 数据包，双击 index.html 即可看）
 │  ├─ build_corpus.py               ← 从原始语料建库（换语料时才需要跑）
 │  ├─ reproduce.py                  ← 一键复现脚本（答题 → 评测 → 不变式 → 自检 → 回归 → 前端门禁）
+│  ├─ 作品报告.md / 答辩要点.md      ← 初赛作品报告（同源 Markdown）/ 决赛答辩要点
+│  ├─ 接口文档.md / 演示案例.md      ← 接口说明 / 答辩演示脚本
+│  ├─ plan_examples/                ← 查询计划编排示例（决赛「工作流」材料）
+│  ├─ tests/fixture/corpus_mini.db  ← 小语料 fixture（CI 用，随仓库分发）
 │  ├─ DECISIONS.md / 使用说明.md     ← 技术决策表 / 评委与接手者上手指南
 │  └─ 启动问答网页.bat               ← Windows 一键启动
 └─ 数据\
@@ -51,7 +55,9 @@
 python -m pip install -r 项目代码/词律探微/solve/requirements.txt
 ```
 
-- 不需要 GPU、不需要向量库、**默认不联网**（不启用大模型说法层时全程离线）。
+- 不需要 GPU、**默认不联网**（不启用大模型说法层时全程离线）。
+- **向量语义检索是「可选增强」**：装 `faiss-cpu` 并在有嵌入端点时跑一次 `python build_vector_index.py --dynasty 清`
+  即可启用「写秋景」「主题相近」这类**词面不重合**的语义问法；不装则该项自动降级为不可用，其余功能完全不受影响（见 `部署文档.md` 第十节）。
 
 ## 四、五分钟上手（用仓库自带的语料库）
 
@@ -109,6 +115,12 @@ python build_corpus.py --corpus "../../数据/语料" --db data/corpus.db     # 
 | 严格口径评测台 | `python solve/eval.py --pred answers_700.jsonl --gold "…/公开测试集_700题.jsonl"` |
 | 解题链单题/批量 | `python solve/solver.py --question q.jsonl --corpus "../../数据/语料" --output out.jsonl` |
 | 一键复现（答题→评测→不变式→自检→护栏→回归） | `python reproduce.py` |
+| **查询计划层**（布尔树 / 往返 / schema 对齐） | `python solve/queryplan.py` |
+| **计划执行器**（22 算子，逐步 vs 独立复算 + 溯源 DAG） | `python solve/plan_exec.py` |
+| **规划器契约**（Prompt↔IR 不漂移 / 无效实体不退化成全库） | `python solve/planner.py --selftest` |
+| **会话语境 / 集合身份校验** | `python solve/context.py` ／ `python solve/answer_verify.py` |
+| **开放自然语言基准**（独立 SQL 真值） | `python tools/nl_benchmark.py`（`--mode plan` 走规划路） |
+| **小语料 fixture 门禁**（无语料也能跑） | `python tools/fixture_gate.py` |
 
 > `tools/` 里还有逐题复核、答卷审查、双来源一致性、性能探测等门禁脚本，用法见各自的 `--help`。
 >
@@ -140,6 +152,11 @@ python build_corpus.py --corpus "../../数据/语料" --db data/corpus.db     # 
 | `LVC_CORPUS` | 语料根目录 | 相对定位到 `数据/语料` |
 | `LVC_QUESTIONS` | 公开 700 题文件 | 相对定位到 `数据/初赛数据/…/公开测试集_700题.jsonl` |
 | `LVC_PYTHON` | 启动脚本使用的解释器 | PATH 上的 `python` |
+| `LVC_PLANNER` | 理解层模式：`rule`（默认，零变更）／`llm`／`plan`（别名 `planner`，走 Planner→Plan→Executor 主链） | `rule` |
+| `LVC_VECTOR` | 开启真向量召回（受限检索 + RRF）；需先建索引 | 关 |
+| `LVC_RERANK` | 候选精排（本机 reranker 多文档区分度不足，默认关） | 关 |
+| `LVC_EMBED_URL` / `LVC_EMBED_KEY` / `LVC_EMBED_MODEL` | 嵌入端点／密钥／模型 | 读 `solve/data/llm_local.json` |
+| `LVC_PZ_GRAM` | 平仄串倒排加速（本库实测更慢，默认关） | 关 |
 | `LVC_LLM_PROVIDER` / `LVC_LLM_MODEL` / `LVC_LLM_TIMEOUT` | 大模型服务商/模型/超时 | 见 `solve/llm.py` |
 
 ## 十、数据出处与许可

@@ -1,0 +1,5 @@
+{"version":1,"intent":"list","scope":{"base":"corpus"},
+ "filters":{"and":[{"or":[{"field":"dynasty","op":"in","value":["清"]},
+                          {"field":"dynasty","op":"in","value":["宋"]}]},
+                   {"field":"cipai","op":"in","value":["临江仙"]}]},
+ "retrieve":[{"mode":"sql"}],"steps":[],"operation":null,"context":{},"evidence":{}}

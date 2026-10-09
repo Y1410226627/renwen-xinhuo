@@ -1,0 +1,5 @@
+{"version":1,"intent":"list","scope":{"base":"corpus"},
+ "filters":{"and":[{"field":"dynasty","op":"in","value":["清"]},
+                   {"field":"ze_ratio","op":">=","value":50}]},
+ "retrieve":[{"mode":"vector","q":"离愁 别离 相思 羁旅 凄凉","topk":50}],
+ "steps":[],"operation":null,"context":{},"evidence":{}}
