@@ -2332,6 +2332,20 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
         if _ex_line:
             out.append(_ex_line)
     out.append(head)
+    # ⭐ 2026-10-09：**词面/语义主导**的问句（如「找几首写秋景的清词」）——
+    #   「命中 N 篇」是按**精确条件**（此处只有朝代）计数的范围，**不等于**这 N 篇都是该主题；
+    #   排在前面的是**语义相关度**最高的几篇。不加这句，读者会把 26742 篇读成「全是秋景词」。
+    _lex_only = bool(spec.keywords) and not (
+        spec.rng or spec.tail_any or spec.pz or spec.pz_exact or spec.tail_each
+        or getattr(spec, 'line_q', None) or spec.title_any or spec.cipai_any
+        or spec.author_any or getattr(spec, 'scene', None) or getattr(spec, 'consist', None)
+        or getattr(spec, 'order_by', None) or getattr(spec, 'agg', None)
+        or getattr(spec, 'pair', None))
+    if _lex_only:
+        out.append('　　　说明：本句**没有可精确判定的主题条件**，上面几名是按**词面/语义相关度**'
+                   '排出的**最接近**的篇目；所谓**命中 %d 篇**是按**精确条件**（如朝代）计数的'
+                   '**检索范围**，并不表示这些篇目都真的写了该主题。'
+                   % (total if total is not None else len(blocks)))
     if getattr(spec, 'content_ask', False):
         # ⭐ 内容/情感层：本系统**不对思想感情下结论**（那是评价性判断，非语料可判定事实），
         #   但**原文本身就是内容层依据** —— 全文已逐句列在下方证据块，可直接判读；

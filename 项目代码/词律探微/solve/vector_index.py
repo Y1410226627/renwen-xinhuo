@@ -364,6 +364,7 @@ def main():
     ap.add_argument('--q', action='append', default=[], help='语义查询（可多次）')
     ap.add_argument('--similar', type=int, default=0, help='找与该 pid 主题相近的作品')
     a = ap.parse_args()
+    available()          # 先触发一次加载，`info()` 才有内容（否则首行恒 ok:false，误导）
     print('index info: %s' % json.dumps(info(), ensure_ascii=False))
     for q in (a.q or ['写秋景的词']):
         print('\n「%s」→' % q)
