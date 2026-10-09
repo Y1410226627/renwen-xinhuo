@@ -49,7 +49,8 @@ export default defineConfig(({ mode }) => {
               browse: path.resolve(dir, 'src', 'browse.html'),
               graph: path.resolve(dir, 'src', 'graph.html'),
               review: path.resolve(dir, 'src', 'review.html'),
-              research: path.resolve(dir, 'src', 'research.html')
+              research: path.resolve(dir, 'src', 'research.html'),
+              cipu: path.resolve(dir, 'src', 'cipu.html')
             }
           }
         : {

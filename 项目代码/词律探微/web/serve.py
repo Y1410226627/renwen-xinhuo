@@ -1762,7 +1762,7 @@ class H(BaseHTTPRequestHandler):
             # 两种产物文件同名，因此「构建了就自动用新版」，评审机没跑构建也不至于 404。
             # （research.html 为 2026-10-09 新增的「研究库」页——在线专用，离线打开会如实提示。）
             for name in ('parse.html', 'browse.html', 'graph.html', 'review.html',
-                         'index.html', 'research.html'):
+                         'index.html', 'research.html', 'cipu.html'):
                 if u.path == '/' + name:
                     for base in (DIST_VIEWS, DATA):
                         p = os.path.join(base, name)

@@ -3,7 +3,7 @@
 > 本文件由 `frontend/tools/gen-docs.mjs` **从组件源码自动抽取**，请勿手改。
 > 改动组件后运行 `npm run docs`（或 `npm run docs:check` 校验）重新生成。
 
-共 7 个组件。
+共 8 个组件。
 
 ---
 
@@ -34,6 +34,24 @@
 ## AskView
 
 **文件**：`src/views/AskView.vue`　·　**用途**：「声情问答」视图（在线，走 /api/
+
+### props
+
+（无）
+
+### emits
+
+（无）
+
+### slots
+
+（无）
+
+---
+
+## CipuView
+
+**文件**：`src/views/CipuView.vue`　·　**用途**：
 
 ### props
 

@@ -78,7 +78,7 @@ const viteBin = path.join(FRONTEND, 'node_modules', 'vite', 'bin', 'vite.js');
  */
 const VITE_OWNED = (p) => {
   const rel = path.relative(VUE, p).replace(/\\/g, '/');
-  return /^assets\//.test(rel) || /^(index|parse|browse|graph|review|research)\.html$/.test(rel);
+  return /^assets\//.test(rel) || /^(index|parse|browse|graph|review|research|cipu)\.html$/.test(rel);
 };
 function snapshot(dir) {
   const set = new Set();

@@ -244,7 +244,11 @@ function detailHtml(row, inf, cond) {
     for (let j = 0; j < L1.text.length; j++) {
       const ch = L1.text[j];
       if (HAN.test(ch)) {
-        cs += '<span class="' + (L1.pz[k] === '仄' ? 'ze' : 'ping') + '">' + U.esc(ch) + '</span>';
+        /* ⭐ 2026-10-10：给每个**汉字**带上坐标（句序 / 字位）——
+           解析页据此支持「点字 → 读音候选 + 人工选读」（字位 = 该句第几个汉字，0 起）。
+           坐标与后端 `/api/pronounce/candidates` 的 line/pos 口径一致（跳过标点）。 */
+        cs += '<span class="' + (L1.pz[k] === '仄' ? 'ze' : 'ping')
+          + '" data-li="' + i + '" data-pos="' + k + '">' + U.esc(ch) + '</span>';
         k++;
       } else { cs += U.esc(ch); }
     }

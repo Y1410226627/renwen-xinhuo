@@ -68,6 +68,12 @@ const facets = ref(null);
 const metaHtml = ref('');
 const pagerHtml = ref('');
 const detailHtml = ref('');
+/* 字位候选（竞品「逐字研读」对应能力，2026-10-10）：
+   点详情区任一汉字 → 取它的（句序, 字位）→ 拉候选 → 可人工选读 / 撤回。
+   选读走**决策事件**（研究库），可回溯、可撤回，不改字级基线表。 */
+const cand = ref(null);
+const candErr = ref('');
+const curDetailPid = ref('');
 const whereSql = ref('');
 const orderBy = ref('');
 const cnt = ref(0);
@@ -429,6 +435,8 @@ async function showDetail(pid) {
     try {
       const j = await api.parse(pid);
       if (j.error) { detailHtml.value = `<span class="bad">${UI.esc(j.error)}</span>`; return; }
+      curDetailPid.value = j.pid || pid;      // 字位候选以「当前这篇」为主体
+      cand.value = null;                       // 换篇即收起上一字位的候选面板
       const lines = (j.lines || []).map((L) => ({ text: L.text, pz: L.pz, tail: L.tail }));
       const row = [j.pid, j.dynasty, j.author, j.cipai, j.title, j.raw || ''];
       const jm = Object.assign({}, j);
@@ -445,6 +453,79 @@ async function showDetail(pid) {
   const i = pack.rows.findIndex((r) => r[0] === pid);
   if (i >= 0) { detailHtml.value = ParseApp.detailHtml(pack.rows[i], ParseApp.info(pack.rows[i], i), lastCond); return; }
   detailHtml.value = `<span class="bad">没有这一篇：${UI.esc(pid)}</span>`;
+}
+
+/* ── 字位候选 + 人工选读（2026-10-10 竞品对照）──
+   坐标口径：`data-li` = 第几句（0 起）、`data-pos` = 该句第几个**汉字**（跳过标点），
+   与后端 `/api/pronounce/candidates` 的 line/pos **同口径**（引擎与裁定共用一份坐标）。 */
+async function onCharClick(ev) {
+  const t = ev && ev.target;
+  if (!t || t.tagName !== 'SPAN') { return; }
+  const li = t.getAttribute && t.getAttribute('data-li');
+  const pos = t.getAttribute && t.getAttribute('data-pos');
+  if (li === null || pos === null || !curDetailPid.value) { return; }
+  candErr.value = '';
+  try {
+    const p = new URLSearchParams({
+      pid: curDetailPid.value, line: String(li), pos: String(pos)
+    });
+    const r = await fetch('/api/pronounce/candidates?' + p.toString());
+    const j = await r.json();
+    if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '取候选失败'); }
+    const c0 = j.result || {};
+    c0.line = Number(li); c0.pos = Number(pos);
+    cand.value = c0;
+  } catch (e) { candErr.value = String(e.message || e); cand.value = { line: Number(li), pos: Number(pos), char: t.textContent, candidates: [], history: [] }; }
+}
+
+async function decide(c0) {
+  if (!cand.value || !curDetailPid.value) { return; }
+  const why = window.prompt('选读依据（可留空；会写进决策事件）', '') || '';
+  try {
+    const r = await fetch('/api/research/write', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: '/api/pronounce/decide',
+        pid: curDetailPid.value, line: cand.value.line, pos: cand.value.pos,
+        reading: c0.reading, tone: c0.tone, basis: (c0.source || ''), why,
+        client_token: `pron:${curDetailPid.value}:${cand.value.line}:${cand.value.pos}:${c0.reading}`
+      })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '选读失败'); }
+    UI.toast('已登记选读（决策事件）');
+    await refreshCand();
+  } catch (e) { candErr.value = String(e.message || e); }
+}
+
+async function withdraw(d) {
+  try {
+    const r = await fetch('/api/research/write', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: '/api/pronounce/withdraw', decision_id: d.decision_id || d.id,
+        why: '人工撤回', client_token: `wd:${d.decision_id || d.id}`
+      })
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '撤回失败'); }
+    UI.toast('已撤回（回到基线）');
+    await refreshCand();
+  } catch (e) { candErr.value = String(e.message || e); }
+}
+
+async function refreshCand() {
+  if (!cand.value) { return; }
+  const p = new URLSearchParams({
+    pid: curDetailPid.value, line: String(cand.value.line), pos: String(cand.value.pos)
+  });
+  const r = await fetch('/api/pronounce/candidates?' + p.toString());
+  const j = await r.json();
+  if (r.ok && !j.error) {
+    const c0 = j.result || {};
+    c0.line = cand.value.line; c0.pos = cand.value.pos;
+    cand.value = c0;
+  }
 }
 
 /* 导出范围（F6）：离线 lastHits 是**全部命中**；在线是服务端分页后的**当前页**。
@@ -682,7 +763,44 @@ onMounted(() => {
 
     <div class="card">
       <h2>逐字解析</h2>
-      <div id="detail" v-html="detailHtml"></div>
+      <div id="detail" v-html="detailHtml" @click="onCharClick"></div>
+      <p class="dim">（点<b>任一汉字</b>可查看它的读音候选并人工选读——选读会写进研究库的
+        决策事件，可撤回，绝不改动字级基线表）</p>
+
+      <!-- 字位候选 + 人工选读（竞品「逐字研读」的对应能力，2026-10-10） -->
+      <div v-if="cand" class="pv-cand">
+        <h3>字位 {{ cand.line + 1 }} 句 · 第 {{ cand.pos + 1 }} 字「{{ cand.char }}」
+          <small class="dim">基线平仄 {{ cand.base_pz || '—' }}</small></h3>
+        <p v-if="candErr" class="bad">✗ {{ candErr }}</p>
+        <table class="cp-table">
+          <thead><tr><th>读音</th><th>声调</th><th>平仄</th><th>来源</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="c0 in cand.candidates" :key="c0.reading">
+              <td>{{ c0.reading }}</td>
+              <td class="num">{{ c0.tone }}</td>
+              <td>{{ c0.tone >= 3 ? '仄' : '平' }}</td>
+              <td class="dim">{{ c0.source }}</td>
+              <td>
+                <button type="button" class="mini" :disabled="!online"
+                        @click="decide(c0)">选定</button>
+              </td>
+            </tr>
+            <tr v-if="!(cand.candidates || []).length">
+              <td colspan="5" class="dim">（该字只有一种读音，无可选项）</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="cand.current_decision" class="pv-cur">
+          当前生效裁定：<b>{{ cand.current_decision.reading }}</b>
+          （{{ cand.current_decision.pz }}）
+          <button type="button" class="mini danger" :disabled="!online"
+                  @click="withdraw(cand.current_decision)">撤回</button>
+        </div>
+        <div v-if="(cand.history || []).length" class="dim">
+          裁定史：{{ cand.history.length }} 条（select / withdraw 全留痕）
+        </div>
+        <p><button type="button" class="mini" @click="cand = null">收起</button></p>
+      </div>
     </div>
    </div>
   </AppShell>

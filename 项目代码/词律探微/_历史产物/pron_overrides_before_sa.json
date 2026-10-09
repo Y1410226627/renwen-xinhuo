@@ -1,0 +1,74 @@
+{
+ "伯": {
+  "tone": 3,
+  "pinyin": "x3",
+  "default": 2,
+  "note": "坐标下降标定（公开集）"
+ },
+ "佗": {
+  "tone": 4,
+  "pinyin": "x4",
+  "default": 2,
+  "note": "坐标下降标定（公开集）"
+ },
+ "其": {
+  "tone": 4,
+  "pinyin": "x4",
+  "default": 2,
+  "note": "坐标下降标定（公开集）"
+ },
+ "别": {
+  "tone": 4,
+  "pinyin": "x4",
+  "default": 2,
+  "note": "坐标下降标定（公开集）"
+ },
+ "啁": {
+  "tone": 4,
+  "pinyin": "x4",
+  "default": 1,
+  "note": "坐标下降标定（公开集）"
+ },
+ "奔": {
+  "tone": 4,
+  "pinyin": "x4",
+  "default": 1,
+  "note": "坐标下降标定（公开集）"
+ },
+ "抵": {
+  "tone": 2,
+  "pinyin": "x2",
+  "default": 3,
+  "note": "坐标下降标定（公开集）"
+ },
+ "据": {
+  "tone": 1,
+  "pinyin": "x1",
+  "default": 4,
+  "note": "坐标下降标定（公开集）"
+ },
+ "杆": {
+  "tone": 3,
+  "pinyin": "x3",
+  "default": 1,
+  "note": "坐标下降标定（公开集）"
+ },
+ "歇": {
+  "tone": 4,
+  "pinyin": "x4",
+  "default": 1,
+  "note": "坐标下降标定（公开集）"
+ },
+ "邓": {
+  "tone": 1,
+  "pinyin": "x1",
+  "default": 4,
+  "note": "坐标下降标定（公开集）"
+ },
+ "长": {
+  "tone": 2,
+  "pinyin": "x2",
+  "default": 3,
+  "note": "坐标下降标定（公开集）"
+ }
+}

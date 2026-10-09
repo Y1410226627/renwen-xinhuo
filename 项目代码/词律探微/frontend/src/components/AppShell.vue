@@ -22,6 +22,7 @@ const tabs = [
   { key: 'browse', href: 'browse.html', label: '多条件检索' },
   { key: 'graph', href: 'graph.html', label: '知识图谱' },
   { key: 'review', href: 'review.html', label: '校订队列' },
+  { key: 'cipu', href: 'cipu.html', label: '词谱对照' },
   { key: 'research', href: 'research.html', label: '研究库' },
   { key: 'ask', href: 'ask.html', label: '声情问答' }
 ];

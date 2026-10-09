@@ -28,7 +28,7 @@
  *      在回答卡片顶部用醒目条明确「这句话里的 X 没能转成可执行条件，以下不是对该问题的回答」。
  *      （后端已在正文给出一版文案——前端只做顶部醒目条，不重复正文。）
  */
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { api } from '../api.js';
 import { AskApp, UI } from '../core/index.mjs';
 import AppShell from '../components/AppShell.vue';
@@ -46,6 +46,20 @@ let lastTurn = null;            // { q, spec, pids } —— 供下一轮 ctx / c
  *   （主人实测反馈：「每次问下一个问题总会默认承上一轮，导致检索范围有误」）。
  *   `lastTurn` 仍始终记录（供勾选时使用），但**不勾就不发**。 */
 const carryOn = ref(false);
+/* 作答情景（竞品「研究演示 / 应试作答」的对应实现）：
+   · research —— 研究演示：确定性结论 + 大模型补「说法」（默认开 narrate）；
+   · exam     —— 应试作答：论证口径（默认开 argument：更严、依据分列）。
+   ⚠ 诚实边界：本项目**只有一条已就绪的大模型通道**（`/api/llm` 显示实际模型名），
+   这里切换的是**作答口径**，不是模型——不冒充多模型选择。 */
+const mode = ref('research');
+const modeNote = computed(() => (mode.value === 'exam'
+  ? '应试作答：论证口径（依据分列、结论与推断分开）'
+  : '研究演示：确定性结论 + 大模型补说法'));
+function setMode(m) {
+  mode.value = m;
+  if (m === 'exam') { useArg.value = true; useLlm.value = false; useParse.value = true; }
+  else { useArg.value = false; useLlm.value = false; useParse.value = true; }
+}
 
 /* ─────────────── 多会话（本地保存，可删除）───────────────
  * 目标：像大模型对话那样「一个会话一条线」，互不污染；会话存 localStorage，可新建 / 切换 / 删除。
@@ -623,12 +637,21 @@ onMounted(async () => {
       <input id="q" v-model="q" style="width:min(560px,60%)"
              placeholder="例：清 临江仙 仄声比例高于45%" @keydown.enter="go">
       <button id="go" @click="go">提问</button>
+      <!-- ★ 2026-10-10（竞品对照）：**作答情景**预设——
+           研究演示 = 在确定性结论之上补「说法」；应试作答 = 走论证口径（更严、带依据分列）。
+           这里不做「模型选择」：本项目只有一条**已就绪的大模型通道**，如实写明用的是哪个。 -->
+      <span class="dim" style="margin-left:8px">情景：</span>
+      <button type="button" class="ghost mini" :class="{ on: mode === 'research' }"
+              @click="setMode('research')">研究演示</button>
+      <button type="button" class="ghost mini" :class="{ on: mode === 'exam' }"
+              @click="setMode('exam')">应试作答</button>
       <label class="dim" style="margin-left:8px">
         <input type="checkbox" id="useParse" v-model="useParse"> 用大模型理解问句</label>
       <label class="dim" style="margin-left:8px">
         <input type="checkbox" id="useLlm" v-model="useLlm"> 让大模型写说明</label>
       <label class="dim" style="margin-left:6px">
         <input type="checkbox" id="useArg" v-model="useArg"> 论证辅助草稿</label>
+      <span class="dim" style="margin-left:6px">{{ modeNote }}</span>
       <span id="llmTag" class="dim" style="margin-left:8px">{{ llmTag }}</span>
     </div>
   </AppShell>
