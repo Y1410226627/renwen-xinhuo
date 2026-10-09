@@ -171,6 +171,10 @@ const nlq = ref('');             // 自然语言理解输入框（在线）
 const nlSource = ref('');        // 理解来源（规则／大模型）
 const nlNote = ref('');          // 理解注记（如实披露 dropped/unparsed/unsupported）
 const intentHint = ref('');      // /api/search 回传的「本页不执行这类意图」提示
+/* 实体身份判定（2026-10-09 新增）：命中为 0 时对词牌/词人做一次 exact→ambiguous→unavailable
+   判定，把「是不是想写…」如实提示出来（见 solve/entity_resolve.identify 与 /api/identify）。 */
+const entityHint = ref('');
+const entitySug = ref([]);
 /* nl2query 回填的**匹配语义**与**跨篇意图**：表单里没有对应输入控件，单独保存并随检索传递
    （authorMode/cipaiMode → build_where 的 exact 语义；agg/pair/order_by → 服务端 intent 告知）。 */
 const modes = reactive({ author: '', cipai: '' });
@@ -274,6 +278,7 @@ async function run(p) {
   page.value = p || 1;
   const c = readCond();
   errMsg.value = '';
+  entityHint.value = ''; entitySug.value = [];     // 每次检索先清掉上一次的实体提示
   /* 声律模式含非法字符：明确报错并中止（不静默替换成通配符），与 web/serve.py 的
      400 INVALID_QUERY 同口径。 */
   if (c.pz && !PZ_OK.test(String(c.pz).trim())) {
@@ -305,6 +310,8 @@ async function run(p) {
       /* ⚠ 本轮第 2 项：/api/search 识别到「本页不执行」的跨篇意图时，如实告知用户，
          而不是把普通列表当成答案。改前无此提示 → 用户以为分组统计题被回答了。 */
       intentHint.value = (j.intent && j.intent.unsupported_by_search) ? (j.intent.hint || '') : '';
+      /* 命中为 0 且填了词牌/词人 → 问一次身份判定，如实提示「是不是想写…」 */
+      if (!j.total) { entitySuggest(c); }
     } catch (e) {
       loadMsg.value = '';
       errMsg.value = String(e);
@@ -360,6 +367,33 @@ async function understand() {
     loadMsg.value = '';
     errMsg.value = `理解失败：${e}`;
   }
+}
+
+/* 实体身份判定（2026-10-09 新增，对齐竞品 `cilyutanwei` 的 exact→ambiguous→unavailable 三态）：
+   命中为 0 且填了词牌/词人时，问一次 /api/identify —— 若库里**没有完全同名**，把候选如实提示出来。
+   三态里只有 exact 不提示（名字本身是对的，命中 0 是别的条件太严，不该误导用户改名）。
+   判定失败**静默**：它只是提示，绝不能因为提示失败而影响检索本身。 */
+async function entitySuggest(c) {
+  entityHint.value = ''; entitySug.value = [];
+  const kind = c.cipai ? 'cipai' : (c.author ? 'author' : '');
+  if (!kind) { return; }
+  const text = String(kind === 'cipai' ? c.cipai : c.author).trim();
+  if (!text) { return; }
+  try {
+    const j = await api.identify(kind, text);
+    if (!j || j.status === 'exact') { return; }
+    const label = (kind === 'cipai') ? '词牌' : '词人';
+    entityHint.value = label + '「' + text + '」：' + (j.note || '库里查无此名。')
+      + (j.status === 'ambiguous' ? '（点下面候选即按该名重检）' : '');
+    entitySug.value = (j.matches || []).map((m) => ({ value: m.value, n: m.n, kind }));
+  } catch (e) { /* 提示失败不影响检索结果 */ }
+}
+
+/* 采纳某条候选：写回对应输入框并重检（同时清掉 nl2query 的 exact 语义，回到默认 contains）。 */
+function useSug(s) {
+  if (s.kind === 'cipai') { cond.cipai = s.value; modes.cipai = ''; }
+  else { cond.author = s.value; modes.author = ''; }
+  run(1);
 }
 
 function resetAll() {
@@ -442,6 +476,37 @@ function exportCsv() {
   UI.toast(`已导出 ${csvScope.value} ${nRows} 篇（含条件摘要）`);
 }
 
+/* 分析级 JSON 导出（2026-10-09 新增，对齐竞品 `cilyutanwei` 的 analysis JSON 导出）。
+   与 CSV 的分工：CSV 给人看（带 BOM、表格友好）；JSON 给**脚本/二次分析**用（键值明确、
+   不带 BOM——带 BOM 会让 `json.load` / `JSON.parse` 直接报错，见 core/ui.js 的 downloadJson）。
+   口径不变：数字仍全部来自引擎，本函数只负责「打包 + 标注口径」。 */
+function exportJson() {
+  const nRows = lastHits.value.length;
+  if (!nRows) { UI.toast('没有可导出的结果'); return; }
+  const rowsOut = lastHits.value.map((it) => {
+    const r = it.row, m = it.info.metrics;
+    return {
+      pid: r[0], dynasty: r[1], author: r[2], cipai: r[3], title: r[4],
+      sent_n: m.sent_n, han_len: m.han_len, ping: m.ping, ze: m.ze,
+      ze_ratio: m.ze_ratio, scene: m.scene, change: m.change, threshold: m.threshold,
+      raw: r[5]
+    };
+  });
+  UI.downloadJson('词律探微_检索结果.json', {
+    generator: '词律探微 · 清代词律声情研究助手',
+    note: '数字全部由本地引擎算出；scope 标明本文件覆盖「当前页」还是「全部」。',
+    scope: csvScope.value,
+    total_hits: total.value,
+    rows_in_file: nRows,
+    condition: ParseApp.condText(lastCond),
+    generated_at: new Date().toLocaleString(),
+    fields: ['pid', 'dynasty', 'author', 'cipai', 'title', 'sent_n', 'han_len', 'ping', 'ze',
+             'ze_ratio', 'scene', 'change', 'threshold', 'raw'],
+    rows: rowsOut
+  });
+  UI.toast(`已导出 JSON（${csvScope.value} ${nRows} 篇）`);
+}
+
 /* 分面 → 点击即筛 */
 function applyFacet(pairs) {
   pairs.forEach(([f, v]) => {
@@ -500,6 +565,8 @@ onMounted(() => {
         <button id="copycond" class="ghost" title="把当前条件与命中数复制成一段文本，便于写论文时引用"
                 @click="copyCond">复制条件摘要</button>
         <button id="csv" class="ghost" @click="exportCsv">{{ csvLabel }}</button>
+        <button id="jsonexport" class="ghost" title="把当前结果集导出为结构化 JSON（给脚本/二次分析用）"
+                @click="exportJson">导出 JSON</button>
       </div>
       <p class="dim pv-hint">在任一输入框按 <b>Enter</b> 即检索；按 <b>Esc</b> 清错误提示。
         点表头可对<b>当前页</b>排序（不改后端查询）。</p>
@@ -538,6 +605,14 @@ onMounted(() => {
             —— 条件之间是「且」，越多越严。</p>
         </div>
       </template>
+
+      <!-- 实体身份判定（2026-10-09 新增）：命中为 0 且词牌/词人「库里没有完全同名」时，
+           如实提示 exact/ambiguous/unavailable 三态与近似候选；点候选即换名重检。 -->
+      <div v-if="entityHint" id="entityHint" class="hint-box">
+        <span>{{ entityHint }}</span>
+        <span v-for="s in entitySug" :key="s.kind + s.value" class="chip"
+              @click="useSug(s)">{{ s.value }} <span class="dim">{{ s.n }}</span></span>
+      </div>
 
       <div v-if="online && whereSql" class="dim">SQL 条件：{{ whereSql }}；ORDER BY {{ orderBy }}</div>
       <!-- ⚠ 本轮第 2 项：这类意图本页不执行，如实告知并引导去问答页（不再静默当普通列表）。 -->
@@ -633,6 +708,13 @@ onMounted(() => {
 /* 表格操作列不换行，两个按钮间距一致 */
 .pv .op { white-space: nowrap; }
 .pv .op button { margin-right: 4px; }
+
+/* 实体身份判定提示（2026-10-09）：与「空态」区分——它不是「没结果」，而是「这名字库里没有」。
+   用虚线棕边 + 候选 chip，让「换个名字再试」一眼可点。 */
+.hint-box { border: 1px dashed color-mix(in srgb, var(--accent2) 70%, transparent);
+  border-radius: var(--r); padding: 8px 12px; background: var(--panel3);
+  margin: 8px 0 2px; font-size: 13.5px; }
+.hint-box .chip { margin-left: 6px; }
 
 @media (max-width: 640px) {
   .pv .op button { margin: 2px 4px 2px 0; }

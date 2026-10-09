@@ -78,6 +78,63 @@
       </ul>
     </div>
 
+    <!-- 语料档案（2026-10-09 新增）：数字全部取自 /api/catalog，由服务端 SQL 现算。
+         只在「在线」（由 web/serve.py 提供）时出现；离线双击打开时给一句明确说明，不显示假数据。 -->
+    <div v-if="isOnline" class="card">
+      <h3>语料档案（实时统计）</h3>
+      <p v-if="catErr" class="dim">{{ catErr }}</p>
+      <p v-else-if="!catalog" class="loading"><span class="spin"></span> 正在统计语料…</p>
+      <template v-else>
+        <div class="cat-totals">
+          <div><b>{{ fmt(catalog.totals.poems) }}</b><span>篇</span></div>
+          <div><b>{{ fmt(catalog.totals.lines) }}</b><span>句</span></div>
+          <div><b>{{ fmt(catalog.totals.authors) }}</b><span>词人</span></div>
+          <div><b>{{ fmt(catalog.totals.cipai) }}</b><span>词牌</span></div>
+        </div>
+        <div class="cat-cols">
+          <div class="cat-col">
+            <h4>按朝代</h4>
+            <div v-for="d in catalog.dynasty" :key="'d' + d.name" class="cat-row">
+              <span class="cat-k">{{ d.name }}</span>
+              <span class="cat-bar"><i :style="{ width: pct(d.poems, catalog.totals.poems) }"></i></span>
+              <span class="cat-v">{{ fmt(d.poems) }}</span>
+            </div>
+          </div>
+          <div class="cat-col">
+            <h4>按声情</h4>
+            <div v-for="s in catalog.scene" :key="'s' + s.name" class="cat-row">
+              <span class="cat-k">{{ s.name }}</span>
+              <span class="cat-bar"><i :style="{ width: pct(s.poems, catalog.totals.poems) }"></i></span>
+              <span class="cat-v">{{ fmt(s.poems) }}</span>
+            </div>
+          </div>
+          <div class="cat-col">
+            <h4>作数最多的词人</h4>
+            <div v-for="a in catalog.top_authors.slice(0, 8)" :key="'a' + a.name" class="cat-row">
+              <span class="cat-k">{{ a.name }}</span>
+              <span class="cat-bar"><i :style="{ width: pct(a.poems, catalog.top_authors[0].poems) }"></i></span>
+              <span class="cat-v">{{ fmt(a.poems) }}</span>
+            </div>
+          </div>
+          <div class="cat-col">
+            <h4>用得最多的词牌</h4>
+            <div v-for="c in catalog.top_cipai.slice(0, 8)" :key="'c' + c.name" class="cat-row">
+              <span class="cat-k">{{ c.name }}</span>
+              <span class="cat-bar"><i :style="{ width: pct(c.poems, catalog.top_cipai[0].poems) }"></i></span>
+              <span class="cat-v">{{ fmt(c.poems) }}</span>
+            </div>
+          </div>
+        </div>
+        <p class="dim">以上数字由 <code>/api/catalog</code> 现场 SQL 统计（不读任何预生成缓存）；
+          标定表指纹 <code>{{ (catalog.meta && catalog.meta.overrides_sha || '').slice(0, 16) }}</code>。</p>
+      </template>
+    </div>
+    <div v-else class="card">
+      <h3>语料档案（实时统计）</h3>
+      <p class="dim">此表需要本地服务：请运行 <code>python web/serve.py</code> 后从首页进入；
+        离线双击打开的页面不显示实时统计（避免把旧数字当现算值）。</p>
+    </div>
+
     <div class="card">
       <h3>复现命令</h3>
       <pre>{{ repro }}</pre>
@@ -99,8 +156,9 @@
  *   ③ 入口卡加编号与 CTA 对齐，三道锁改成「名称 + 一句话」的左侧色条列表。
  *   文案里保留了门禁依赖的「词律探微」「复现」等既有必需文本。
  */
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import AppShell from '../components/AppShell.vue'
+import { api } from '../api.js'
 
 const props = defineProps({
   corpusN: { type: Number, default: 58852 },
@@ -124,6 +182,23 @@ python web/serve.py                                        # 启动在线问答�
 python reproduce.py                                        # 一键复现全部门禁`
 
 function fmt(n) { return Number(n || 0).toLocaleString('en-US') }
+
+/* 语料档案（2026-10-09 新增）：只在线时取一次 `/api/catalog`。
+   失败不显示假数据——如实给出错误文案（离线视图永不请求）。 */
+const catalog = ref(null)
+const catErr = ref('')
+onMounted(() => {
+  if (!isOnline.value) { return }
+  api.catalog(12).then((j) => {
+    if (j && j.totals) { catalog.value = j } else { catErr.value = '统计接口返回异常（无 totals 字段）。' }
+  }).catch((e) => { catErr.value = '统计获取失败：' + (e && e.message ? e.message : e) })
+})
+/* 条形宽度：相对基准值的百分比（最小 3%，保证极小值也看得见）。 */
+function pct(v, base) {
+  const b = Number(base) || 0
+  if (!b) { return '0%' }
+  return Math.max(3, Math.round((Number(v) || 0) / b * 100)) + '%'
+}
 </script>
 
 <style scoped>
@@ -165,5 +240,29 @@ function fmt(n) { return Number(n || 0).toLocaleString('en-US') }
 
 @media (max-width: 640px) {
   .locks li { grid-template-columns: 1fr; }
+}
+
+/* 语料档案（2026-10-09）：总计数条 + 四列分布条。数字用 Georgia（--num），与正文区分。 */
+.cat-totals { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line);
+  border-radius: var(--r); overflow: hidden; background: var(--panel3); margin: 10px 0 14px; }
+.cat-totals > div { padding: 10px 14px; border-right: 1px solid var(--line); }
+.cat-totals > div:last-child { border-right: none; }
+.cat-totals b { display: block; font-family: var(--num); font-size: 24px; line-height: 1.3;
+  color: var(--accent); }
+.cat-totals span { font-size: 12px; color: var(--ink2); }
+.cat-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 26px; }
+.cat-col h4 { margin: 6px 0 4px; font-family: var(--kai); font-size: 14px; letter-spacing: .08em;
+  color: var(--ink3); font-weight: 600; }
+.cat-row { display: grid; grid-template-columns: 76px 1fr 56px; gap: 8px; align-items: center;
+  padding: 2px 0; font-size: 13px; }
+.cat-k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-v { text-align: right; font-family: var(--num); color: var(--ink2); }
+.cat-bar { height: 7px; background: color-mix(in srgb, var(--line) 55%, transparent);
+  border-radius: 4px; overflow: hidden; }
+.cat-bar i { display: block; height: 100%; background: var(--accent); opacity: .72; }
+
+@media (max-width: 640px) {
+  .cat-totals { grid-template-columns: repeat(2, 1fr); }
+  .cat-totals > div:nth-child(2n) { border-right: none; }
 }
 </style>

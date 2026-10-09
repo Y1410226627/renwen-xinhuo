@@ -86,8 +86,10 @@ export interface UIApi {
   signed(v: number): string;
   /** 二维数组转 CSV 文本。 */
   csvText(rows: unknown[][]): string;
-  /** 触发浏览器下载。 */
+  /** 触发浏览器下载（CSV 带 BOM，便于 Excel 认 UTF-8）。 */
   download(text: string, filename: string, mime?: string): void;
+  /** 触发浏览器下载 JSON（**不带 BOM**；带 BOM 会让 JSON.parse / json.load 报错）。 */
+  downloadJson(obj: unknown, filename: string): void;
   /** 轻提示。 */
   toast(msg: string, kind?: string): void;
   /** 加载指示器 HTML。 */

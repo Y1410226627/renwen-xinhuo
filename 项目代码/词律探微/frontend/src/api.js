@@ -92,6 +92,10 @@ export const api = {
   nl2query: (q, llm) => getJson('/api/nl2query', { q, llm }),
   summarize: (cond, llm) => getJson('/api/summarize', Object.assign({}, cond, { llm })),
   compare: (group_by, values, metric) => getJson('/api/compare', { group_by, values, metric }),
+  /* 语料总览统计（2026-10-09 新增）：全部数字由服务端 SQL 现算，见 web/serve.py 的 q_catalog。 */
+  catalog: (top) => getJson('/api/catalog', { top }),
+  /* 实体身份判定（2026-10-09 新增）：exact／ambiguous／unavailable + 近似提示。 */
+  identify: (kind, text) => getJson('/api/identify', { kind, text }),
   /* SSE 流式问答：由调用方传入 onFrame(type, payload)；返回 Promise，deliver 完即 resolve。 */
   askStream(q, opt = {}, onFrame) {
     const b = base();

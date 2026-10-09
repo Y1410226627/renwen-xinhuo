@@ -27,6 +27,7 @@
 ★ 结构性隔离（D07）：本模块被 `retrieve.parse_query` 调用，属于问答层；
   `solver.py` 不导入它 → 对交付答案的影响仍由 `regress` 双集哈希把关。
 """
+import difflib
 import os
 import re
 import sqlite3
@@ -118,9 +119,52 @@ def resolve(conn, text):
     return None
 
 
+def identify(conn, kind, text, limit=6):
+    """**身份判定**（2026-10-09 新增，对齐竞品 `cilyutanwei` 的 exact→ambiguous→unavailable 三态）。
+
+    与 `resolve()` 的分工（两者解决的问题不同，别混用）：
+      · `resolve()` 是从**一整句里**捞前缀实体（服务于问答解析，返回 rest 供降级）；
+      · 本函数是对**用户填进某个槽位的整串**做身份判定，回答「这个名字库里认不认」。
+
+    三态语义（**顺序即优先级**，与竞品一致）：
+      · `exact`       —— 库里正好有同名的实体；
+      · `ambiguous`   —— 没有同名，但存在**包含关系**（它是别的名字的前缀，或反过来）。
+                          调用方**必须先让用户确指**，不许擅自挑一个（「不许猜」纪律在实体层的落点）；
+      · `unavailable` —— 既无同名也无包含关系 → 明确「库里查无此名」，并给出 difflib 近似**仅供提示**。
+
+    ⚠ 近似候选**绝不能**被自动采纳：它们只是「你是不是想写…」的提示，不是解析结果。
+    """
+    kind = kind if kind in ('cipai', 'author', 'title') else 'cipai'
+    norm = (text or '').strip()
+    names = candidates(conn, kind)
+    n_of = dict(names)
+    if not norm:
+        return {'kind': kind, 'text': norm, 'status': 'unavailable', 'exact': None,
+                'matches': [], 'note': '输入为空，无法判定。'}
+    if norm in n_of:
+        return {'kind': kind, 'text': norm, 'status': 'exact',
+                'exact': {'value': norm, 'n': n_of[norm]}, 'matches': [],
+                'note': '库中正好有此名（%d 篇）。' % n_of[norm]}
+    # 包含关系（双向）：norm 是候选的前缀，或候选是 norm 的前缀/子串。
+    related = []
+    for name, n in names:
+        if name.startswith(norm) or norm.startswith(name) or norm in name:
+            related.append({'value': name, 'n': n})
+    related.sort(key=lambda x: (-x['n'], len(x['value'])))
+    if related:
+        return {'kind': kind, 'text': norm, 'status': 'ambiguous', 'exact': None,
+                'matches': related[:limit],
+                'note': '库里没有完全同名的『%s』，但有以下相近名称——请确指其一。' % norm}
+    # 无包含关系：给 difflib 近似提示（**仅供提示**，不自动采纳）。
+    close = difflib.get_close_matches(norm, [nm for nm, _n in names], n=limit, cutoff=0.6)
+    return {'kind': kind, 'text': norm, 'status': 'unavailable', 'exact': None,
+            'matches': [{'value': c, 'n': n_of.get(c, 0)} for c in close],
+            'note': '库里查无此名。' + ('以下是字形/读音最接近的候选（仅供参考）：'
+                                        if close else '也没有可提示的近似名称。')}
+
+
 def lift(conn, spec):
     """**回填**：解析后实体槽为空时，从残留词面里把真实存在的实体抬出来。
-
     解决的是「实体粘连」——`_parse_core` 有一条刻意的兵险逻辑
     「整串不含分隔符时视为正文片段」，于是
         「清代临江仙一共有多少首」→ 剩下词面「临江仙一共有」→ 词牌丢失

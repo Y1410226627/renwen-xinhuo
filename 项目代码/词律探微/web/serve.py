@@ -39,6 +39,8 @@
     /api/nl2query?q=...                                  大模型把问句听成**结构化条件**（可人工改后再检索）
     /api/summarize?<同 /api/search 的条件>&llm=1          把检索结果写成一段话（数字仍由引擎给，过四道护栏）
     /api/compare?group_by=dynasty&values=宋,清&metric=ze_ratio   分组对比（两种口径都给）
+    /api/catalog?top=20                                   语料总览统计（总篇/句/词人/词牌、朝代·来源·声情分布、榜）
+    /api/identify?kind=cipai&text=临江仙慢                 实体身份判定（exact／ambiguous／unavailable + 近似提示）
     /api/parse?pid=... /api/rand?dyn=清 /api/examples /api/llm
 
 设计原则（贯穿全项目）：
@@ -66,6 +68,7 @@ import aggregate as AGG                  # noqa: E402
 import answer_verify as AVERIFY          # noqa: E402  （集合身份校验，2026-10-08 新增）
 import ask as ASK                        # noqa: E402
 import context as CONTEXT                # noqa: E402  （服务端会话语境，2026-10-08 新增）
+import entity_resolve as ENT             # noqa: E402  （实体身份判定，2026-10-09 新增 /api/identify）
 import evidence as EV                    # noqa: E402
 import gen as GEN                        # noqa: E402
 import guard as GUARD                    # noqa: E402
@@ -609,6 +612,44 @@ def q_compare(conn, group_by, values, metric):
         cmp_ = AGG.compare(rows, mt)
     return {'group_by': gb, 'metric': mt, 'rows': rows, 'cmp': cmp_,
             'text': AGG.render(rows, cmp_, gb, mt)}
+
+
+def q_catalog(conn, top=20):
+    """语料总览统计（`/api/catalog`）。2026-10-09 新增（对齐竞品 `cilyutanwei` 的 `/api/catalog`）。
+
+    设计口径：**所有数字都由本库 SQL 现算**，不读任何预生成缓存——
+    这样「网页上看到的数」永远等于「数据库里的数」，不存在构建产物过期导致的对不上。
+    另附**来源清单**与**标定表指纹**（`meta.overrides_sha`），便于外部复核本库来历。
+    """
+    top = max(1, min(100, int(top or 20)))
+    with LOCK:
+        t = conn.execute(
+            'SELECT (SELECT COUNT(1) FROM poems), (SELECT COUNT(1) FROM lines),'
+            ' (SELECT COUNT(1) FROM authors), (SELECT COUNT(1) FROM cipai)').fetchone()
+        totals = {'poems': t[0], 'lines': t[1], 'authors': t[2], 'cipai': t[3]}
+        dynasty = [{'name': r[0], 'poems': r[1]} for r in conn.execute(
+            'SELECT dynasty, COUNT(1) FROM poems GROUP BY dynasty ORDER BY 2 DESC, 1')]
+        source = [{'name': r[0], 'poems': r[1]} for r in conn.execute(
+            'SELECT source, COUNT(1) FROM poems GROUP BY source ORDER BY 2 DESC, 1')]
+        scene = [{'name': r[0], 'poems': r[1]} for r in conn.execute(
+            'SELECT scene, COUNT(1) FROM poems GROUP BY scene ORDER BY 2 DESC, 1')]
+        # 仄声比例分桶：标签与 RATIO_BUCKETS 同一口径（半开区间 [lo, hi)，最后一桶到顶端）。
+        ratio = [{'name': r[0], 'poems': r[1]} for r in conn.execute(
+            "SELECT CASE WHEN ze_ratio < 25 THEN '0–25%' WHEN ze_ratio < 40 THEN '25–40%'"
+            " WHEN ze_ratio < 50 THEN '40–50%' WHEN ze_ratio < 65 THEN '50–65%'"
+            " ELSE '65–100%' END AS b, COUNT(1) FROM poems"
+            ' GROUP BY b ORDER BY MIN(ze_ratio)')]
+        top_authors = [{'name': r[0], 'poems': r[1]} for r in conn.execute(
+            'SELECT author, n FROM authors ORDER BY n DESC, author LIMIT ?', (top,))]
+        top_cipai = [{'name': r[0], 'poems': r[1]} for r in conn.execute(
+            'SELECT cipai, n FROM cipai ORDER BY n DESC, cipai LIMIT ?', (top,))]
+        meta = {str(r[0]): str(r[1]) for r in conn.execute('SELECT * FROM meta')}
+    # 桶标签顺序以 RATIO_BUCKETS 为准（SQL 排序在标签含非 ASCII 时不可靠，这里显式对齐）。
+    order = [b[0] for b in RATIO_BUCKETS]
+    ratio.sort(key=lambda x: order.index(x['name']) if x['name'] in order else 99)
+    return {'top': top, 'totals': totals, 'dynasty': dynasty, 'source': source,
+            'scene': scene, 'ze_ratio_buckets': ratio,
+            'top_authors': top_authors, 'top_cipai': top_cipai, 'meta': meta}
 
 
 def _clean_ask_result(res, client, t0):
@@ -1228,6 +1269,12 @@ class H(BaseHTTPRequestHandler):
                     use_llm=g('llm', '1') not in ('0', 'false', 'no')))
             if u.path == '/api/compare':
                 return self._send(q_compare(get_conn(), g('group_by'), g('values'), g('metric')))
+            if u.path == '/api/catalog':
+                # 语料总览统计（2026-10-09 新增）。全部数字现算，见 q_catalog。
+                return self._send(q_catalog(get_conn(), _num(g('top'), int) or 20))
+            if u.path == '/api/identify':
+                # 实体身份判定（2026-10-09 新增）：exact／ambiguous／unavailable 三态 + 近似提示。
+                return self._send(ENT.identify(get_conn(), g('kind') or 'cipai', g('text')))
             if u.path == '/api/llm':
                 c = get_llm()
                 return self._send({'available': c.available(), 'model': c.name,

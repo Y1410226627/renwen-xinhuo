@@ -24,78 +24,108 @@
   function () {
     'use strict';
 
-    var DARK = '--bg:#151917;--panel:#1e2320;--panel2:#232a26;--ink:#e8e6df;--ink2:#a6ada5;'
-      + '--line:#333b36;--accent:#7fc0ae;--accent2:#d6b985;--ping:#6fc3e2;--ze:#e9a06a;'
-      + '--ok:#7dd39b;--warn:#f08a8a;--shadow:0 1px 2px rgba(0,0,0,.45),0 8px 22px rgba(0,0,0,.4)';
+    /* —— 纸墨朱红设计系统（2026-10-09 移植竞品 `cilyutanwei` 的视觉语言）——
+     * 三色克制：纸底 / 墨字 / 朱红；字体分层：楷（标题·词正文）/ 仿宋（正文）/ 宋（控件·表）/ Georgia（数字）。
+     * 仅调「外观」，不改任何类名与 DOM，故不影响门禁的文本断言与页面审计。 */
+    var ROOT = ':root{--bg:#f5f1e8;--panel:#fbf8f1;--panel2:#f6f0e4;--panel3:#fcf9f4;'
+      + '--ink:#292722;--ink2:#746e62;--ink3:#8a6a53;--line:#d2caba;--line2:#d8cdbc;'
+      + '--accent:#a64333;--accent-d:#9b4332;--accent2:#8a6a53;--ping:#2f5d7c;--ze:#9b4332;'
+      + '--ok:#2f6b41;--warn:#8e3025;'
+      + '--shadow:0 1px 2px rgba(74,58,38,.05),0 8px 24px rgba(74,58,38,.07);'
+      + '--r:4px;--mono:"Cascadia Mono","Consolas","Sarasa Mono SC",monospace;'
+      + '--kai:LocalKai,"KaiTi","STKaiti","Kaiti SC","楷体",serif;'
+      + '--fang:LocalFang,"FangSong","STFangsong","FangSong_GB2312","仿宋",serif;'
+      + '--song:"SimSun","Songti SC","宋体",serif;'
+      + '--num:Georgia,"Times New Roman",serif}';
+    /* 楷/仿宋走本机字体（@font-face + local()），缺失时自然回落到 serif，不下载任何字体文件。 */
+    var FONT = '@font-face{font-family:LocalKai;src:local("KaiTi"),local("STKaiti"),'
+      + 'local("Kaiti SC"),local("DFKai-SB"),local("楷体")}'
+      + '@font-face{font-family:LocalFang;src:local("FangSong"),local("STFangsong"),'
+      + 'local("FangSong_GB2312"),local("仿宋")}';
+
+    var DARK = '--bg:#191512;--panel:#211c17;--panel2:#272119;--panel3:#241f19;'
+      + '--ink:#ece5d6;--ink2:#a99d89;--ink3:#c9ab8c;--line:#3a332a;--line2:#443c31;'
+      + '--accent:#cd7a63;--accent-d:#d98a70;--accent2:#c9ab8c;--ping:#8fb6d4;--ze:#d98a70;'
+      + '--ok:#8fce9f;--warn:#e6a08f;'
+      + '--shadow:0 1px 2px rgba(0,0,0,.45),0 8px 22px rgba(0,0,0,.42)';
 
     var CSS = [
-      ':root{--bg:#f7f5f0;--panel:#fffdf8;--panel2:#fbf8f1;--ink:#1f211e;--ink2:#5f6459;'
-      + '--line:#e3dccb;--accent:#2f6b5f;--accent2:#8a6d3b;--ping:#0b6a8a;--ze:#b4470b;'
-      + '--ok:#1c6b3a;--warn:#a33226;--shadow:0 1px 2px rgba(0,0,0,.05),0 8px 22px rgba(0,0,0,.06);'
-      + '--r:10px;--mono:"Cascadia Mono","Consolas","Sarasa Mono SC",monospace}',
+      FONT,
+      ROOT,
       '@media (prefers-color-scheme:dark){:root:not([data-theme=light]){' + DARK + '}}',
       'html[data-theme=dark]{' + DARK + '}',
       '*{box-sizing:border-box}',
       'body{margin:0;background:var(--bg);color:var(--ink);'
-      + 'font:15px/1.75 "Microsoft YaHei","PingFang SC","Noto Sans SC",system-ui,serif}',
-      'a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}',
-      'header.top{position:sticky;top:0;z-index:9;background:linear-gradient(180deg,var(--panel),var(--panel2));'
-      + 'border-bottom:1px solid var(--line);box-shadow:var(--shadow)}',
-      'header.top .in{max-width:1180px;margin:0 auto;padding:10px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}',
-      '.brand{font-weight:700;letter-spacing:2px;font-size:17px}',
-      '.brand small{font-weight:400;font-size:12px;color:var(--ink2);letter-spacing:0;margin-left:8px}',
-      'nav.tabs{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}',
-      'nav.tabs a{padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel);'
-      + 'font-size:13.5px;color:var(--ink)}',
-      'nav.tabs a.on{background:var(--accent);border-color:var(--accent);color:#fff}',
-      'nav.tabs a:hover{text-decoration:none;border-color:var(--accent)}',
-      'main{max-width:1180px;margin:0 auto;padding:18px 18px 60px}',
-      'h1{font-size:21px;margin:6px 0 4px}h2{font-size:18px;margin:16px 0 6px}h3{font-size:15.5px;margin:12px 0 4px}',
+      + 'font:16px/1.7 var(--fang),"Microsoft YaHei","PingFang SC",system-ui,serif}',
+      'a{color:var(--accent-d);text-decoration:none}a:hover{text-decoration:underline}',
+      'header.top{position:sticky;top:0;z-index:9;background:var(--bg);'
+      + 'border-bottom:1px solid var(--line)}',
+      'header.top .in{max-width:1240px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}',
+      '.brand{font-family:var(--kai);font-weight:700;letter-spacing:.18em;font-size:20px}',
+      '.brand small{font-family:var(--fang);font-weight:400;font-size:12px;color:var(--ink2);letter-spacing:0;margin-left:8px}',
+      'nav.tabs{margin-left:auto;display:flex;gap:2px;flex-wrap:wrap}',
+      'nav.tabs a{padding:6px 12px;border-radius:var(--r);border:1px solid transparent;background:transparent;'
+      + 'font-family:var(--song);font-size:14px;color:var(--ink2);transition:color .12s,border-color .12s}',
+      'nav.tabs a.on{border-color:var(--line);color:var(--accent);'
+      + 'box-shadow:inset 0 -2px 0 var(--accent)}',
+      'nav.tabs a:hover{text-decoration:none;color:var(--accent)}',
+      'main{max-width:1240px;margin:0 auto;padding:22px 20px 60px}',
+      'h1,h2,h3{font-family:var(--kai);font-weight:600}',
+      'h1{font-size:27px;letter-spacing:.12em;margin:10px 0 6px}'
+      + 'h2{font-size:22px;letter-spacing:.08em;margin:20px 0 8px}'
+      + 'h3{font-size:18px;letter-spacing:.05em;margin:14px 0 6px}',
       '.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);'
-      + 'padding:14px 16px;margin:12px 0;box-shadow:var(--shadow)}',
-      '.card.tight{padding:10px 12px}',
+      + 'padding:18px 20px;margin:12px 0}',
+      '.card.tight{padding:12px 14px}',
       '.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}',
       '.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}',
       '.f{display:flex;flex-direction:column;gap:3px;font-size:12.5px;color:var(--ink2)}',
       'input,select,button,textarea{font:inherit}',
-      'input[type=text],input[type=number],select{padding:5px 8px;border:1px solid var(--line);'
-      + 'border-radius:8px;background:var(--panel);color:var(--ink);min-width:80px}',
-      'input:focus,select:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent)}',
-      'button,.btn{background:var(--accent);color:#fff;border:1px solid var(--accent);border-radius:8px;'
-      + 'padding:6px 14px;cursor:pointer;transition:.15s}',
-      'button:hover,.btn:hover{filter:brightness(1.08)}',
+      'input[type=text],input[type=number],select{padding:6px 9px;border:1px solid var(--line);'
+      + 'border-radius:var(--r);background:var(--panel3);color:var(--ink);min-width:80px;'
+      + 'font-family:var(--song)}',
+      'input:focus,select:focus,textarea:focus{border-color:var(--accent)}',
+      'a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,'
+      + 'textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}',
+      'button,.btn{background:var(--accent);color:#fdf9f2;border:1px solid var(--accent-d);'
+      + 'border-radius:var(--r);padding:6px 15px;cursor:pointer;font-family:var(--song);'
+      + 'transition:background .12s,color .12s,border-color .12s}',
+      'button:hover,.btn:hover{background:var(--accent-d);border-color:var(--accent-d)}',
       'button.ghost,.btn.ghost{background:transparent;color:var(--accent)}',
-      'button.ghost.on{background:var(--accent);color:#fff}',
+      'button.ghost:hover,.btn.ghost:hover{background:transparent;border-color:var(--accent)}',
+      'button.ghost.on{background:var(--accent);color:#fdf9f2}',
       'button:disabled{opacity:.5;cursor:default}',
-      'table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}',
-      'th,td{border-bottom:1px solid var(--line);padding:5px 9px;text-align:left;vertical-align:top}',
+      'table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0;font-family:var(--song)}',
+      'th,td{border-bottom:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}',
       'thead th{background:var(--panel2);position:sticky;top:0;z-index:3;font-weight:600;'
-      + 'box-shadow:inset 0 -1px 0 var(--line)}',
-      'tbody tr:nth-child(2n){background:color-mix(in srgb,var(--panel2) 55%,transparent)}',
-      'tbody tr:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}',
+      + 'box-shadow:inset 0 -1px 0 var(--line);font-family:var(--song);letter-spacing:.04em}',
+      'tbody tr:nth-child(2n){background:color-mix(in srgb,var(--panel2) 45%,transparent)}',
+      'tbody tr:hover{background:color-mix(in srgb,var(--accent) 7%,transparent)}',
       '.mono{font-family:var(--mono);letter-spacing:.5px}',
       '.ping{color:var(--ping);font-weight:600}.ze{color:var(--ze);font-weight:600}',
       '.dim{color:var(--ink2);font-size:12.5px}',
       '.ok{color:var(--ok);font-weight:600}.bad{color:var(--warn);font-weight:600}',
       '.chip{display:inline-block;margin:3px 6px 0 0;padding:3px 10px;border:1px solid var(--line);'
-      + 'border-radius:999px;background:var(--panel);cursor:pointer;font-size:13px}',
-      '.chip:hover{border-color:var(--accent)}',
-      '.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;'
+      + 'border-radius:var(--r);background:var(--panel3);cursor:pointer;font-size:13px}',
+      '.chip:hover{border-color:var(--accent);color:var(--accent)}',
+      '.badge{display:inline-block;padding:1px 8px;border-radius:3px;font-size:12px;'
       + 'border:1px solid var(--line);background:var(--panel2);color:var(--ink2);margin-right:5px}',
       '.badge.acc{border-color:var(--accent);color:var(--accent)}',
       '.badge.warn{border-color:var(--warn);color:var(--warn)}',
       'pre,code,.code{font-family:var(--mono);font-size:12.5px}',
-      'pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto}',
-      'code{background:var(--panel2);border-radius:4px;padding:1px 5px}',
-      'tr.hit>td{background:color-mix(in srgb,var(--accent2) 22%,transparent)}',
-      'mark{background:color-mix(in srgb,var(--accent2) 45%,transparent);color:inherit;border-radius:3px}',
-      '.bar{position:sticky;bottom:0;background:var(--panel);border-top:1px solid var(--line);'
+      'pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);padding:10px;overflow:auto}',
+      'code{background:var(--panel2);border-radius:3px;padding:1px 5px}',
+      'tr.hit>td{background:color-mix(in srgb,var(--accent2) 18%,transparent)}',
+      'mark{background:color-mix(in srgb,var(--accent) 18%,transparent);color:inherit;border-radius:3px}',
+      '.bar{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);'
       + 'padding:8px 0;margin-top:10px}',
-      '.q{background:var(--panel);border-left:4px solid var(--accent);padding:8px 12px;border-radius:6px;margin:10px 0}',
-      '.a{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin:8px 0;white-space:pre-wrap}',
+      '.q{background:var(--panel);border-left:3px solid var(--accent);padding:9px 13px;'
+      + 'border-radius:var(--r);margin:10px 0;font-family:var(--kai);font-size:16px}',
+      '.a{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);'
+      + 'padding:12px 14px;margin:8px 0;white-space:pre-wrap}',
       '.m{color:var(--ink2);font-size:12.5px;margin-top:8px;border-top:1px dashed var(--line);padding-top:6px;white-space:normal}',
-      '.e{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:7px 0;background:var(--panel2)}',
-      'footer.foot{max-width:1180px;margin:26px auto 0;padding:10px 18px 34px;color:var(--ink2);font-size:12.5px;'
+      '.e{border:1px solid var(--line);border-radius:var(--r);padding:9px 11px;margin:7px 0;background:var(--panel3)}',
+      'footer.foot{max-width:1240px;margin:26px auto 0;padding:10px 20px 34px;color:var(--ink2);font-size:12.5px;'
       + 'border-top:1px solid var(--line)}',
       '.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:22px;background:var(--ink);color:var(--bg);'
       + 'padding:8px 16px;border-radius:999px;font-size:13.5px;opacity:0;transition:.25s;z-index:99}',
@@ -119,8 +149,45 @@
       '.tip.on{opacity:.95}',
       '.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13px}',
       '.kv b{font-weight:600;color:var(--ink2)}',
+      /* —— 以下为 2026-10-09 新增的「纸墨」组件（只增不改，旧页面不受影响）—— */
+      '.masthead{font-family:var(--kai);letter-spacing:.32em;text-align:center;'
+      + 'padding:14px 0 4px;font-size:13px;color:var(--ink3)}',
+      '.seal{display:inline-block;font-family:var(--kai);font-size:12px;letter-spacing:.18em;'
+      + 'color:var(--accent);border:1.5px solid var(--accent);border-radius:3px;padding:2px 8px;'
+      + 'transform:rotate(-3deg);opacity:.9;white-space:nowrap;line-height:1.4}',
+      '.tiny-seal{display:inline-block;writing-mode:vertical-rl;font-family:var(--kai);font-size:11px;'
+      + 'letter-spacing:.2em;color:var(--accent);border:1px solid var(--accent);border-radius:2px;'
+      + 'padding:4px 2px;line-height:1;opacity:.85}',
+      '.seg{display:inline-flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;'
+      + 'background:var(--panel3)}',
+      '.seg>button,.seg>label{background:transparent;border:none;border-right:1px solid var(--line);'
+      + 'color:var(--ink2);padding:5px 13px;border-radius:0;font-family:var(--song);cursor:pointer;'
+      + 'transition:background .12s,color .12s}',
+      '.seg>button:last-child,.seg>label:last-child{border-right:none}',
+      '.seg>button:hover,.seg>label:hover{color:var(--accent)}',
+      '.seg>button.on,.seg>label.on{background:#38362f;color:#f6f0e4}',
+      '.cellrow{display:flex;flex-wrap:wrap;gap:6px}',
+      '.cell{width:54px;min-height:54px;border:1px solid var(--line);border-radius:var(--r);'
+      + 'background:var(--panel3);display:flex;flex-direction:column;align-items:center;'
+      + 'justify-content:center;gap:1px;padding:3px 0}',
+      '.cell b{font-family:var(--kai);font-weight:600;font-size:32px;line-height:1}',
+      '.cell i{font-style:normal;font-size:11px;color:var(--ink2);line-height:1}',
+      '.cell u{text-decoration:none;font-size:10px;color:var(--ink3);line-height:1}',
+      '.cell.on b{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}',
+      '.cell.mismatch b{text-decoration:underline dashed var(--warn)}',
+      '.ev{border-left:2px solid var(--accent2);padding:2px 0 2px 12px;margin:8px 0;'
+      + 'color:var(--ink2);font-family:var(--fang);font-size:14.5px}',
+      '.ev cite{display:block;font-style:normal;font-size:12px;color:var(--ink3);margin-top:4px}',
+      '.metric-strip{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);'
+      + 'border-radius:var(--r);overflow:hidden;background:var(--panel3);margin:10px 0}',
+      '.metric-strip>div{padding:10px 14px;border-right:1px solid var(--line)}',
+      '.metric-strip>div:last-child{border-right:none}',
+      '.metric-strip b{display:block;font-family:var(--num);font-size:24px;line-height:1.3;color:var(--accent)}',
+      '.metric-strip span{font-size:12px;color:var(--ink2)}',
       '@media print{header.top,nav.tabs,.bar,button{display:none}body{background:#fff}}',
-      '@media (max-width:640px){main{padding:12px}thead th{position:static}.grid{grid-template-columns:1fr}}'
+      '@media (max-width:640px){main{padding:12px}thead th{position:static}'
+      + '.grid{grid-template-columns:1fr}.metric-strip{grid-template-columns:repeat(2,1fr)}'
+      + '.metric-strip>div:nth-child(2n){border-right:none}}'
     ].join('\n');
 
     function inject(doc) {
@@ -171,6 +238,18 @@
 
     function download(name, text, mime) {
       var b = new Blob(['\ufeff' + text], { type: (mime || 'text/csv') + ';charset=utf-8' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = name;
+      a.click();
+    }
+
+    /* 导出 JSON（2026-10-09 新增）：与 download 分开，因为 **JSON 不能带 BOM**——
+     * 带 BOM 的文件用 `json.load()` / `JSON.parse` 读取会报「Unexpected token」，
+     * 而 CSV 带 BOM 是为了让 Excel 认 UTF-8。两者需求相反，故各留一个入口。 */
+    function downloadJson(name, obj) {
+      var text = (typeof obj === 'string') ? obj : JSON.stringify(obj, null, 2);
+      var b = new Blob([text], { type: 'application/json;charset=utf-8' });
       var a = document.createElement('a');
       a.href = URL.createObjectURL(b);
       a.download = name;
@@ -229,6 +308,7 @@
 
     return { CSS: CSS, inject: inject, esc: esc, attr: attr, hz: hz, badge: badge,
              fmtInt: fmtInt, fmt1: fmt1, signed: signed, csvText: csvText,
-             download: download, toast: toast, spinner: spinner, query: query,
+             download: download, downloadJson: downloadJson, toast: toast,
+             spinner: spinner, query: query,
              footer: footer, mountTheme: mountTheme };
   }));

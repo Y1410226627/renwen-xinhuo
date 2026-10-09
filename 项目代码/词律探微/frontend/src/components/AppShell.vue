@@ -39,8 +39,10 @@ const noteText = computed(() =>
 
 <template>
   <header class="top">
+    <div class="masthead">清代词律声情研究 · 数字归引擎 · 文料归检索 · 说法归生成 · 出处归引用</div>
     <div class="in">
       <div class="brand">词律探微
+        <span class="seal" aria-hidden="true">声情</span>
         <small>清代词律声情研究助手 · 答案可溯源</small>
       </div>
       <nav class="tabs" aria-label="主导航">

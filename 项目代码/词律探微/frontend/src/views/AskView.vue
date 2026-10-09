@@ -240,6 +240,7 @@ function gapOf(d) {
 
 /* 把一次返回体落到某一轮上（结论/证据/理解详情/缺口/篇号/校验/会话）。 */
 function applyResult(turn, j) {
+  turn.raw = j;                    // 原样留一份，供「导出本轮 JSON」（不落 localStorage，见 slim）
   turn.concl = conclHtml(j);
   turn.evid = evidHtml(j);
   turn.detail = detailOf(j);
@@ -327,6 +328,21 @@ function statusLabel(st) {
     case 'FAILED': return '未通过';
     default: return st || '未知';
   }
+}
+
+/* 分析级 JSON 导出（2026-10-09 新增）：把**本轮完整返回体**（数字/证据/护栏/理解详情全在内）
+   原样导出，便于存档与复算。`raw` 只在内存里保留——单轮可达数百 KB，不进 localStorage
+   （`slim()` 是白名单，天然不落盘）。 */
+function exportTurn(t, idx) {
+  if (!t || !t.raw) { UI.toast('这一轮还没有可导出的结果'); return; }
+  UI.downloadJson('词律探微_问答第' + (idx + 1) + '轮.json', {
+    generator: '词律探微 · 清代词律声情研究助手',
+    note: '本文件是 /api/ask 的完整返回体（原样导出，未加工）；数字全部由本地引擎算出。',
+    question: t.question,
+    generated_at: new Date().toLocaleString(),
+    result: t.raw
+  });
+  UI.toast('已导出本轮 JSON');
 }
 
 /* 会话追问范围：语义排序集要**明说**只在展示过的那几篇里找（第二轮审查 §22）。 */
@@ -588,6 +604,11 @@ onMounted(async () => {
               </div>
             </div>
           </details>
+
+          <!-- 分析级 JSON 导出（2026-10-09）：本轮完整返回体原样下载，便于存档与复算。 -->
+          <div v-if="t.done && t.raw" class="turn-actions">
+            <button class="ghost" type="button" @click="exportTurn(t, idx)">导出本轮 JSON</button>
+          </div>
         </div>
       </article>
     </div>
@@ -669,6 +690,7 @@ onMounted(async () => {
 #log .err p { margin: 6px 0 0; }
 
 /* 6) 理解详情：折叠区 + 「标签 / 值」两列，元信息不再挤成一行 */
+#log .turn-actions { margin-top: 8px; }
 #log details.ud { border: 1px dashed var(--line); border-radius: 8px; padding: 6px 10px;
   background: var(--panel2); }
 #log details.ud > summary { cursor: pointer; list-style: none; }
