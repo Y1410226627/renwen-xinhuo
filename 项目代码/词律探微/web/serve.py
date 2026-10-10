@@ -1892,6 +1892,10 @@ class H(BaseHTTPRequestHandler):
                 # 谱库覆盖的词牌一览（功能 9）。来源声明随体携带（红线）。
                 return self._send({'ok': True, 'result': CIPU.list_tunes(),
                                    'source_note': CIPU.SOURCE_NOTE})
+            if u.path == '/api/cipu/coverage':
+                # ★ 2026-10-11（P2-4）：**谱库覆盖范围**——逐词牌逐体对照上游（竞品转写源），
+                #   并明写「N 词牌 / M 体 · 未核原书」。
+                return self._send({'ok': True, 'result': CIPU.coverage()})
             if u.path == '/api/cipu':
                 # 某词牌的全部体（含逐句规则与例词）。
                 tune = g('tune')

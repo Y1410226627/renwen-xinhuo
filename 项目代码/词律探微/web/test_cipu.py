@@ -223,6 +223,26 @@ def main():
        repr(_r8.get('status')))
     ok('D8 no_tune 时带 source_note（来源红线）', bool(_r8.get('source_note')))
 
+
+    # ---------- D9 2026-10-11 P2-4：谱库覆盖范围（逐词牌对照上游 + 来源红线） ----------
+    cov = C.coverage()
+    ok('D9 覆盖词牌数 = 20', cov['n_tunes'] == 20, str(cov['n_tunes']))
+    ok('D9 覆盖体数 = 144', cov['n_forms'] == 144, str(cov['n_forms']))
+    ok('D9 逐词牌体数之和 = 总览体数',
+       sum(t['n_forms'] for t in cov['tunes']) == cov['n_forms'],
+       '%d vs %d' % (sum(t['n_forms'] for t in cov['tunes']), cov['n_forms']))
+    ok('D9 每个词牌体数与 forms_of 一致',
+       all(t['n_forms'] == len(C.forms_of(t['tune'])) for t in cov['tunes']))
+    ok('D9 逐词牌带上游标称体数（对照竞品转写源）',
+       all(isinstance(t['upstream_raw_forms'], int) for t in cov['tunes'])
+       and cov['n_upstream_forms'] > 0,
+       'upstream=%s ours=%s' % (cov['n_upstream_forms'], cov['n_forms']))
+    ok('D9 覆盖声明含「未核原书」（来源红线）',
+       '未核原书' in cov['source_note']
+       and any('未核原书' in n for n in cov['boundary_notes']))
+    ok('D9 覆盖声明不得写成「原书核验」',
+       all(('原书核验' not in n) for n in cov['boundary_notes']))
+
     print('=' * 64)
     print('词谱门禁：比对 %d 项，不符 %d 项' % (CMP[0], len(BAD)))
     for b in BAD:

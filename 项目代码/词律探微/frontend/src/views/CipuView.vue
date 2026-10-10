@@ -10,6 +10,37 @@
         <code>python web/serve.py</code> 后从 <code>http://127.0.0.1:8000/cipu.html</code> 打开。</p>
     </div>
 
+    <!-- ★ 2026-10-11（P2-4）：谱库覆盖范围——把「收了多少 / 上游多少 / 边界在哪」一次说清 -->
+    <div class="card cp-cov">
+      <details>
+        <summary><b>谱库覆盖范围</b>
+          <span v-if="cov" class="dim">共 {{ cov.n_tunes }} 词牌 / {{ cov.n_forms }} 体 · 未核原书</span>
+          <span v-else-if="!isOnline" class="dim">（本页需要本地服务才能加载覆盖明细）</span>
+          <span v-else class="dim">（加载中…）</span>
+        </summary>
+        <template v-if="cov">
+          <p class="cp-warn">参照来源：{{ cov.source_note }}</p>
+          <ul class="cp-covnotes"><li v-for="(nt, i) in cov.boundary_notes" :key="i">{{ nt }}</li></ul>
+          <table class="cp-table">
+            <thead><tr><th>词牌</th><th>别名</th><th>我方体数</th><th>上游标称体数</th>
+              <th>核验体数</th><th>来源</th></tr></thead>
+            <tbody>
+              <tr v-for="t in cov.tunes" :key="t.tune">
+                <td>{{ t.tune }}</td>
+                <td class="dim">{{ (t.aliases || []).join('、') || '—' }}</td>
+                <td class="num">{{ t.n_forms }}</td>
+                <td class="num">{{ t.upstream_raw_forms }}</td>
+                <td class="num">{{ t.verified_form_count }}</td>
+                <td class="dim"><a v-if="t.source_url" :href="t.source_url" target="_blank" rel="noopener">搜韵</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+        <p v-else-if="covErr" class="cp-err">✗ {{ covErr }}</p>
+      </details>
+    </div>
+
+
     <!-- ① 选作品 -->
     <div class="card">
       <h3>① 选作品</h3>
@@ -189,6 +220,18 @@ async function loadTunes() {
 }
 loadTunes();
 
+/* ★ 2026-10-11（P2-4）：谱库覆盖范围——逐词牌对照上游（竞品转写源），明写「未核原书」。
+ *   离线（file:）不请求；失败只记录、不阻断词谱对照主链。 */
+const cov = ref(null);
+const covErr = ref('');
+async function loadCoverage() {
+  try {
+    const j = await call('/api/cipu/coverage');
+    cov.value = j.result || null;
+  } catch (e) { covErr.value = String(e.message || e); }
+}
+if (isOnline) { loadCoverage(); }
+
 /* 2026-10-10（P2-1）：深链 `?pid=` 进入即自动对照（含 `personal:<n>` 个人作品）。
  *   与解析页同一条约定：前端只透传 pid，后端按前缀分流（个人作品走研究库）。
  *   SSR / 离线（file:）无 window，跳过——不读 URL 也不报错。 */
@@ -293,4 +336,9 @@ function tip(c) {
 .cp-src { margin-top: 8px; font-size: 12px; color: var(--accent2); }
 .off-note { color: var(--accent2); }
 .mini { padding: 1px 6px; font-size: 12px; }
+
+/* ★ 2026-10-11（P2-4）：覆盖范围卡 */
+.cp-cov summary { cursor: pointer; }
+.cp-covnotes { margin: 6px 0 6px 18px; font-size: 13px; }
+.cp-covnotes li { margin: 2px 0; }
 </style>

@@ -90,7 +90,8 @@ def _load():
             if canon not in alias2canon[a]:
                 alias2canon[a].append(canon)
 
-    _CACHE.update({'forms': forms, 'by_tune': by_tune, 'alias2canon': alias2canon})
+    _CACHE.update({'forms': forms, 'by_tune': by_tune, 'alias2canon': alias2canon,
+                   'registry': raw_reg})
     return _CACHE
 
 
@@ -181,6 +182,76 @@ def form_detail(f):
     d['rules'] = [dict(x) for x in f['rules']]
     d['sentences'] = list(f['sentences'])
     return d
+
+
+def coverage():
+    """**谱库覆盖范围**（P2-4）：逐词牌列体数，并对照上游（竞品转写源）标称体数。
+
+    用途：把「我们收了多少 / 上游有多少 / 边界在哪」一次说清，界面上明写
+    **N 词牌 / M 体 · 参照来源：搜韵公开转写（未核原书）**，
+    避免用户把本谱库当成「全量词谱」。
+
+    返回体字段：
+      · n_tunes / n_forms            —— 我方覆盖的词牌数 / 体数；
+      · n_upstream_forms             —— 上游（钦定词谱+龙榆生词谱）侧标称体数合计；
+      · authorities                  —— 我方按谱书分账的体数；
+      · boundary_notes               —— 覆盖边界如实说明（含来源红线）；
+      · tunes                        —— 逐词牌：别名 / 我方体数 / 上游标称体数 / 核验数 / 来源。
+    """
+    d = _load()
+    reg = d.get('registry') or []
+    by_tune = d['by_tune']
+
+    auth_count = {}
+    for f in d['forms']:
+        a = f['authority'] or '（未标谱书）'
+        auth_count[a] = auth_count.get(a, 0) + 1
+    authorities = [{'name': k, 'n_forms': auth_count[k]}
+                   for k in sorted(auth_count, key=lambda x: (-auth_count[x], x))]
+
+    tunes = []
+    n_upstream = 0
+    for t in reg:
+        canon = t.get('canonical_tune_name') or ''
+        if not canon:
+            continue
+        aa = t.get('authority_availability') or {}
+        raw_by_auth, raw = {}, 0
+        for name, info in aa.items():
+            rf = int((info or {}).get('raw_forms') or 0)
+            raw_by_auth[name] = rf
+            raw += rf
+        n_upstream += raw
+        fs = by_tune.get(canon) or []
+        fs_auth = {}
+        for f in fs:
+            a = f['authority'] or '（未标谱书）'
+            fs_auth[a] = fs_auth.get(a, 0) + 1
+        tunes.append({
+            'tune': canon,
+            'aliases': sorted([a for a, cs in d['alias2canon'].items()
+                               if canon in cs and a != canon]),
+            'n_forms': len(fs),
+            'n_forms_by_authority': fs_auth,
+            'upstream_raw_forms': raw,
+            'upstream_raw_by_authority': raw_by_auth,
+            'verified_form_count': t.get('verified_form_count'),
+            'available_normalized_form_count': t.get('available_normalized_form_count'),
+            'source_url': t.get('source_url') or '',
+        })
+    tunes.sort(key=lambda x: (-x['n_forms'], x['tune']))
+
+    n_forms = len(d['forms'])
+    notes = [
+        '谱库仅覆盖上游取数范围内的 %d 个词牌、%d 个体式；未收录词牌如实返回「未收录」'
+        '与可用清单，绝不猜测。' % (len(tunes), n_forms),
+        '参照来源为搜韵公开转写（未核原书）：体式与平仄规则未对照纸本原书，仅供研究参考。',
+        '对照上游（钦定词谱 / 龙榆生词谱）侧标称可选体数合计 %d；我方已规范化 %d 体。'
+        % (n_upstream, n_forms),
+    ]
+    return {'n_tunes': len(tunes), 'n_forms': n_forms, 'n_upstream_forms': n_upstream,
+            'authorities': authorities, 'boundary_notes': notes,
+            'tunes': tunes, 'source_note': SOURCE_NOTE}
 
 
 #: 句末标记 → 展示标签（★ 2026-10-10 修复：前端原先**把所有 ending 都显示成「韵」**，
