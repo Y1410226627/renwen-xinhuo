@@ -1355,3 +1355,16 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
   `fixture_gate` 6/6 ｜ `reproduce` **13/15**（2 项为既有失败，与基线一致）｜
   前端 `test_ui` 147/0 ｜ `ssr-smoke` 31/0 ｜ `verify_views` 43,459/0 ｜ `check-core` 213,972/0 ｜
   `test_render` 522,242/0 ｜ `check_conditions` FAIL 3 → **1**（回到基线）。
+
+## D46 ✅（2026-10-10）：总览页补齐「词谱对照 / 研究库」入口卡
+
+- **由来**：主人反馈「总览导航里没有词谱对照和研究库的入口」。
+  诊断结论：**顶部导航（AppShell.tabs）本来就有**这两个 tab（D42/D43 引入），
+  缺的是总览页（`IndexView.vue`）首屏的入口卡——只列了 ①~⑥，
+  第一次来的人按"建议顺序"逛完六个卡，看不到后面还有两个功能页。
+- **改动**（`frontend/src/views/IndexView.vue`，仅此一处 + 文件头注释同步）：
+  入口卡区新增 ⑦ 词谱对照、⑧ 研究库 两张卡，链接与 AppShell 导航一致（相对平铺
+  `cipu.html` / `research.html`）；两卡均按 `isOnline` 区分在线 CTA 与
+  「需先跑本地服务」的离线说明（与 ① 在线问答卡同套路，不显示假入口）。
+- **验收**：前端 `check-core` 213,972/0 ｜ `ssr-smoke` 31/0 ｜ `test_ui` 147/0；
+  后端 `test_api` 150/0 ｜ `test_research` 89/0 ｜ `test_cipu` 33/0。

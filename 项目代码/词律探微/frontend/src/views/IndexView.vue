@@ -67,6 +67,20 @@
         <p class="dim">双集答案哈希、前端渲染门禁、口径等价性检查，全部一键可跑。</p>
         <p class="dim">复现说明见 <code>使用说明.md</code>（或下方「复现命令」）。</p>
       </div>
+      <div class="card entry">
+        <h3><span class="no">⑦</span> 词谱对照</h3>
+        <p class="dim">按词牌选体式，逐字三行对照（原字 / 规范 / 例词），标出平仄与句脚；
+          数据为搜韵公开转写（未核原书），页面有来源红线说明。</p>
+        <p v-if="isOnline" class="cta"><a class="btn" href="cipu.html">进入词谱对照</a></p>
+        <p v-else class="dim">词谱对照需本地服务：先运行 <code>python web/serve.py</code> 再进入。</p>
+      </div>
+      <div class="card entry">
+        <h3><span class="no">⑧</span> 研究库</h3>
+        <p class="dim">摘录、研究事实、读音裁定、个人作品录入与文献档案，
+          全部本地留存、带版本链与决策事件留痕。</p>
+        <p v-if="isOnline" class="cta"><a class="btn" href="research.html">进入研究库</a></p>
+        <p v-else class="dim">研究库操作需本地服务：先运行 <code>python web/serve.py</code> 再进入。</p>
+      </div>
     </div>
 
     <div class="card">
@@ -144,7 +158,7 @@
 </template>
 
 <script setup>
-/* IndexView.vue —— 「总览」视图：项目一句话 + 六个入口卡 + 三道锁与复现命令。
+/* IndexView.vue —— 「总览」视图：项目一句话 + 八个入口卡（含词谱对照/研究库） + 三道锁与复现命令。
  *
  * 它是评委/接手者的第一落点：把「这是什么、能点哪、数字怎么来的」一次讲清。
  * 入口卡的链接与 AppShell.vue 保持一致：**相对平铺**（parse.html/browse.html/graph.html/
