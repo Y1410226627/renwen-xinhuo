@@ -236,27 +236,79 @@ def compile_filters(conn, node):
 _CMP_NORM = {'>': '>=', '<': '<='}
 
 
-# 比较口径归一的**措辞依据**（第三轮审查 P0-6 修订版）。
+# 比较口径归一的**措辞依据**（第三轮审查 P0-6 修订版 → 2026-10-10 P0-4 再修：改为**逐条件就近绑定**）。
 # 含界措辞（至少/不少于/高于/超过…）→ 按基准口径归一为 >=/<=；「严格/恰好」类词在场、
 # 或无任何依据时不归一（严格就是严格）。
 _BOUND_WORDS = ('至少', '不少于', '不低于', '高于', '超过', '多于', '以上')
 _STRICT_WORDS = ('严格', '恰好', '正好', '恰大于', '恰小于')
+# 数值短语的**后缀**含界措辞（如「50 字以上」「100 篇以内」）：跟在数字后面，不能只看前缀。
+_SUFFIX_BOUND = ('以上', '以内', '不少于')
+
+
+def _num_forms(v):
+    """数值的**字面写法**候选（用于在问句里定位这个条件对应的是哪一段文字）。"""
+    forms = []
+    try:
+        f = float(v)
+        forms.append('%g' % f)
+        if abs(f - round(f)) < 1e-9:
+            forms.append(str(int(round(f))))
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    if s:
+        forms.append(s)
+    # 去重且长串优先（「50」比「5」更可能命中正确位置）
+    out = []
+    for x in sorted(set(forms), key=len, reverse=True):
+        if x not in out:
+            out.append(x)
+    return out
+
+
+def _local_cmp_hint(question, value):
+    """返回该数值**自己那一段**的比较措辞：'bound'（含界）/ 'strict'（严格）/ None（无依据）。
+
+    ⚠ 2026-10-10（《关键核心现状》P0-4）：**逐条件就近绑定**。
+      改前 → 只看**整句**有没有「至少/严格」，有一处就统一改全树的 `>`/`<`：
+         「字数至少 50 字、同时少于 100 字」会因整句含「至少」而把 `< 100` 也放宽成 `<= 100`；
+         「至少 50 且严格大于 30」又会因整句含「严格」而让「至少」失效。
+      改后 → 对每个叶子，用**它自己的数值字面量**在问句里定位，只看该数字**紧邻前后 8 个字**：
+         前缀含严格词 → strict（保留原算子）；前缀含含界词、或后缀含含界词 → bound（归一）；
+         都没有 → None（保留原算子，不做任何全域改写）。
+    """
+    if not question:
+        return None
+    for form in _num_forms(value):
+        for m in re.finditer(re.escape(form), question):
+            pre = question[max(0, m.start() - 8):m.start()]
+            post = question[m.end():m.end() + 4]
+            for w in _STRICT_WORDS:
+                if w in pre:
+                    return 'strict'
+            for w in _BOUND_WORDS:
+                if w in pre:
+                    return 'bound'
+            for w in _SUFFIX_BOUND:
+                if w in post:
+                    return 'bound'
+    return None
 
 
 def normalize_ops(node, question=''):
-    """**按问句措辞**归一比较算子（就地修改布尔树，返回归一叶子数）——P0-6 修订版。
+    """**逐条件就近绑定**比较算子（就地修改布尔树，返回归一叶子数）——2026-10-10 P0-4 修订。
 
     依据与边界（不许含糊）：
       · 官方/基准口径「高于 / 超过 / 至少 / 不少于 X」= `>= X`——`tests/nl_paraphrase.jsonl`
         的 NL001/NL002 truth_sql 为 `p.ze_ratio>=45`，note 明写「『超过45个百分点』= >=45」；
-      · 但「大于 50 字」与「至少 50 字」在语言上应当区分（第三轮审查原话）——所以
-        **只在问句明确使用含界措辞**（至少/不少于/不低于/高于/超过/多于/以上）时，把
-        `>`/`<` 归一为 `>=`/`<=`；问句含「严格/恰好/正好」类词、或没有相应措辞依据时，
-        **保留**原算子；`between` 一律不动。
+      · 但「大于 50 字」与「至少 50 字」在语言上应当区分——所以**只在某个数值条件自己的
+        邻近措辞含界**时，才把**那一个叶子**的 `>`/`<` 归一为 `>=`/`<=`；
+      · 问句含「严格/恰好/正好」且**紧邻该数值**时 → 保留原算子；无依据 → 保留原算子；
+      · `between` 一律不动；非数值叶子（取值不是数的）一律不动。
       · 编译器（`retrieve._leaf_num`）**不再做任何改写**——严格执行既定 op。
     """
     q = str(question or '')
-    if (not q) or (not any(w in q for w in _BOUND_WORDS)) or any(w in q for w in _STRICT_WORDS):
+    if not q:
         return 0
     n = 0
 
@@ -270,11 +322,58 @@ def normalize_ops(node, question=''):
         elif 'not' in x:
             _walk(x['not'])
         elif 'field' in x and x.get('op') in _CMP_NORM:
-            x['op'] = _CMP_NORM[x['op']]
-            n += 1
+            if _local_cmp_hint(q, x.get('value')) == 'bound':
+                x['op'] = _CMP_NORM[x['op']]
+                n += 1
 
     _walk(node)
     return n
+
+
+def _is_explicit_empty(v):
+    """**显式空**取值（`[]` / `""` / 全为空的串列表）——与「没有这个条件」严格区分。"""
+    if isinstance(v, (list, tuple)):
+        if len(v) == 0:
+            return True
+        return all(isinstance(x, str) and x.strip() == '' for x in v)
+    if isinstance(v, str):
+        return v.strip() == ''
+    return False
+
+
+def _value_problems(node, where, out=None):
+    """遍历布尔树，收集**取值不合法**的叶子（2026-10-10，《关键核心现状》P1-1）。
+
+    为什么要在这里拒：结构化计划里的**空条件必须有确定语义**，不能由编译器静默变成
+    「不设限制」。四类情况一律拒绝（`缺失` 与 `显式空` 都算，因为两者都会让条件消失）：
+
+      · 完全没有 `value` 键（Planner 漏了取值）；
+      · `value` 为 `None`（显式 null）；
+      · `value` 为空列表/空元组，或字符串列表里含空串；
+      · `value` 为空字符串。
+
+    例外：`line_q` 的 value 是**结构体**，它的完整性由各自的 shape 校验负责。
+    """
+    out = [] if out is None else out
+    if not isinstance(node, dict) or not node:
+        return out
+    if 'and' in node or 'or' in node:
+        for c in (node.get('and') or node.get('or') or []):
+            _value_problems(c, where, out)
+    elif 'not' in node:
+        _value_problems(node['not'], where, out)
+    elif 'field' in node:
+        f = node.get('field')
+        if f == 'line_q':
+            return out
+        if 'value' not in node:
+            out.append('%s 的 %s 叶子缺少 value' % (where, f))
+        elif node.get('value') is None:
+            out.append('%s 的 %s 叶子 value 为 null' % (where, f))
+        elif _is_explicit_empty(node.get('value')):
+            out.append('%s 的 %s 叶子 value 为**空值**（%r）——空条件语义不明，必须显式拒绝'
+                       % (where, f, node.get('value')))
+    return out
 
 
 def _unsupported_leaf(node, out=None):
@@ -637,6 +736,9 @@ def validate(plan, conn, strict=True):
             problems.append('过滤条件无法编译：%s' % e)
         except Exception as e:                                   # noqa: BLE001
             problems.append('过滤条件编译异常：%s: %s' % (type(e).__name__, e))
+        # ★ 2026-10-10（《关键核心现状》P1-1）：**取值级校验**（缺 value / null / 空值）。
+        #   只有「编译器能编译」是不够的——空条件会编译成 `1=1` 把条件静默吃掉。
+        problems += _value_problems(flt, 'filters')
     sc = plan.get('scope') or {}
     if sc.get('base') not in ('corpus', 'prev_result'):
         problems.append('未知检索范围：%r' % sc.get('base'))
@@ -683,6 +785,7 @@ def validate(plan, conn, strict=True):
                 problems.append('%s 的 filters 无法编译：%s' % (_p, e))
             except Exception as e:                               # noqa: BLE001
                 problems.append('%s 的 filters 编译异常：%s: %s' % (_p, type(e).__name__, e))
+            problems += _value_problems(st['filters'], _p)
         elif op == 'retrieve':
             if st.get('mode') not in ('vector', 'fts'):
                 problems.append('%s 步骤 retrieve 的 mode 需为 vector/fts：%r'

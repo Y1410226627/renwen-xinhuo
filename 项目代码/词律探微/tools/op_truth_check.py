@@ -38,6 +38,196 @@ def _run(conn, sql, args=()):
     return [r[0] for r in conn.execute('SELECT p.pid FROM poems p WHERE %s' % sql, list(args))]
 
 
+# ==================================================================== P1-5 自动枚举
+_SQLCOL = {
+    'dynasty': 'p.dynasty', 'author': 'p.author', 'cipai': 'p.cipai',
+    'source': 'p.source', 'scene': 'p.scene',
+    'han_len': 'p.han_len', 'sent_n': 'p.sent_n', 'ze_ratio': 'p.ze_ratio',
+    'change': 'p.change', 'abs_change': 'ABS(p.change)', 'threshold': 'p.threshold',
+    'longest_len': 'p.longest_len', 'longest_seq': 'p.longest_seq',
+    'f_ratio': 'p.f_ratio', 'b_ratio': 'p.b_ratio',
+}
+_NUM_FIELDS = ('han_len', 'sent_n', 'ze_ratio', 'change', 'abs_change', 'threshold',
+               'longest_len', 'longest_seq', 'f_ratio', 'b_ratio')
+_EXPR = {'abs_change': 'ABS(change)'}      # 取中位值时的表达式（不带表别名）
+
+
+def _lit(x):
+    if isinstance(x, str):
+        return "'" + x.replace("'", "''") + "'"
+    return str(x)
+
+
+def _lit_list(vs):
+    return ','.join(_lit(x) for x in vs)
+
+
+def _pick(conn, field, skip=None):
+    """取一个**真实存在**的取值（挑中频，避免"全库"或"空集"两种无信息档位）。"""
+    if field in ('dynasty', 'author', 'cipai', 'source', 'scene'):
+        return conn.execute('SELECT %s FROM poems WHERE %s IS NOT NULL %s'
+                            'GROUP BY %s ORDER BY COUNT(*) DESC LIMIT 1'
+                            % (field, field, ("AND %s != %s " % (field, _lit(skip)))
+                               if skip is not None else '', field)).fetchone()[0]
+    if field == 'title':
+        return conn.execute('SELECT title FROM poems WHERE title IS NOT NULL '
+                            'AND length(title) > 2 GROUP BY title '
+                            'ORDER BY COUNT(*) DESC LIMIT 1').fetchone()[0]
+    if field == 'pid':
+        return [r[0] for r in conn.execute('SELECT pid FROM poems LIMIT 2')]
+    if field in _NUM_FIELDS:
+        e = _EXPR.get(field, field)
+        n = conn.execute('SELECT COUNT(*) FROM poems WHERE %s IS NOT NULL' % e).fetchone()[0]
+        return conn.execute('SELECT %s FROM poems WHERE %s IS NOT NULL '
+                            'ORDER BY %s LIMIT 1 OFFSET ?' % (e, e, e), (n // 2,)).fetchone()[0]
+    if field == 'lines.tail':
+        return conn.execute("SELECT tail FROM lines WHERE tail IS NOT NULL AND tail != '' "
+                            'GROUP BY tail ORDER BY COUNT(*) DESC LIMIT 1').fetchone()[0]
+    if field == 'tail_pz':
+        return '仄'
+    if field == 'pz':
+        return conn.execute('SELECT pz FROM lines WHERE pz IS NOT NULL AND length(pz) >= 5 '
+                            'GROUP BY pz ORDER BY COUNT(*) ASC LIMIT 1 OFFSET 20').fetchone()[0]
+    if field == 'pz_exact':
+        return conn.execute('SELECT pz FROM lines WHERE pz IS NOT NULL AND length(pz) >= 5 '
+                            'GROUP BY pz ORDER BY COUNT(*) DESC LIMIT 1 OFFSET 3').fetchone()[0]
+    if field == 'lines.text':
+        return '月'
+    if field == 'tail_each':
+        pid = conn.execute('SELECT pid FROM poems ORDER BY sent_n DESC LIMIT 1').fetchone()[0]
+        ts = [r[0] for r in conn.execute(
+            "SELECT DISTINCT tail FROM lines WHERE pid=? AND tail != '' LIMIT 2", (pid,))]
+        return ts or ['愁']
+    if field == 'parity':
+        return 0
+    if field == 'consist':
+        return '后段上升'
+    return None
+
+
+def _indep(field, op, v):
+    """**独立手写 SQL**（不复用引擎任何辅助函数）——这是对拍的"真值"一侧。"""
+    col = _SQLCOL.get(field)
+    vs = list(v) if isinstance(v, (list, tuple)) else [v]
+    if field in ('dynasty', 'author', 'cipai', 'source', 'scene'):
+        return {'=': '%s = %s' % (col, _lit(vs[0])),
+                '!=': '%s != %s' % (col, _lit(vs[0])),
+                'in': '%s IN (%s)' % (col, _lit_list(vs)),
+                'not_in': '%s NOT IN (%s)' % (col, _lit_list(vs))}.get(op)
+    if field == 'title':
+        if op == '=':
+            return 'p.title = %s' % _lit(vs[0])
+        if op == '!=':
+            return 'p.title != %s' % _lit(vs[0])
+        if op == 'in':
+            return 'p.title IN (%s)' % _lit_list(vs)
+        if op == 'not_in':
+            return 'p.title NOT IN (%s)' % _lit_list(vs)
+        if op == 'contains':
+            return "p.title LIKE '%" + str(vs[0]).replace("'", "''") + "%'"
+    if field == 'pid':
+        if op == '=':
+            return 'p.pid = %s' % _lit(vs[0])
+        if op == 'in':
+            return 'p.pid IN (%s)' % _lit_list(vs)
+    if field in _NUM_FIELDS:
+        if op == 'between':
+            return '(%s BETWEEN %s AND %s)' % (col, _lit(v[0]), _lit(v[1]))
+        return '%s %s %s' % (col, op, _lit(v))
+    if field == 'lines.tail':
+        inner = 'SELECT pid FROM lines WHERE tail IN (%s)' % _lit_list(vs)
+        return ('p.pid NOT IN (' + inner + ')') if op in ('not_in', '!=') \
+            else ('p.pid IN (' + inner + ')')
+    if field == 'tail_pz':
+        inner = 'SELECT pid FROM lines WHERE substr(pz,-1,1) IN (%s)' % _lit_list(vs)
+        return ('p.pid NOT IN (' + inner + ')') if op in ('not_in', '!=') \
+            else ('p.pid IN (' + inner + ')')
+    if field == 'lines.text':
+        return "p.pid IN (SELECT pid FROM lines WHERE text LIKE '%" + str(vs[0]) + "%')"
+    if field == 'pz':
+        pat = str(vs[0]).replace('?', '_').replace('？', '_')
+        return "p.pid IN (SELECT pid FROM lines WHERE pz LIKE '%" + pat + "%')"
+    if field == 'pz_exact':
+        return 'p.pid IN (SELECT pid FROM lines WHERE pz = %s)' % _lit(vs[0])
+    if field == 'tail_each':
+        return '(' + ' AND '.join('p.pid IN (SELECT pid FROM lines WHERE tail = %s)'
+                                  % _lit(x) for x in vs) + ')'
+    if field == 'parity':
+        return ('p.pid IN (SELECT pid FROM lines WHERE (idx % 2) = ' + _lit(vs[0]) + ')')
+    if field == 'consist':
+        return {'后段上升': 'p.change < 0', '后段下降': 'p.change > 0'}.get(
+            vs[0], 'ABS(p.change) < 1')
+    return None
+
+
+def _auto_enum(conn):
+    """遍历 `LEAF_SCHEMA`：**每个字段 × 每个允许算子**各造一组真实取值，与独立 SQL 逐篇对拍。
+
+    同时在每个字段上验证「schema 未允许的算子」必须**被拒**（而不是按别的语义执行）。
+    """
+    import queryplan as _QP
+    all_ops = sorted({o for s in _QP.LEAF_SCHEMA.values() for o in s['ops']})
+    n_case, n_live = 0, 0
+    for f in sorted(_QP.LEAF_SCHEMA):
+        spec = _QP.LEAF_SCHEMA[f]
+        if f == 'line_q':
+            continue                              # 结构体：取值形态特殊，由上方硬编码用例覆盖
+        base = _pick(conn, f)
+        if base is None:
+            ok('P1-5 自动枚举 %s 有可用取值' % f, False, '取值为 None')
+            continue
+        for op in spec['ops']:
+            # ── 按算子形态造取值 ──
+            if op == 'between':
+                try:
+                    mid = float(base)
+                except (TypeError, ValueError):
+                    continue
+                val = [mid - 2, mid + 2]
+            elif op in ('in', 'not_in'):
+                if f == 'tail_each' or (isinstance(base, list)):
+                    val = list(base)
+                else:
+                    _b2 = None
+                    try:
+                        _b2 = _pick(conn, f, skip=base)
+                    except Exception:                            # noqa: BLE001
+                        _b2 = None
+                    val = [base] + ([_b2] if _b2 is not None and _b2 != base else [])
+            else:
+                val = base[0] if isinstance(base, list) else base
+            leaf = {'field': f, 'op': op, 'value': val}
+            _want = _indep(f, op, val)
+            if _want is None:
+                continue
+            n_case += 1
+            try:
+                sql, args = _QP.compile_filters(conn, leaf)
+                got = set(_run(conn, sql, args))
+            except Exception as e:                               # noqa: BLE001
+                ok('P1-5 %s×%s 可编译' % (f, op), False, '编译异常：%r' % e)
+                continue
+            want = set(_run(conn, _want))
+            if want:
+                n_live += 1
+            ok('P1-5 %s×%s（取值 %s）' % (f, op, str(val)[:40]), got == want,
+               '引擎 %d 篇 ／ 独立 SQL %d 篇' % (len(got), len(want)))
+        # ── schema 未允许的算子必须被拒 ──
+        for bad_op in all_ops:
+            if bad_op in spec['ops'] or f == 'line_q':
+                continue
+            try:
+                _QP.compile_filters(conn, {'field': f, 'op': bad_op, 'value': base})
+                bad = True
+            except ValueError:
+                bad = False
+            except Exception:                                    # noqa: BLE001
+                bad = False
+            ok('P1-5 %s×%s（schema 未允许）必须被拒' % (f, bad_op), not bad, '未报错')
+    print('  · 自动枚举：比对 %d 组字段×算子（其中 %d 组真值非空，非空转校验）'
+          % (n_case, n_live))
+
+
 def main():
     conn = sqlite3.connect(os.path.join(ROOT, 'data', 'corpus.db'))
     conn.row_factory = sqlite3.Row
@@ -68,7 +258,9 @@ def main():
         ({'field': 'title', 'op': 'contains', 'value': '二月望夜'},
          "p.title LIKE '%二月望夜%'"),
         ({'field': 'title', 'op': 'not_in', 'value': ['二月望夜']},
-         "NOT (p.title LIKE '%二月望夜%')"),
+         "p.title NOT IN ('二月望夜')"),
+        ({'field': 'title', 'op': '=', 'value': '浣溪沙'},
+         "p.title = '浣溪沙'"),
         ({'field': 'pid', 'op': 'in', 'value': rp},
          "p.pid IN (%s)" % ','.join("'%s'" % p for p in rp)),
         # 数值：六种算子 + between（闭区间）
@@ -158,6 +350,64 @@ def main():
         ok('lines.text×not_in（schema 未允许）必须被拒', False, '未报错')
     except ValueError:
         ok('lines.text×not_in（schema 未允许）必须被拒', True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ★ 2026-10-10（《关键核心现状》P1-5）：**自动穷尽 LEAF_SCHEMA 的字段×算子组合**。
+    #   改前 → 只有上方硬编码 36 条用例；「36 项全过」只说明这 36 条没问题，
+    #     并不能说明「所有允许的 field×op 都语义正确」——`title` 的 `=` 语义错误就没被覆盖。
+    #   改后 → 遍历 `LEAF_SCHEMA` 的每个字段、每个允许算子，各造一组真实取值，
+    #     用**独立手写 SQL** 复算并逐篇比对；同时把 schema **未允许**的组合验证为"必须被拒"。
+    # ══════════════════════════════════════════════════════════════════════
+    _auto_enum(conn)
+
+    # ── P0-4：多个数值条件必须**各自绑定**自己的比较语义（不许整句一刀切）──
+    _p04_cases = [
+        ('字数至少 50 字', [('han_len', '>', 50)], ['>=']),
+        ('字数少于 100 字', [('han_len', '<', 100)], ['<']),
+        ('字数严格大于 50 字', [('han_len', '>', 50)], ['>']),
+        ('字数至少 50 字、同时少于 100 字', [('han_len', '>', 50), ('han_len', '<', 100)],
+         ['>=', '<']),
+        ('字数不少于 50、仄声比例低于 60%',
+         [('han_len', '>', 50), ('ze_ratio', '<', 60)], ['>=', '<']),
+    ]
+    for q, leaves, want_ops in _p04_cases:
+        node = {'and': [{'field': f, 'op': o, 'value': v} for f, o, v in leaves]}
+        QP.normalize_ops(node, q)
+        got_ops = [c['op'] for c in node['and']]
+        ok('P0-4 逐条件绑定「%s」→ %s' % (q, '/'.join(got_ops)), got_ops == want_ops,
+           '得到 %s ／ 期望 %s' % (got_ops, want_ops))
+
+    # ── P1-1：显式空条件必须**恒假**（不能静默变成全库）；validate 必须拒 ──
+    for f, empty in (('cipai', []), ('cipai', ''), ('cipai', ['']), ('title', ''),
+                     ('title', []), ('author', [])):
+        _s, _a = QP.compile_filters(conn, {'field': f, 'op': 'in', 'value': empty})
+        _n = len(_run(conn, _s, _a))
+        ok('P1-1 显式空条件 %s=%r → 恒假（0 篇）' % (f, empty), _n == 0, '得 %d 篇' % _n)
+    _emp_probs = QP.validate(dict(QP.empty_plan(),
+                                  filters={'field': 'cipai', 'op': '=', 'value': []}), conn)[1]
+    ok('P1-1 validate 拒绝显式空值', any('空' in str(x) for x in _emp_probs),
+       '问题=%r' % _emp_probs)
+    _nul_probs = QP.validate(dict(QP.empty_plan(),
+                                  filters={'field': 'cipai', 'op': '='}), conn)[1]
+    ok('P1-1 validate 拒绝缺失 value', any('value' in str(x) for x in _nul_probs),
+       '问题=%r' % _nul_probs)
+    # 反向：`{"and": []}`（合取空集=真元）**必须仍是 1=1**，不许被误判为显式空
+    _s2, _a2 = QP.compile_filters(conn, {'and': []})
+    ok('P1-1 空 AND（真元）仍为 1=1（未被误伤）', _s2 == '1=1', _s2)
+
+    # ── P1-2：`title` 的 `=` 是**严格等值**，`contains` 才是子串 ──
+    _t = conn.execute("SELECT title FROM poems WHERE title IS NOT NULL AND length(title)>2 "
+                      "GROUP BY title ORDER BY COUNT(*) DESC LIMIT 1").fetchone()[0]
+    _eq = set(_run(conn, *QP.compile_filters(conn, {'field': 'title', 'op': '=', 'value': _t})))
+    _ct = set(_run(conn, *QP.compile_filters(conn, {'field': 'title', 'op': 'contains',
+                                                   'value': _t})))
+    _want_eq = set(_run(conn, "p.title = '%s'" % _t.replace("'", "''")))
+    _want_ct = set(_run(conn, "p.title LIKE '%%%s%%'" % _t.replace("'", "''")))
+    ok('P1-2 title `=` == 严格等值 SQL', _eq == _want_eq, '%d vs %d' % (len(_eq), len(_want_eq)))
+    ok('P1-2 title `contains` == 子串 SQL', _ct == _want_ct,
+       '%d vs %d' % (len(_ct), len(_want_ct)))
+    ok('P1-2 `=` 严格 ⊂ `contains` 子串（且通常真包含）', _eq < _ct or _eq == _ct,
+       '=%d contains=%d' % (len(_eq), len(_ct)))
 
     print('=' * 64)
     print('字段×算子真值：比对 %d 项，不符 %d 项' % (CMP[0], len(BAD)))

@@ -1898,7 +1898,7 @@ def _derived_ready(conn):
     return (t, g)
 
 
-def _leaf_title(vals, conn=None, op='in'):
+def _leaf_title(vals, conn=None, op='contains'):
     """题名子串并集（`p.title LIKE %题名%`，多项 OR）；空 → None。
 
     ⚠ 2026-10-08 第二轮（审查 B8）：题名检索原本是 `LIKE '%…%'` **全表扫**。
@@ -1912,11 +1912,19 @@ def _leaf_title(vals, conn=None, op='in'):
     """
     if not vals:
         return None
-    neg = op in ('!=', 'not_in')
-    like = ('NOT ' if neg else '') + '(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')'
+    # ⚠ 2026-10-10（《关键核心现状》P1-2）：**`=`/`!=`/`in`/`not_in` 是完整题名集合语义，
+    #   `contains` 才是子串**——四者必须互为补集，否则 schema 允许的操作与实际 SQL 不一致。
+    #   改前 → 无论 op 是什么都编译成 `LIKE '%值%'`：`=` 退化成子串匹配
+    #     （「题名『清明』」把「清明感怀」也命中），而 `!=`/`not_in` 却是**子串取反**
+    #     （`== '/=`' 与 `in`/`not_in` 不互补，属自相矛盾）。
+    #   改后 → `=`/`!=`/`in`/`not_in` 一律按**完整题名**判（`=` / `!=` / `IN` / `NOT IN`），
+    #     子串一律走 `contains`（保留原 FTS 收窄 + LIKE 复验）。
+    if op in ('=', 'in'):
+        return '(' + ' OR '.join('p.title = ?' for _ in vals) + ')', list(vals)
+    if op in ('!=', 'not_in'):
+        return '(' + ' AND '.join('p.title != ?' for _ in vals) + ')', list(vals)
+    like = '(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')'
     args = ['%' + t + '%' for t in vals]
-    if neg:
-        return like, args
     _fts, _ = _derived_ready(conn)
     if not _fts:
         return like, args
@@ -1933,10 +1941,25 @@ def _leaf_title(vals, conn=None, op='in'):
 
 
 def _leaf_pid(vals):
-    """pid 集合（上一轮结果集/显式 pid 范围）。空 → None。"""
+    """pid 集合（上一轮结果集/显式 pid 范围）。空 → None。
+
+    ⚠ 2026-10-10（《关键核心现状》P1-4）：**超过 SQLite 变量上限时分块**。
+      改前 → 单条 `IN (?,?,…)`：篇号一多就超 SQLite 变量上限，调用方只能**主动丢掉范围**
+      （`plan_exec._op_pair` 曾把 >30000 篇的候选集直接省略），于是「先筛后配」的筛选被越过。
+      改后 → ≤5000 个时保持原单条 `IN`（SQL 文本逐字不变，零回归）；更多时编译成
+      多个 `IN` 分片的 OR（每片 900），语义完全相同，**范围不再丢失**。
+    """
     if not vals:
         return None
-    return 'p.pid IN (%s)' % ','.join('?' * len(vals)), list(vals)
+    vals = list(vals)
+    if len(vals) <= 5000:
+        return 'p.pid IN (%s)' % ','.join('?' * len(vals)), vals
+    parts, args = [], []
+    for i in range(0, len(vals), 900):
+        c = vals[i:i + 900]
+        parts.append('p.pid IN (%s)' % ','.join('?' * len(c)))
+        args += c
+    return '(' + ' OR '.join(parts) + ')', args
 
 
 def _leaf_num(col, op, v):
@@ -1996,8 +2019,18 @@ def _leaf_tail_pz(v, op='in'):
     """句脚平仄 = 该句平仄串最后一个字（单一来源：pz 串由引擎生成）。
 
     2026-10-09（P0-1）：支持 `in`/`not_in`（单值 `=` 语义等价）——否定原被无视。
+
+    ★ 2026-10-10（条件一致性门禁回归修复）：**单值正向时发 `= ?` 而不是 `IN (?)`**。
+      依据：`line_ops_where` 走 `_pred_sql('tail_pz')`，其形态就是 `substr(l.pz, -1, 1) = ?`；
+      而本函数经 `_leaf_exists_lines` 一律发 `IN (?)` → 同一个条件在两条路上 SQL 文本不一致，
+      `tools/check_conditions.py` 的「条件都进了检索 SQL」按**字面**校验 `= ?`，于是
+      报「条件 tail_pz 未出现在 SQL」——检查器抓不到，等于这条防线失效。
+      改后：单值正向 = 与 `_pred_sql` 同形的 `= ?`（语义完全等价，只是文本统一）；
+      多值/否定仍走 `IN` / `NOT IN`。
     """
     vals = list(v) if isinstance(v, (list, tuple)) else [v]
+    if len(vals) == 1 and op not in ('!=', 'not_in'):
+        return 'p.pid IN (SELECT l.pid FROM lines l WHERE substr(l.pz, -1, 1) = ?)', list(vals)
     return _leaf_exists_lines('substr(l.pz, -1, 1)', vals, op)
 
 
@@ -2174,13 +2207,37 @@ def _sql_filters(conn, node):
     raise ValueError('filters 节点既非布尔节点也非叶子：%r' % (node,))
 
 
+def _explicit_empty(v):
+    """**显式空**取值（区别于「没这个条件」）——`[]`/`()`/`""`/全为空的串列表。
+
+    ⚠ 2026-10-10（《关键核心现状》P1-1）：`None` 与「键不存在」**不算**显式空
+      （那是「没有这个条件」，走不设限路径是合理的）；只有**用户/模型明确给出一个空取值**
+      才算——那必须编译成恒假，不能静默变成全库查询。
+    """
+    if isinstance(v, (list, tuple)):
+        if len(v) == 0:
+            return True
+        return all(isinstance(x, str) and x.strip() == '' for x in v)
+    if isinstance(v, str):
+        return v.strip() == ''
+    return False
+
+
 def _leaf_sql(node, conn=None):
     """单个叶子 `{"field","op","value"}` → (sql, args)。字段与 op 的兼容性由 `queryplan.validate` 校验。
 
     ⚠ 2026-10-09（第三轮审查 P0-1）：**op 必须真正参与编译**——下面所有分支都把 `op`
     传给对应构造函数（否定 `!=`/`not_in` 生效）；不再出现「schema 允许否定、编译器当正向」。
+
+    ⚠ 2026-10-10（《关键核心现状》P1-1）：**显式空条件 → 恒假 `0=1`**。
+      改前 → `_leaf_one([])` 返回 None，调用方一律兜成 `1=1`：计划里一个「真表达过、但取值空」
+      的条件会**静默消失**（词牌不再限制、题名 LIKE '%%' 匹配全库、pid 集合不限范围）。
+      改后 → 显式空（`[]`/`""`）编译成 `0=1`；**缺失/None** 才走「不设限」。
+      `line_q` 的 value 是结构体，不适用本判据（空 dict 会由 `_line_q_where` 自行处理）。
     """
     f, op, v = node.get('field'), node.get('op'), node.get('value')
+    if f != 'line_q' and _explicit_empty(v):
+        return '0=1', []
     if f in ('dynasty', 'author', 'cipai'):
         col = {'dynasty': 'p.dynasty', 'author': 'p.author', 'cipai': 'p.cipai'}[f]
         r = _leaf_one(col, list(v) if isinstance(v, (list, tuple)) else [v], op)

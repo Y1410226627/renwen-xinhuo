@@ -1275,3 +1275,83 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
 - **状态**：✅。前端七门禁全绿（ssr-smoke 31/31｜check-core 213,972 项 0 不符｜check-types 0 错误｜
   test_render 522,242 项 0 不符｜test_ui 147 项 0 不符｜gen-docs 重生成｜构建产物更新）；
   后端零回归（selftest 235/0｜regress 28 项 0 失败——solver 链零改动，交付答案不动）。
+
+## D45 ✅ 已修（2026-10-10·接手《关键核心现状》第三轮）：问答内核 P0/P1 十项 + 词谱对照六处缺陷
+
+- **由来**：主人交办《关键核心现状》清单（另一个 AI 已完成大部分功能），要求逐条解决；
+  并点名「词谱对照存在 UI / 代码 / 逻辑 / 缺陷 / 不完整 多类 bug」。
+- **先证伪再动手**：为分清「我改坏的」与「本来就有」，用 `git stash` 把本轮改动暂存后
+  在**未改代码**上复跑门禁比对——确认两条 `tail_pz` 失败**属于既有**（非本轮引入），
+  遂一并修掉（见下 §问答内核 ⑪）。
+- **问答内核（P0）**
+  1. **P0-1 护栏 fail-open → fail-closed**（`solve/ask.py`）：规划路 `guard.verify` 抛异常时
+     旧版把 `_g_ok=True`，只在 problems 留一句「护栏未执行」→ 可能「没跑成却报通过」。
+     现异常一律记**未通过**，并新增 `guard_ran` 字段供前端如实展示。
+  2. **P0-2 步骤级召回不写报告**（`solve/plan_exec.py` `_op_retrieve`）：旧版只在计划级
+     `_retrieve` 写 `retrieve_report`，步骤级 `IN (…)` 召回成功后不写 → 上游 `semantic_used`
+     仍为 False → 把语义候选当**精确**。现两路**同一套报告**（`mode/q/topk/n/executed/why/allow_n/level`），
+     失败与 0 命中同样入账。
+  3. **P0-3 语义召回 0 命中 ≠ 数据里没有**：0 命中时帧标记 `retrieve_empty`；
+     叠加 P0-2 后 `set_check` 判 `SEMANTIC_NOT_EXHAUSTIVE` → `result_state=SEMANTIC_CANDIDATES`，
+     **不再落入 `EXACT_EMPTY`**。
+  4. **P0-4 数值比较符逐条件就近绑定**（`solve/queryplan.py` `normalize_ops`）：旧版看**整句**
+     有无「至少/严格」，有一处就改全树的 `>`/`<` → 「至少 50 且少于 100」会把 `<100` 也放宽。
+     现按**每个数值自己的字面量**定位，只看其**紧邻前后 8 字**（严格优先、含空值后缀「以上/以内」），
+     互不影响；`op_truth_check` 增 5 条验收用例。
+- **问答内核（P1）**
+  5. **P1-1 显式空条件恒假**（`retrieve._leaf_sql` + `queryplan._value_problems`）：
+     `[]`/`""`/全空串列表 → `0=1`（旧版退化成 `1=1`＝把条件吃掉）；`validate()` 显式拒绝
+     缺 value / null / 空值。**反向保全**：`{"and": []}`（合取空集=真元）仍为 `1=1`。
+  6. **P1-2 题名算子语义统一**（`retrieve._leaf_title`）：`=`/`!=`/`in`/`not_in` 一律**完整题名**
+     集合语义（`=`/`!=`/`IN`/`NOT IN`，四者互为补集），`contains` 才走子串（保留 FTS 收窄）。
+     旧版一律 `LIKE '%值%'` → `=` 退化、`not_in` 是子串取反、与 `in` 不互补（自相矛盾）。
+     ⚠ 经典路径显式传 `op='contains'`，规则路行为不变。
+  7. **P1-3 句级召回把范围交给索引**（`vector_index.search_lines` + `_op_locate`）：旧版固定
+     `k=max(topk*4,64)` 取全局近邻再按 `allow` 过滤 → 帧内确有答案时也会返回 0 条（**把排名截断
+     伪装成没找到**）。现逐轮把 k 扩大 4 倍直到凑够或覆盖全索引；设 `_MAX_LINES_SCAN` 上限，
+     触顶置 `lines_scan_truncated()`，由调用方**如实报告"未穷尽"**。
+  8. **P1-4 配对不再丢弃候选范围**（`retrieve._leaf_pid` + `_op_pair`）：旧版 `>30000 篇` 就
+     **静默丢掉 `ctx_pids`**；现 `_leaf_pid` 超 5000 时按 900 分块 OR（≤5000 时 SQL 文本不变），
+     `_op_pair` 无条件带范围。
+  9. **P1-5 真值测试自动穷尽**（`tools/op_truth_check.py`）：由 36 条硬编码 → **遍历
+     `LEAF_SCHEMA` 的每个字段 × 每个允许算子**（110 组，109 组真值非空），各造真实取值与
+     **独立手写 SQL** 逐篇对拍；并验证「schema 未允许的算子必须被拒」。**首次运行即抓到真 bug**
+     （`title × !=` 与 `in` 不互补，即 P1-2）。比对项 36 → **303**。
+  10. **P1-6 索引覆盖按身份集合核验**（`vector_index.coverage`）：旧版只比条数，重复/错位/
+     张冠李戴照样"覆盖完整"。现篇级一律做集合差（`missing_poems`/`unknown_poems`/`duplicate_poems`），
+     句级按 `(pid, idx)` 在 `deep=True` 时核验（42 万行较重，默认仍走条数并如实标注）。
+  11. **P1-7 算子状态契约写成断言**（`plan_exec.run` + 自检 5 项）：**新发现并修掉一个真缺陷**——
+     步骤算子**自己把失败写进 `failed_steps` 后返回原帧**时，旧版会继续跑下游步骤
+     （实测 DAG 里出现了失败步骤之后的 `count` 节点），把「部分结果」渲染成正常答案。
+     现：计划级/步骤级/operation 任一记了失败即**立即停手**返回 `EXECUTION_FAILED`，
+     `_by_intent` 在失败态**不执行**；并用 5 条断言钉住（返回原帧≠失败、空帧≠失败、
+     失败后下游不执行、失败不被兜底包装、两级召回同一套语义）。
+  12. **顺带修复**（复跑门禁时发现，属既有回归）：`_leaf_tail_pz` 单值正向改发
+     `substr(l.pz,-1,1) = ?`（与 `_pred_sql` 同形），使 `check_conditions` 的
+     「条件都进了检索 SQL」重新可校验（FAIL 3 → **1**，即基线）。
+- **词谱对照（功能 9）六处缺陷**
+  13. **体标识撞号**（`cipu.form_brief` / `_match_form`）：`form` 只是"该书第几体"，**钦定体1 与
+     龙榆生体1 会撞号** → 前端用它当 `:key`/选中判据会「两个按钮同时高亮、点 A 选中 B」。
+     新增跨谱书唯一的 `form_key`（`谱书|体号`），前端全程用它；`_match_form` 撞号时**报歧义**
+     而不是静默取第一个，非法标识**不抛异常**（旧版 `int(form)` 遇非数字直接 500）。
+  14. **服务端把 form_key 强制成 None**（`web/serve.py`）：旧版 `_num(g('form'), int)` 让
+     "按谱书+体号精确选体"这条路根本走不通；现原样透传。
+  15. **句末标记被一律显示成「韵」**（`cipu.compare` + 前端）：`句`/`叠`/`换平韵`/`读` 全被
+     误报成押韵。现后端给 `ending_label`（**不做解释性翻译**，谱书写什么显示什么），前端只展示。
+  16. **逐字对齐静默错位**（`cipu.compare`）：旧版只取 `min(汉字数, 规则长度)`，`pz` 未参与下界
+     → `pz` 与汉字数不等时后面每个字**整体错位一格**却无提示，把"对齐失败"渲染成"大量不符"。
+     现取三者最小值，并给出逐行 `align_warn` 与 `summary.n_unaligned_lines`，界面上明确
+     「字数不一致不构成出律结论」。
+  17. **作品检索无分页**（`CipuView.vue`）：旧版只取前 20 条且无翻页（还把 `topk` 当参数——
+     `/api/search` 根本不认 `topk`，只认 `size`）。现用 `page/size`，显示「共命中 N 篇，第 p/P 页」
+     并给上一页/下一页。
+  18. **样式脱节与全局污染**（`CipuView.vue`）：① `--bd`/`--ac` 全站未定义 → 永远用兜底灰；
+     ② **非 scoped 的裸 `.dim{color:#777}` 会全局覆盖** `core/ui.js` 的 `.dim`，把**所有页面**的
+     次级文字染成死灰。现全部改用主题变量（`--line/--accent/--ok/--warn/--ink2`），`.dim` 收口到 `.cp`。
+  19. 词谱门禁 `web/test_cipu.py` 由 23 项 → **33 项**（新增 form_key 唯一性、撞号判歧义、
+     ending_label 原样、align_warn 与三者最小值对齐等护栏）。
+- **验收**：`selftest` 235/0 ｜ `test_api` 150/0 ｜ `op_truth_check` **303/0**（36→303）｜
+  `test_cipu` **33/0**（23→33）｜ `qa_eval` 34/37（同基线）｜ `nl_benchmark` 20/40（零回退）｜
+  `fixture_gate` 6/6 ｜ `reproduce` **13/15**（2 项为既有失败，与基线一致）｜
+  前端 `test_ui` 147/0 ｜ `ssr-smoke` 31/0 ｜ `verify_views` 43,459/0 ｜ `check-core` 213,972/0 ｜
+  `test_render` 522,242/0 ｜ `check_conditions` FAIL 3 → **1**（回到基线）。

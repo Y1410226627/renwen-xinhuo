@@ -1749,9 +1749,12 @@ class H(BaseHTTPRequestHandler):
                 if not g('pid'):
                     return self._send({'error': {'code': 'BAD_PARAM',
                                                  'message': 'pid 为必填'}}, code=400)
+                # ★ 2026-10-10（词谱修复）：`form` 原样透传（可为 `form_key`，如「钦定词谱|1」）。
+                #   旧版 `_num(..., int)` 会把 form_key 强制成 None，于是"按谱书+体号精确选体"
+                #   这条路根本走不通（前端只能退化成数字体号，撞号时还会选错）。
                 res = CIPU.compare_pid(get_conn(), g('pid'),
                                        tune=g('tune') or None,
-                                       form=_num(g('form'), int))
+                                       form=(g('form') or None))
                 if res is None:
                     return self._send({'error': {'code': 'NOT_FOUND',
                                                  'message': '没有这一篇：%s' % g('pid')}},

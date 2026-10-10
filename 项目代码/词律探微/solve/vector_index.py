@@ -156,15 +156,23 @@ def info():
     }
 
 
-def coverage(conn=None):
-    """**索引覆盖率**（第三轮审查 P1-14）：篇级/句级各覆盖多少、按朝代分、缺多少。
+def coverage(conn=None, deep=False):
+    """**索引覆盖率**（第三轮审查 P1-14）＋**按身份集合核验**（2026-10-10，P1-6）。
 
     ⚠ 「索引可用」≠「语料全覆盖」——本函数把覆盖做成**可观测指标**：
       · `poems.indexed / poems.total`：篇级索引条数 vs 语料总篇数；
       · `poems.by_dynasty`：每朝代的 {indexed, total}（清/宋/元）；
       · `lines.indexed / lines.total`：句级索引条数 vs 语料总句数；
       · 任一缺口即 `complete=False`，并列出 `notes`（哪一代/哪层缺）。
-    `conn` 为 None 时只报**索引侧**的条数（无法对拍语料总数），`complete` 记 None。
+
+    ⚠ 2026-10-10（《关键核心现状》P1-6）：**「条数相等」不等于「同一批数据」**。
+      改前 → 只比 `len(idx_meta) >= COUNT(*)`：索引里若存在**重复 / 错位 / 张冠李戴**
+        （某些 ID 替掉了别的 ID），条数照样对得上，日志仍会报「覆盖完整」。
+      改后 → 按**篇号集合**核验：
+        `missing_poems = 库篇号 − 索引篇号`、`unknown_poems = 索引篇号 − 库篇号`、
+        `duplicate_poems`（索引内重复条数）；任一非空即 `complete=False` 并进 `notes`。
+      句级身份用 `(pid, idx)` 稳定二元组；句级集合核验较重（要拉 42 万行），
+      故只在 `deep=True` 时执行，默认仍走条数（但**篇级一律走集合**，代价很小）。
     """
     mf = _STATE.get('manifest') or {}
     pm, lm = list(_STATE['poem_meta']), list(_STATE['line_meta'])
@@ -172,6 +180,10 @@ def coverage(conn=None):
         'indexed_poems': len(pm), 'indexed_lines': len(lm),
         'total_poems': None, 'total_lines': None,
         'by_dynasty': {}, 'complete': None, 'notes': [],
+        # ★ P1-6：按身份集合核验的结果（None = 未做该层核验）
+        'missing_poems': None, 'unknown_poems': None, 'duplicate_poems': None,
+        'missing_lines': None, 'unknown_lines': None, 'duplicate_lines': None,
+        'lines_checked_by_id': False,
     }
     if not _STATE['ok']:
         out['notes'].append('索引不可用（%s）' % why())
@@ -194,14 +206,58 @@ def coverage(conn=None):
                 out['by_dynasty'][d] = {'indexed': _idx_dyn.get(d, 0), 'total': tot}
                 if _idx_dyn.get(d, 0) < tot:
                     out['notes'].append('%s 篇级缺 %d/%d' % (d, tot - _idx_dyn.get(d, 0), tot))
-            out['complete'] = (len(pm) >= out['total_poems']
-                               and len(lm) >= out['total_lines'])
+
+            # ── 篇级：**按篇号集合**核验（P1-6）──
+            _db_p = [r[0] for r in conn.execute('SELECT pid FROM poems')]
+            _id_p = [(m.get('pid') if isinstance(m, dict) else getattr(m, 'pid', '')) for m in pm]
+            _db_set, _id_set = set(_db_p), set(_id_p)
+            out['missing_poems'] = sorted(_db_set - _id_set)
+            out['unknown_poems'] = sorted(_id_set - _db_set)
+            out['duplicate_poems'] = len(_id_p) - len(_id_set)
+            if out['missing_poems']:
+                out['notes'].append('篇级缺 %d 个篇号（例：%s）'
+                                    % (len(out['missing_poems']), out['missing_poems'][:5]))
+            if out['unknown_poems']:
+                out['notes'].append('篇级有 %d 个**库里不存在**的篇号（例：%s）'
+                                    % (len(out['unknown_poems']), out['unknown_poems'][:5]))
+            if out['duplicate_poems']:
+                out['notes'].append('篇级索引内有 %d 条**重复**篇号' % out['duplicate_poems'])
+            _p_ok = (not out['missing_poems'] and not out['unknown_poems']
+                     and not out['duplicate_poems'])
+
+            # ── 句级：身份是 `(pid, idx)`；较重，仅 deep 时做 ──
+            _l_ok = len(lm) >= out['total_lines']
+            if deep:
+                _db_l = [(r[0], r[1]) for r in conn.execute('SELECT pid, idx FROM lines')]
+                _id_l = [(m.get('pid'), m.get('idx')) for m in lm
+                         if isinstance(m, dict)]
+                _db_ls, _id_ls = set(_db_l), set(_id_l)
+                _miss = sorted(_db_ls - _id_ls)
+                _unk = sorted(_id_ls - _db_ls)
+                out['missing_lines'] = len(_miss)
+                out['unknown_lines'] = len(_unk)
+                out['duplicate_lines'] = len(_id_l) - len(_id_ls)
+                out['lines_checked_by_id'] = True
+                if _miss:
+                    out['notes'].append('句级缺 %d 句（例：%s）' % (len(_miss), _miss[:3]))
+                if _unk:
+                    out['notes'].append('句级有 %d 句在库里不存在（例：%s）' % (len(_unk), _unk[:3]))
+                if out['duplicate_lines']:
+                    out['notes'].append('句级索引内有 %d 条重复 (pid,idx)' % out['duplicate_lines'])
+                _l_ok = (not _miss and not _unk and not out['duplicate_lines'])
+            else:
+                if len(lm) < out['total_lines']:
+                    out['notes'].append('句级覆盖 %d/%d（缺 %d）；'
+                                        '如需**按句身份**核验请用 deep=True'
+                                        % (len(lm), out['total_lines'],
+                                           out['total_lines'] - len(lm)))
+                else:
+                    out['notes'].append('句级仅比条数（如需按句身份核验请用 deep=True）')
+
+            out['complete'] = bool(_p_ok and _l_ok)
             if len(pm) < out['total_poems']:
-                out['notes'].append('篇级覆盖 %d/%d（缺 %d）'
+                out['notes'].append('篇级条数 %d/%d（缺 %d）'
                                     % (len(pm), out['total_poems'], out['total_poems'] - len(pm)))
-            if len(lm) < out['total_lines']:
-                out['notes'].append('句级覆盖 %d/%d（缺 %d）'
-                                    % (len(lm), out['total_lines'], out['total_lines'] - len(lm)))
         except Exception as e:                                   # noqa: BLE001
             out['notes'].append('覆盖率对拍失败：%r' % e)
     return out
@@ -352,31 +408,64 @@ def search(query, topk=10, conn=None, allow=None, level='auto'):
         return []
 
 
+_MAX_LINES_SCAN = 50000       # 句级召回单次请求的**扫描上限**（超出即如实报告"未穷尽"）
+
+
 def search_lines(query, topk=10, conn=None, allow=None):
-    """语义查询 → [(pid, idx, text, score)]（句级，带句序号与原文；用于「某句出自哪首」）。"""
+    """语义查询 → [(pid, idx, text, score)]（句级，带句序号与原文；用于「某句出自哪首」）。
+
+    ⚠ 2026-10-10（《关键核心现状》P1-3）：**候选集内检索要逐轮扩大 k**。
+      改前 → 固定 `k = max(topk*4, 64)` 取**全局**近邻，再按 `allow` 过滤：
+        当前帧 100 篇里确有最匹配的句子、但全局前 64 名都在帧外 → 返回 0 条，
+        系统据此谎报「当前集合里没有命中」——**把排名截断伪装成"没找到"**。
+      改后 → 有 `allow` 时逐轮把 k 扩大 4 倍（64 → 256 → …）直到凑够 topk 或覆盖全索引；
+        为控制延迟设扫描上限 `_MAX_LINES_SCAN`，触顶时置 `lines_scan_truncated()` 为真，
+        由调用方**如实报告"未穷尽"**，绝不静默返回空。`allow=None` 时保持原行为不变。
+    """
     if not available() or _STATE['line_index'] is None:
         return []
+    _STATE['lines_scan_truncated'] = False
     try:
         q = _query_vec(query)
         if q is None:
             return []
-        import faiss
         n = _STATE['line_index'].ntotal
-        k = min(max(topk * 4, 64), n)
-        D, I = _STATE['line_index'].search(q, k)
+        if allow is None:
+            ks = [min(max(topk * 4, 64), n)]
+        else:
+            ks, k = [], max(topk * 4, 64)
+            while True:
+                ks.append(min(k, n))
+                if k >= n or k >= _MAX_LINES_SCAN:
+                    break
+                k *= 4
         out = []
-        for sc, i in zip(D[0], I[0]):
-            if i < 0 or i >= len(_STATE['line_meta']):
-                continue
-            m = _STATE['line_meta'][i]
-            if allow is not None and m.get('pid') not in allow:
-                continue
-            out.append((m.get('pid'), m.get('idx'), m.get('text'), float(sc)))
-            if len(out) >= topk:
+        for k in ks:
+            D, I = _STATE['line_index'].search(q, k)
+            out = []
+            for sc, i in zip(D[0], I[0]):
+                if i < 0 or i >= len(_STATE['line_meta']):
+                    continue
+                m = _STATE['line_meta'][i]
+                if allow is not None and m.get('pid') not in allow:
+                    continue
+                out.append((m.get('pid'), m.get('idx'), m.get('text'), float(sc)))
+                if len(out) >= topk:
+                    break
+            if len(out) >= topk or k >= n:
+                break
+            if k >= _MAX_LINES_SCAN:
+                _STATE['lines_scan_truncated'] = True
                 break
         return out
     except Exception as e:                                       # noqa: BLE001
+        _STATE['why'] = '%s: %s' % (type(e).__name__, e)
         return []
+
+
+def lines_scan_truncated():
+    """上一次 `search_lines` 是否因**扫描上限**而未穷尽（P1-3：不许把截断伪装成"没找到"）。"""
+    return bool(_STATE.get('lines_scan_truncated'))
 
 
 def similar(pid, topk=10, conn=None, allow=None, exclude_self=True):

@@ -162,8 +162,15 @@ def pick_form(tune, n_lines=None, n_chars=None):
 
 
 def form_brief(f):
-    """体的精简摘要（列表展示用；不含逐句细节）。"""
+    """体的精简摘要（列表展示用；不含逐句细节）。
+
+    ★ 2026-10-10（词谱 UI/逻辑修复）：新增 `form_key` —— **体的唯一标识**。
+      `form` 只是「该书内的第几体」，**钦定词谱体 1 与龙榆生词谱体 1 会撞号**；
+      前端若只用 `form` 当 `:key` 与"当前选中"判据，就会出现
+      「两个按钮同时高亮 / Vue 重复 key 报警 / 点 A 却选中 B」。故给出跨谱书唯一的 key。
+    """
     return {'tune': f['tune'], 'authority': f['authority'], 'form': f['form'],
+            'form_key': '%s|%d' % (f['authority'] or '?', f['form']), 'seq': f['seq'],
             'n_lines': f['n_lines'], 'n_chars': f['n_chars'], 'header': f['header'],
             'source_url': f['source_url']}
 
@@ -176,12 +183,34 @@ def form_detail(f):
     return d
 
 
+#: 句末标记 → 展示标签（★ 2026-10-10 修复：前端原先**把所有 ending 都显示成「韵」**，
+#:   于是「句」「叠」「换平韵」被误报成押韵）。
+#: ⚠ 这里**不做解释性翻译**——谱书写什么就显示什么（`读` 就是 `读`，不擅自写成「句内停顿」），
+#:   「不把转写当定本」这条红线同样适用于逐字展示。
+ENDING_LABEL = {}          # 预留：将来若上游统一了缩写，只在这里加映射，不改前端
+
+
+def ending_label(ending):
+    e = (ending or '').strip()
+    if not e:
+        return ''
+    return ENDING_LABEL.get(e, e)
+
+
 def compare(poem, form):
     """**三行对照**核心：`poem`（作品） vs `form`（谱式体）。
 
     `poem` 形如 `{'pid','author','title','cipai','lines':[{'idx','text','pz'},…]}`——
     其中 `pz` **必须来自 corpus.db 的 `lines` 表**（全站同一份预计算）。
     返回逐句逐字的 `rows` 与 `summary`（对/错/任意三分账 + 多出/缺失句如实列出）。
+
+    ★ 2026-10-10（词谱逻辑修复）——**对齐必须可解释**：
+      · 逐字对齐只取 `min(汉字数, pz 串长, 规则串长)` 三者；
+      · 三者不等时**不再静默错位**：该行的 `align_warn` 会写明差在哪，
+        并计入 `summary.n_unaligned_lines`（前端据此在行内给出提示）。
+        （改前 → 只用 `min(汉字数, 规则长度)`，而 `pz[k]` 未参与下界判断：
+          若 `pz` 与汉字数不等（含占位符/异体字），后面每个字都会**整体错位一格**，
+          却没有任何提示——把「对齐失败」渲染成了「大量不符」。）
     """
     L = list(poem.get('lines') or [])
     R = form['rules']
@@ -189,6 +218,7 @@ def compare(poem, form):
     n = max(len(L), len(R))
     rows = []
     n_cell = n_match = n_mismatch = n_any = 0
+    n_unaligned = 0
     for i in range(n):
         text = pz = None
         chars = []
@@ -197,8 +227,9 @@ def compare(poem, form):
             pz = (L[i].get('pz') or '')
             chars = _HAN_RE.findall(text)
         tones = R[i]['tones'] if i < len(R) else ''
+        ending = R[i]['ending'] if i < len(R) else None
         cells = []
-        m = min(len(chars), len(tones))
+        m = min(len(chars), len(pz or ''), len(tones))
         for k in range(m):
             rule = tones[k]
             pzc = pz[k] if k < len(pz) else ''
@@ -214,25 +245,70 @@ def compare(poem, form):
             n_cell += 1
             cells.append({'pos': k, 'char': chars[k], 'pz': pzc, 'rule': rule,
                           'verdict': verdict})
+        # 对齐诊断：汉字数 / pz 长度 / 规则长度 三者不一致时如实说明（不静默错位）
+        _warn = ''
+        if i < len(L) and (len(chars) != len(pz)):
+            _warn = ('作品汉字 %d 个，但平仄串 %d 位——两者不等，逐字对齐只取前 %d 位'
+                     % (len(chars), len(pz), m))
+        if len(chars) and len(tones) and len(chars) != len(tones):
+            _warn = ((_warn + '；') if _warn else '') + \
+                    '作品 %d 字 vs 谱书 %d 字（字数不等）' % (len(chars), len(tones))
+        if _warn:
+            n_unaligned += 1
         rows.append({
             'line': i,
             'poem_text': text, 'poem_pz': pz,
             'rule_tones': tones or None,
-            'ending': (R[i]['ending'] if i < len(R) else None),
+            'ending': ending,
+            'ending_label': ending_label(ending),
             'example': (S[i] if i < len(S) else None),
             'cells': cells,
             'n_chars_poem': len(chars),
+            'n_chars_pz': len(pz or ''),
             'n_chars_rule': len(tones),
+            'align_warn': _warn,
         })
     return {
         'rows': rows,
         'summary': {
             'n_cells': n_cell, 'n_match': n_match, 'n_mismatch': n_mismatch, 'n_any': n_any,
             'n_lines_poem': len(L), 'n_lines_rule': len(R),
+            'n_unaligned_lines': n_unaligned,
             'extra_lines': [i for i in range(len(L)) if i >= len(R)],
             'missing_lines': [i for i in range(len(R)) if i >= len(L)],
         },
     }
+
+
+def _match_form(fs, form):
+    """把请求里的 `form` 解析成**唯一一体**。返回 `(form 或 None, 说明)`。
+
+    ★ 2026-10-10（词谱逻辑修复）：接受三种写法，且**不再静默挑第一个**——
+      · `form_key`（`钦定词谱|1`，前端首选，跨谱书唯一）；
+      · 纯数字：若**多本谱书撞号**（钦定 1 + 龙榆生 1）则视为歧义，返回 None 并说明；
+      · `#<seq>` 或纯 seq 兜底（内部定位用）。
+    """
+    if form is None or form == '':
+        return None, '未指定体'
+    s = str(form).strip()
+    for f in fs:
+        if s == '%s|%d' % (f['authority'] or '?', f['form']):
+            return f, '按 form_key 指定'
+    if s.startswith('#'):
+        s = s[1:]
+    if s.isdigit():
+        hits = [f for f in fs if f['form'] == int(s)]
+        if len(hits) == 1:
+            return hits[0], '按体号指定（该体号在本词牌内唯一）'
+        if len(hits) > 1:
+            return None, ('体号 %s 在**多本谱书**里同时存在（%s）——请改用 form_key 指定，'
+                          '以免张冠李戴' % (s, '、'.join('%s体%d' % (h['authority'], h['form'])
+                                                        for h in hits)))
+        hits2 = [f for f in fs if f['seq'] == int(s)]
+        if len(hits2) == 1:
+            return hits2[0], '按全局序号指定'
+        return None, '体号 %s 不在本词牌内' % s
+    return None, '无法识别的体标识：%r' % (form,)
 
 
 def compare_pid(conn, pid, tune=None, form=None):
@@ -257,14 +333,19 @@ def compare_pid(conn, pid, tune=None, form=None):
                          % (name, len(list_tunes()))) if not cands else
                         ('词牌「%s」有多个相近候选，请显式指定：%s'
                          % (name, '、'.join(cands)))}
-    if form is not None:
-        fs = [f for f in forms_of(canon) if f['form'] == int(form) or f['seq'] == int(form)]
-        f, why = (fs[0], '按指定体') if fs else pick_form(canon, len(lines), n_chars)
-    else:
-        f, why = pick_form(canon, len(lines), n_chars)
+    # ★ 2026-10-10 修复：体标识解析**失败也要如实说**，不再「静默回落自动匹配」
+    #   （旧版 `int(form)` 遇到非数字会直接抛异常 → 500；且撞号时静默取第一个）。
+    f, why = _match_form(forms_of(canon), form)
+    form_note = ''
+    if f is None:
+        _auto, _awhy = pick_form(canon, len(lines), n_chars)
+        if str(form or '').strip() != '':
+            form_note = '指定的体未能采用（%s）——本次按自动匹配给出：%s' % (why, _awhy)
+        f, why = _auto, _awhy
     res = compare({'pid': pid, 'author': r['author'], 'title': r['title'],
                    'cipai': r['cipai'],
                    'lines': lines}, f)
     res.update({'status': 'ok', 'pid': pid, 'cipai': r['cipai'], 'tune': canon,
-                'form': form_brief(f), 'form_why': why, 'source_note': SOURCE_NOTE})
+                'form': form_brief(f), 'form_why': why, 'form_note': form_note,
+                'source_note': SOURCE_NOTE})
     return res

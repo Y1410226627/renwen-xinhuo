@@ -1412,10 +1412,20 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     #   块结构修好后（见上），这里必须给出与问句类型匹配的边界声明，否则整案过不了护栏。
     text = text + ('\n【推断边界｜%s问句】%s'
                    % (kind, BOUNDARIES.get(kind or '数值型', BOUNDARIES['数值型'])))
+    _guard_ran = True
     try:
         _g_ok, _g_pb = guard.verify(text, blocks, boundary_kind=kind)
-    except Exception:                                            # noqa: BLE001
-        _g_ok, _g_pb = True, ['（护栏未执行：规划路渲染异常）']
+    except Exception as _ge:                                     # noqa: BLE001
+        # ⚠ 2026-10-10 修（《关键核心现状》P0-1：护栏 fail-open → fail-closed）：
+        #   改前 → 异常时 `_g_ok = True`，只在 problems 里留一句「护栏未执行」；
+        #         最终 `verify.ok = bool(_g_ok and not _probs)`，若 `_probs` 恰好为空，
+        #         就会出现**「护栏没跑成、却报告通过」**——破坏了本项目最重的一条信任底线。
+        #   改后 → 异常一律记**未通过**（`_g_ok=False`）并写明原因；
+        #         「未校验 ≠ 通过」不再有例外分支（与 D41 的口径一致）。
+        _guard_ran = False
+        _g_ok = False
+        _g_pb = ['（护栏未执行：规划路渲染异常 %s: %s）——未校验一律记为**未通过**'
+                 % (type(_ge).__name__, _ge)]
     # ⭐ 2026-10-09（第三轮审查 P0-3）：**内容/情感类问题在规划路同样接「文意解读」**——
     #   定位作品（blocks 已含全文）→ 大模型基于原文解释（标注非事实结论、过四道护栏、
     #   不过即静默跳过）。与既有链（`_answer_output`）走**同一条生成通道**，不另造生成任务。
@@ -1483,6 +1493,8 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
         'answer': text + ('\n【查询理解】' + '；'.join(_notes) if _notes else ''),
         'verify': (bool(_g_ok and not _probs), list(_g_pb) + _probs),
         'verify_kind': 'guard' if blocks else 'numbers',
+        # ⚠ 2026-10-10（P0-1）：如实披露**护栏是否真的执行过**——前端不得在 False 时显示「通过」。
+        'guard_ran': bool(_guard_ran),
         'refused': False, 'problems': list(_g_pb) + _probs,
         'total': (f.value if f.kind == 'scalar' else len(f.pids)),
         'pid': (f.pids[0] if len(f.pids) == 1 else None),

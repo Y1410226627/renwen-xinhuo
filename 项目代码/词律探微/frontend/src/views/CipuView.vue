@@ -34,6 +34,13 @@
           </tr>
         </tbody>
       </table>
+      <!-- ★ 2026-10-10（词谱 UI 修复）：**加真分页**。改前 → 只取前 20 条且没有任何翻页，
+           命中 200 篇时用户只能「自己缩小条件或手填篇号」，等于把结果藏起来不说。 -->
+      <div v-if="total" class="cp-pager">
+        <span class="dim">共命中 {{ total }} 篇，第 {{ page }} / {{ pages }} 页</span>
+        <button type="button" class="mini" :disabled="page <= 1" @click="search(page - 1)">上一页</button>
+        <button type="button" class="mini" :disabled="page >= pages" @click="search(page + 1)">下一页</button>
+      </div>
       <p v-if="err" class="cp-err">✗ {{ err }}</p>
     </div>
 
@@ -42,24 +49,26 @@
       <h3>② 谱书体式 <small class="dim">（谱库共 {{ tuneCount }} 个词牌；当前作品词牌：{{ res.cipai }}）</small></h3>
       <p v-if="res.status !== 'ok'" class="cp-err">该词牌未在谱库中（可换一篇，或看下方候选）。</p>
       <template v-else>
-        <!-- ★ 2026-10-10（竞品图2 对齐）：体式分「句数相合 / 其它」两组，各带来源头 -->
+        <!-- ★ 2026-10-10（竞品图2 对齐）：体式分「句数相合 / 其它」两组，各带来源头；
+             体的唯一标识用 **form_key**（谱书|体号）——`form` 会跨谱书撞号。 -->
         <h4 v-if="formsMatched.length" class="dim">匹配的词谱（句数相合）</h4>
         <div class="cp-forms">
-          <button v-for="f in formsMatched" :key="f.form" type="button"
-                  :class="{ on: curForm === f.form }" @click="pickForm(f.form)">
-            {{ f.authority || '体' }} {{ f.form }} · {{ f.n_lines }}句/{{ f.n_chars }}字
+          <button v-for="f in formsMatched" :key="f.form_key" type="button"
+                  :class="{ on: curForm === f.form_key }" @click="pickForm(f.form_key)">
+            {{ f.authority || '体' }} 体{{ f.form }} · {{ f.n_lines }}句/{{ f.n_chars }}字
             <small v-if="f.header" class="dim">· {{ String(f.header).slice(0, 14) }}</small>
           </button>
         </div>
         <h4 v-if="formsOther.length" class="dim">其它词谱</h4>
         <div class="cp-forms">
-          <button v-for="f in formsOther" :key="f.form" type="button"
-                  :class="{ on: curForm === f.form }" @click="pickForm(f.form)">
-            {{ f.authority || '体' }} {{ f.form }} · {{ f.n_lines }}句/{{ f.n_chars }}字
+          <button v-for="f in formsOther" :key="f.form_key" type="button"
+                  :class="{ on: curForm === f.form_key }" @click="pickForm(f.form_key)">
+            {{ f.authority || '体' }} 体{{ f.form }} · {{ f.n_lines }}句/{{ f.n_chars }}字
             <small v-if="f.header" class="dim">· {{ String(f.header).slice(0, 14) }}</small>
           </button>
         </div>
         <p v-if="formWhy" class="dim">自动选中理由：{{ formWhy }}</p>
+        <p v-if="formNote" class="cp-warn">⚠ {{ formNote }}</p>
         <p class="dim">本体来源：{{ curFormHeader || '—' }}</p>
       </template>
     </div>
@@ -71,7 +80,7 @@
         <span><i class="sw match"></i>对（与规范一致）</span>
         <span><i class="sw mismatch"></i>异（与规范不符）</span>
         <span><i class="sw any"></i>中（谱书未限定，不判对错）</span>
-        <span class="dim">　句末标记「韵」= 该句押韵位（据谱书例词标注）</span>
+        <span class="dim">　句末标记取自谱书（韵 / 句 / 叠韵 / 换韵…），不是一律「韵」</span>
       </div>
       <div class="cp-stat">
         <span>字数 {{ s.n_cells }}</span><span class="ok">对 {{ s.n_match }}</span>
@@ -80,8 +89,13 @@
         <span v-if="(s.missing_lines || []).length" class="bad">缺句 {{ s.missing_lines.join('、') }}</span>
         <span v-if="(s.extra_lines || []).length" class="bad">多句 {{ s.extra_lines.join('、') }}</span>
       </div>
+      <!-- ★ 2026-10-10：对齐失败的句**必须点名**，否则「异」会被误读成「出律」 -->
+      <p v-if="s.n_unaligned_lines" class="cp-warn">
+        ⚠ 有 {{ s.n_unaligned_lines }} 句**字数与谱书不一致**（详见各句下方提示）：
+        这类句子不构成“出律”结论，只是作品与所比体式的字数不同。
+      </p>
       <div v-for="row in rows" :key="row.line" class="cp-line">
-        <div class="cp-no">第 {{ row.line + 1 }} 句<span v-if="row.ending" class="tag">韵</span>
+        <div class="cp-no">第 {{ row.line + 1 }} 句<span v-if="row.ending_label" class="tag">{{ row.ending_label }}</span>
           <small class="dim">例：{{ row.example || '—' }}</small></div>
         <!-- ★ 2026-10-10（竞品图2 对齐）：**逐字竖排三行**——原字 / 谱书规范 / 作品实际，
              每列一字上下对齐；实际行与规范不符的字标红。 -->
@@ -102,6 +116,7 @@
           作品平仄 {{ row.poem_pz || '—' }}　｜　规范 {{ row.rule_tones || '—' }}
           <span v-if="row.n_chars_poem !== row.n_chars_rule" class="bad">（字数 {{ row.n_chars_poem }} vs 谱 {{ row.n_chars_rule }}）</span>
         </div>
+        <div v-if="row.align_warn" class="cp-warn">⚠ {{ row.align_warn }}</div>
       </div>
       <p class="cp-src">来源声明：{{ res.source_note }}</p>
     </div>
@@ -132,13 +147,19 @@ const pid = ref('');
 const hits = ref([]);
 const res = ref(null);
 const forms = ref([]);
-const curForm = ref(null);
+const curForm = ref(null);      // ★ 存 **form_key**（谱书|体号），不是裸体号——裸体号会跨谱书撞号
 const err = ref('');
 const tuneCount = ref(0);
+/* ★ 2026-10-10（词谱 UI 修复）：检索结果**真分页**（改前只取前 20 条、无翻页）。 */
+const total = ref(0);
+const page = ref(1);
+const size = 20;
+const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / size)));
 
 const rows = computed(() => (res.value && res.value.rows) || []);
 const s = computed(() => (res.value && res.value.summary) || {});
 const formWhy = computed(() => (res.value && res.value.form_why) || '');
+const formNote = computed(() => (res.value && res.value.form_note) || '');
 /* 体式分组：句数与作品相合的排前（竞品「匹配的词谱 / 其它词谱」） */
 const formsMatched = computed(() => {
   const n = res.value && res.value.summary ? res.value.summary.n_lines_poem : null;
@@ -149,7 +170,7 @@ const formsOther = computed(() => {
   return (n == null) ? [] : forms.value.filter(f => f.n_lines !== n);
 });
 const curFormHeader = computed(() => {
-  const f = (forms.value || []).find(x => x.form === curForm.value);
+  const f = (forms.value || []).find(x => x.form_key === curForm.value);
   return f ? (f.header || f.source_url || '') : '';
 });
 
@@ -168,18 +189,21 @@ async function loadTunes() {
 }
 loadTunes();
 
-async function search() {
+async function search(p) {
   err.value = ''; hits.value = [];
-  const p = new URLSearchParams({ topk: '20' });
-  if (q.value.cipai) p.set('cipai', q.value.cipai);
-  if (q.value.author) p.set('author', q.value.author);
-  if (q.value.title) p.set('title', q.value.title);
+  const want = Math.max(1, p || 1);
+  const params = new URLSearchParams({ page: String(want), size: String(size) });
+  if (q.value.cipai) params.set('cipai', q.value.cipai);
+  if (q.value.author) params.set('author', q.value.author);
+  if (q.value.title) params.set('title', q.value.title);
   try {
-    const j = await call('/api/search?' + p.toString());
-    // `/api/search` 的结果在 `rows`（带分页；这里只取前 20 条供挑选）
-    hits.value = (j.rows || []).slice(0, 20);
-    if (!hits.value.length) err.value = '没有命中，换个词牌或放宽条件';
-  } catch (e) { err.value = String(e.message || e); }
+    const j = await call('/api/search?' + params.toString());
+    hits.value = (j.rows || []);
+    total.value = (typeof j.total === 'number') ? j.total : hits.value.length;
+    page.value = (typeof j.page === 'number') ? j.page : want;
+    if (!hits.value.length) err.value = (total.value
+      ? '这一页没有内容（可能已翻到末页）' : '没有命中，换个词牌或放宽条件');
+  } catch (e) { err.value = String(e.message || e); total.value = 0; }
 }
 
 function pick(h) { pid.value = h.pid; compareByPid(); }
@@ -193,14 +217,14 @@ async function compareByPid() {
     const j = await call('/api/cipu/compare?' + p.toString());
     res.value = j.result || null;
     if (!res.value) { err.value = '没有这一篇'; return; }
-    if (res.value.form) curForm.value = res.value.form.form;
+    if (res.value.form) curForm.value = res.value.form.form_key;
     const tj = await call('/api/cipu?tune=' + encodeURIComponent(res.value.tune || ''));
     forms.value = ((tj.result || {}).forms) || [];
     if (!forms.value.length && res.value.form) forms.value = [res.value.form];
   } catch (e) { err.value = String(e.message || e); }
 }
 
-async function pickForm(f) { curForm.value = f; await compareByPid(); }
+async function pickForm(k) { curForm.value = k; await compareByPid(); }
 
 function tip(c) {
   return `第 ${c.pos + 1} 字「${c.char}」：作品 ${c.pz || '—'}／规范 ${c.rule}` +
@@ -209,39 +233,54 @@ function tip(c) {
 </script>
 
 <style>
+/* ★ 2026-10-10（词谱 UI 修复）：**改用全站主题变量**，并**收口前缀**。
+   改前三个真缺陷：
+     ① 颜色写死（`--bd,#ddd`、`#dff0d8`、`#b00`…）：`--bd` 全站根本没定义，
+        于是永远用兜底灰；夜间模式下白底绿块与整站「纸墨朱红」格格不入；
+     ② **`.dim { color:#777 }` 是非 scoped 的裸类名**——它会**全局覆盖** core/ui.js 的 `.dim`
+        （`var(--ink2)`），把**所有页面**的次级文字染成死灰；
+     ③ `.cp-table` 用 `--bd` 而不是 `--line`，表格线与卡片描边不是一个色。
+   现在：全部走 `--line/--accent/--ok/--warn/--ink2/--r`，且 `.dim` 只在 `.cp` 内生效。 */
 .cp { max-width: 1080px; margin: 0 auto; padding: 12px; }
 .cp-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .cp-row input { width: 160px; }
 .cp-pid { width: 300px; }
+.cp .dim { color: var(--ink2); }          /* 收口：不再全局污染 */
 .cp-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-.cp-table th, .cp-table td { border-bottom: 1px solid var(--bd, #ddd); padding: 4px 6px; text-align: left; }
-.cp-table .num { text-align: right; }
-.cp-err { color: #b00; }
+.cp-table th, .cp-table td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; }
+.cp-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.cp-pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; }
+.cp-err { color: var(--warn); }
+.cp-warn { color: var(--accent2); background: var(--panel2); border-left: 3px solid var(--accent2);
+  padding: 4px 8px; border-radius: var(--r); font-size: 13px; margin: 6px 0; }
 .cp-forms { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
-.cp-forms button.on { font-weight: 600; border-color: var(--ac, #666); }
+.cp-forms button.on { font-weight: 600; border-color: var(--accent); color: var(--accent); }
 .cp-legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }
-.cp-legend .sw { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; }
-.sw.match, .cp-legend .sw.match { background: #dff0d8; border: 1px solid #9c9; }
-.sw.mismatch, .cp-legend .sw.mismatch { background: #f8d7da; border: 1px solid #c99; }
-.sw.any, .cp-legend .sw.any { background: #eee; border: 1px solid #bbb; }
+.cp-legend .sw { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px;
+  border-radius: 3px; }
+.sw.match, .cp-legend .sw.match { background: color-mix(in srgb, var(--ok) 22%, transparent);
+  border: 1px solid var(--ok); }
+.sw.mismatch, .cp-legend .sw.mismatch { background: color-mix(in srgb, var(--warn) 22%, transparent);
+  border: 1px solid var(--warn); }
+.sw.any, .cp-legend .sw.any { background: var(--panel2); border: 1px solid var(--line); }
 .cp-stat { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }
-.cp-stat .ok { color: #2a7; } .cp-stat .bad { color: #b33; }
-.cp-line { border-top: 1px solid var(--bd, #e5e5e5); padding: 8px 0; }
+.cp-stat .ok { color: var(--ok); } .cp-stat .bad { color: var(--warn); }
+.cp-line { border-top: 1px solid var(--line); padding: 8px 0; }
 .cp-no { font-size: 13px; margin-bottom: 4px; }
-.cp-no .tag { margin-left: 6px; padding: 0 4px; border: 1px solid #bbb; border-radius: 3px; font-size: 12px; }
+.cp-no .tag { margin-left: 6px; padding: 0 4px; border: 1px solid var(--line);
+  border-radius: 3px; font-size: 12px; color: var(--ink2); }
 .cp-grid { display: flex; flex-wrap: wrap; gap: 2px 0; margin: 4px 0; }
 .cp-col { display: flex; flex-direction: column; align-items: center; min-width: 26px; }
 .cp-col.extra { opacity: .55; }
-.cp-char { font-size: 19px; line-height: 1.4; }
-.cp-rulech { font-size: 13px; color: #555; }
-.cp-rulech.any { color: #999; }
-.cp-actual { font-size: 13px; }
-.cp-actual.match { color: #2a7; }
-.cp-actual.mismatch { color: #b33; font-weight: 600; }
-.cp-actual.any { color: #888; }
+.cp-char { font-family: var(--kai); font-size: 19px; line-height: 1.4; }
+.cp-rulech { font-size: 13px; color: var(--ink2); }
+.cp-rulech.any { color: var(--ink3, var(--ink2)); opacity: .8; }
+.cp-actual { font-size: 13px; font-family: var(--num); }
+.cp-actual.match { color: var(--ok); }
+.cp-actual.mismatch { color: var(--warn); font-weight: 600; }
+.cp-actual.any { color: var(--ink2); }
 .cp-meta { font-size: 12px; margin-top: 2px; }
-.cp-src { margin-top: 8px; font-size: 12px; color: #a60; }
-.off-note { color: #a60; }
-.dim { color: #777; }
+.cp-src { margin-top: 8px; font-size: 12px; color: var(--accent2); }
+.off-note { color: var(--accent2); }
 .mini { padding: 1px 6px; font-size: 12px; }
 </style>

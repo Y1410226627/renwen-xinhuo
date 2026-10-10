@@ -139,6 +139,55 @@ def main():
     ok('D6 歧义不猜（木兰花→候选列表）', canon3 is None and len(cands3) == 2,
        'cands=%s' % cands3)
 
+    # ---------- D7 2026-10-10 修复项（词谱 UI/逻辑缺陷的护栏） ----------
+    # ⑦-1 体的**唯一标识**：`form` 会跨谱书撞号，`form_key` 必须唯一（前端拿它当 key/选中判据）
+    allk, dup = [], []
+    for tune in C._load()['by_tune']:
+        ks = [C.form_brief(f)['form_key'] for f in C.forms_of(tune)]
+        allk += ks
+        if len(set(ks)) != len(ks):
+            dup.append(tune)
+    ok('D7 form_key 各词牌内唯一', not dup, '重复：%s' % dup[:5])
+    ok('D7 form_key 含谱书名与体号', all('|' in k for k in allk), allk[:3])
+
+    # ⑦-2 撞号必须**报歧义**，不许静默取第一个（长相思：钦定体1 与 龙榆生体1 同时存在）
+    _fs70 = C.forms_of('长相思')
+    _amb, _why70 = C._match_form(_fs70, 1)
+    _same = [f for f in _fs70 if f['form'] == 1]
+    if len(_same) > 1:
+        ok('D7 体号撞号 → 判歧义并要求用 form_key', _amb is None and '谱书' in _why70, _why70)
+    else:
+        ok('D7 体号唯一时可直接指定', _amb is not None, _why70)
+    _fk = C.form_brief(_fs70[0])['form_key']
+    _f70, _w70 = C._match_form(_fs70, _fk)
+    ok('D7 form_key 精确选体', _f70 is not None and _f70['seq'] == _fs70[0]['seq'], _w70)
+    _bad70, _wb70 = C._match_form(_fs70, '这不是体号')
+    ok('D7 非法体标识不抛异常、如实说明', _bad70 is None and bool(_wb70), _wb70)
+
+    # ⑦-3 句末标记**不再一律显示成「韵」**（谱书写的「句」「叠」「换平韵」要原样展示）
+    _end_seen = set()
+    for f in C._load()['forms']:
+        for x in f['rules']:
+            _end_seen.add(x['ending'])
+    _non_yun = sorted([e for e in _end_seen if e and e != '韵'])
+    if _non_yun:
+        ok('D7 非「韵」的句末标记原样保留（不误标为韵）',
+           C.ending_label(_non_yun[0]) == _non_yun[0],
+           '%r → %r' % (_non_yun[0], C.ending_label(_non_yun[0])))
+    ok('D7 空标记 → 空标签（前端不显示标记）', C.ending_label('') == '' and C.ending_label(None) == '')
+
+    # ⑦-4 对齐不一致**必须留下警告**（汉字数 / pz 长度 / 规则长度 三者不等时不静默错位）
+    _fake_form = {'rules': [{'tones': '平仄平', 'ending': '韵'}], 'sentences': ['一二三']}
+    _fake_poem = {'pid': 'x', 'lines': [{'idx': 0, 'text': '一二三', 'pz': '平仄'}]}
+    _r70 = C.compare(_fake_poem, _fake_form)
+    ok('D7 汉字数与 pz 不等 → 该行有 align_warn',
+       bool(_r70['rows'][0]['align_warn']) and _r70['summary']['n_unaligned_lines'] == 1,
+       repr(_r70['rows'][0]['align_warn']))
+    ok('D7 逐字对齐只取三者最小值（不错位越界）', len(_r70['rows'][0]['cells']) == 2,
+       len(_r70['rows'][0]['cells']))
+    ok('D7 每行带 ending_label 字段（前端不自行解释）',
+       'ending_label' in _r70['rows'][0] and _r70['rows'][0]['ending_label'] == '韵')
+
     print('=' * 64)
     print('词谱门禁：比对 %d 项，不符 %d 项' % (CMP[0], len(BAD)))
     for b in BAD:

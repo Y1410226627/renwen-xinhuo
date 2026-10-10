@@ -214,7 +214,17 @@ class Executor:
                                  % (type(e).__name__, e))
             self.failed_steps.append(self.problems[-1])
         # 1) 显式 steps（Planner 产出）
+        _fail = lambda: {'frame': f, 'dag': self.dag,
+                         'problems': [p for p in self.problems if p],
+                         'named': self.named, 'seconds': round(time.time() - t0, 4),
+                         'retrieve_report': self.retrieve_report,
+                         'state': 'EXECUTION_FAILED'}
+        # 0-b) ★ 2026-10-10（《关键核心现状》P1-7③）：计划级召回**自己记了失败**（如索引不可用）
+        #   时，必须立刻停手——旧版会继续跑 steps，把「未经语义筛选的 SQL 候选集」渲染成答案。
+        if self.failed_steps:
+            return _fail()
         for i, st in enumerate(self.plan.get('steps') or []):
+            _nf0 = len(self.failed_steps)
             try:
                 f = self._step(f, st)
             except Exception as e:                               # noqa: BLE001
@@ -222,21 +232,27 @@ class Executor:
                        % (i + 1, (st or {}).get('op'), type(e).__name__, e))
                 self.problems.append(msg)
                 self.failed_steps.append(msg)                    # ★ 关键步骤失败 → 状态 FAILED
-                return {'frame': f, 'dag': self.dag, 'problems': self.problems,
-                        'named': self.named, 'seconds': round(time.time() - t0, 4),
-                        'retrieve_report': self.retrieve_report,
-                        'state': 'EXECUTION_FAILED'}
+                return _fail()
+            # ★ P1-7③：**步骤内部记了失败也要立刻停** ——
+            #   旧版只在「抛异常」时 return；而 `_op_retrieve` 这类算子是**自己把失败写进
+            #   failed_steps 后返回原帧**，于是下游步骤会继续基于旧帧产出"看似正常"的答案。
+            if len(self.failed_steps) > _nf0:
+                return _fail()
         # 2) operation（旧 intent 的语义糖：extreme / agg / pair / locate）
         op = self.plan.get('operation')
         if op:
+            _nf1 = len(self.failed_steps)
             try:
                 f = self._operation(f, op)
             except Exception as e:                               # noqa: BLE001
                 msg = ('operation（%s）失败：%s: %s' % (op.get('kind'), type(e).__name__, e))
                 self.problems.append(msg)
                 self.failed_steps.append(msg)                    # ★ 同上
-        # 3) 意图兜底
-        f = self._by_intent(f)
+            if len(self.failed_steps) > _nf1:
+                return _fail()
+        # 3) 意图兜底（★ P1-7④：**失败状态下绝不执行**，否则会把部分结果包装成正常答案）
+        if not self.failed_steps:
+            f = self._by_intent(f)
         self.problems = [p for p in self.problems if p]
         state = ('EXECUTION_FAILED' if self.failed_steps
                  else ('EXECUTION_PARTIAL' if self.partial_reasons else 'EXECUTION_OK'))
@@ -309,31 +325,34 @@ class Executor:
                         why = (VI.why() or '未知原因')[:80]
                         self.problems.append('retrieve.vector 未执行：向量索引不可用（%s）' % why)
                         self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
-                                                     'n': 0, 'executed': False, 'why': why})
+                                                     'n': 0, 'executed': False, 'why': why,
+                                                     'level': 'plan'})
                         continue
                     hits = VI.search(q, topk=tk, allow=allow)
                     pids = [p for p, _s in hits]
                     self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
                                                  'n': len(pids), 'executed': True,
-                                                 'allow_n': len(allow)})
+                                                 'allow_n': len(allow), 'level': 'plan'})
                     if pids:
                         channels.append(pids)
                 except Exception as e:                   # noqa: BLE001
                     self.problems.append('retrieve.vector 执行失败：%r' % e)
                     self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
-                                                 'n': 0, 'executed': False, 'why': repr(e)})
+                                                 'n': 0, 'executed': False, 'why': repr(e),
+                                                 'level': 'plan'})
             elif mode == 'fts':
                 try:
                     pids = self._fts_in(allow, q, tk)
                     self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk,
                                                  'n': len(pids), 'executed': True,
-                                                 'allow_n': len(allow)})
+                                                 'allow_n': len(allow), 'level': 'plan'})
                     if pids:
                         channels.append(pids)
                 except Exception as e:                   # noqa: BLE001
                     self.problems.append('retrieve.fts 执行失败：%r' % e)
                     self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk,
-                                                 'n': 0, 'executed': False, 'why': repr(e)})
+                                                 'n': 0, 'executed': False, 'why': repr(e),
+                                                 'level': 'plan'})
         if not channels:
             # ★ 2026-10-09（第三轮审查 P0-2）：**召回失败/为空不得回落到原 SQL 候选集**——
             #   旧版 `return f` 会把「清词全量」当成「写秋景的作品」交给答案渲染。
@@ -610,8 +629,11 @@ class Executor:
                 spec.filters_tree = self.plan['filters']
             # ★ 2026-10-09（第三轮审查 P1-9）：**当前帧（已收窄）必须参与配对范围**——
             #   旧版只用根级条件重查，上一阶段的筛选会被越过（「先筛后配」的步骤失效）。
-            #   （≤30000 才带 ctx_pids：更大即视为"接近全库"，避免超 SQLite 变量上限。）
-            if f.kind == 'set' and f.pids and len(f.pids) <= 30000:
+            # ★ 2026-10-10（《关键核心现状》P1-4）：**取消 30000 篇的上限**。
+            #   改前 → `len(f.pids) <= 30000` 才带范围，更多就**静默丢掉**（理由是怕超 SQLite
+            #     变量上限）；但「30001 篇」同样是用户筛出来的集合，丢范围 = 在一个更大的集合里配对。
+            #   改后 → 无条件带范围；变量上限由 `retrieve._leaf_pid` 的**分块 OR** 解决。
+            if f.kind == 'set' and f.pids:
                 spec.ctx_pids = list(f.pids)
             spec = retrieve._finalize(spec)
             groups = pairing.find_pairs(self.conn, spec, limit=int(st.get('limit') or 3))
@@ -652,16 +674,27 @@ class Executor:
             try:
                 import vector_index as VI
                 if VI.available():
-                    _al = set(f.pids) if _restrict else None
-                    for _p, _i, _t, _s in VI.search_lines(q, topk=6):
-                        if _al is not None and _p not in _al:
-                            continue
+                    _al = sorted(f.pids) if _restrict else None
+                    # ⚠ 2026-10-10（《关键核心现状》P1-3）：**把候选范围交给索引，而不是搜完再过滤**。
+                    #   改前 → `search_lines(q, topk=6)` 先做**全局**近邻（只取 6 条），再逐条判断
+                    #     `pid in 当前帧`：若当前帧 100 篇里确有最匹配的句子，但全局前 6 名都在帧外，
+                    #     6 条会被全部丢掉 → 系统谎报「当前集合里没有命中」——把**排名截断**伪装成
+                    #     **没找到**。改后 → 直接传 `allow=当前帧篇号`，由索引在**候选集内**检索
+                    #     （`_restricted_search` 会自动扩大 k 直到凑够，不丢帧内正确答案）。
+                    for _p, _i, _t, _s in VI.search_lines(q, topk=6, allow=_al):
                         rows.append({'pid': _p, 'idx': (_i or 0) + 1, 'text': _t,
                                      'score': round(float(_s), 3)})
                         if len(rows) >= 3:
                             break
                     if rows:
-                        _via = '字面 0 句→句级向量兜底'
+                        _via = '字面 0 句→句级向量兜底（候选集内）'
+                    elif VI.lines_scan_truncated():
+                        # ★ P1-3：**没找到 ≠ 不存在**——扫描触顶时必须如实说是「未穷尽」，
+                        #   并把当前帧内仍有正确答案的可能性写进 problems。
+                        _via = '字面 0 句→句级向量兜底（**未穷尽**：已达扫描上限）'
+                        self.problems.append(
+                            'locate 句级召回未穷尽（已达扫描上限）：当前候选集内**仍可能有**'
+                            '更匹配的句子，本次不作「没有命中」的结论。')
             except Exception as e:                               # noqa: BLE001
                 self.problems.append('locate 向量兜底失败：%r' % e)
         pids = [r['pid'] for r in rows]
@@ -909,23 +942,51 @@ class Executor:
             try:
                 import vector_index as VI
                 if not VI.available():
-                    self.problems.append('步骤 retrieve(vector)：索引不可用（%s）' % VI.why())
+                    _why = (VI.why() or '未知原因')[:80]
+                    self.problems.append('步骤 retrieve(vector)：索引不可用（%s）' % _why)
                     self.failed_steps.append(self.problems[-1])
+                    # ★ P0-2：失败也要**进报告**（与计划级 retrieve 同一形态），否则上游
+                    #   `semantic_used` 会认为「本轮没有语义召回」→ 把失败当精确。
+                    self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk, 'n': 0,
+                                                 'executed': False, 'why': _why,
+                                                 'allow_n': len(allow), 'level': 'step'})
                     return self._mk(Frame(self.dag, 'set', [], note='retrieve_failed'),
                                     'retrieve.vector', f, '', time.time() - t0)
                 pids = [p for p, _s in VI.search(q, topk=tk, allow=allow)]
+                self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk,
+                                             'n': len(pids), 'executed': True,
+                                             'allow_n': len(allow), 'level': 'step'})
             except Exception as e:                               # noqa: BLE001
                 self.problems.append('步骤 retrieve(vector) 失败：%r' % e)
                 self.failed_steps.append(self.problems[-1])
+                self.retrieve_report.append({'mode': 'vector', 'q': q, 'topk': tk, 'n': 0,
+                                             'executed': False, 'why': repr(e),
+                                             'allow_n': len(allow), 'level': 'step'})
                 return self._mk(Frame(self.dag, 'set', [], note='retrieve_failed'),
                                 'retrieve.vector', f, '', time.time() - t0)
         elif mode == 'fts':
-            pids = self._fts_in(allow, q, tk)
+            try:
+                pids = self._fts_in(allow, q, tk)
+                self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk,
+                                             'n': len(pids), 'executed': True,
+                                             'allow_n': len(allow), 'level': 'step'})
+            except Exception as e:                               # noqa: BLE001
+                self.problems.append('步骤 retrieve(fts) 失败：%r' % e)
+                self.failed_steps.append(self.problems[-1])
+                self.retrieve_report.append({'mode': 'fts', 'q': q, 'topk': tk, 'n': 0,
+                                             'executed': False, 'why': repr(e),
+                                             'allow_n': len(allow), 'level': 'step'})
+                return self._mk(Frame(self.dag, 'set', [], note='retrieve_failed'),
+                                'retrieve.fts', f, '', time.time() - t0)
         else:
             self.problems.append('步骤 retrieve：未知 mode %r' % mode)
             self.failed_steps.append(self.problems[-1])
             return f
-        return self._mk(Frame(self.dag, 'set', pids, note='retrieve.%s' % mode),
+        # ★ 2026-10-10（P0-3）：**成功但 0 命中**必须是「未召回到」而不是「确切的空」——
+        #   `note='retrieve_empty'` 让上层据此判为非穷尽/召回空，绝不落入 EXACT_EMPTY。
+        #   （以前这里返回 `note='retrieve.vector'` 的空集，语义上与「条件命中 0 篇」无法区分。）
+        _note = ('retrieve.%s' % mode) if pids else 'retrieve_empty'
+        return self._mk(Frame(self.dag, 'set', pids, note=_note),
                         'retrieve.%s' % mode, f,
                         '候选集（%d 篇）内召回 %d 篇' % (len(allow), len(pids)),
                         time.time() - t0)
@@ -1209,6 +1270,59 @@ def selftest(conn):
     rs = execute(conn, plan3)
     _chk('⑰ 纯 sql 计划零变化（无召回报告）', rs.get('retrieve_report'), [])
     _chk('⑰ 纯 sql 帧=过滤集', len(rs['frame'].pids), len(_qing))
+    # ══════════════════════════════════════════════════════════════════════
+    # ★ 2026-10-10（《关键核心现状》P1-7）：**算子状态契约**逐条验证。
+    #   「有 failed_steps 字段」≠「所有算子都遵守状态契约」——这里把五项契约写成断言：
+    #     ① 返回原帧（无法执行但也没坏）→ 不算失败；
+    #     ② 生成空帧（条件确实 0 命中）→ 不算失败；
+    #     ③ 某步失败后，下游步骤**不得**再基于旧帧产出「看似正常」的答案；
+    #     ④ 失败状态必须盖住 `_by_intent()` 的兜底（不许把部分结果包装成答案）；
+    #     ⑤ 计划级与步骤级召回必须用**同一套**报告/失败语义。
+    # ══════════════════════════════════════════════════════════════════════
+    # ① 返回原帧 ≠ 失败：`diff` 找不到参照集合时按契约返回原帧
+    _plan_a = QP.empty_plan()
+    _plan_a['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    _plan_a['steps'] = [{'op': 'limit', 'n': 3}, {'op': 'diff', 'with': '不存在的命名集'}]
+    _ra = execute(conn, _plan_a)
+    _chk('P1-7① 返回原帧不算失败（state 仍 OK）', _ra.get('state'), 'EXECUTION_OK')
+    _chk('P1-7① 返回原帧时帧内容未被清空', len(_ra['frame'].pids), 3)
+
+    # ② 空帧 ≠ 失败：条件确实 0 命中
+    _plan_b = QP.empty_plan()
+    _plan_b['intent'] = 'count'
+    _plan_b['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    _plan_b['steps'] = [{'op': 'filter',
+                         'filters': {'field': 'han_len', 'op': '>', 'value': 99999}},
+                        {'op': 'count'}]
+    _rb = execute(conn, _plan_b)
+    _chk('P1-7② 空帧不算失败（state 仍 OK）', _rb.get('state'), 'EXECUTION_OK')
+    _chk('P1-7② 空帧计数为 0（而不是报错）', _rb['frame'].value, 0)
+
+    # ③+④ 某步失败后：整体必须 EXECUTION_FAILED，且**下游不再执行**
+    _plan_c = QP.empty_plan()
+    _plan_c['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    _plan_c['steps'] = [{'op': 'retrieve', 'mode': 'bogus'}, {'op': 'count'}]
+    _rc = execute(conn, _plan_c)
+    _dag_ops_c = [n['op'] for n in _rc['dag'].to_list()]
+    _chk('P1-7③ 关键步骤失败 → 整体 EXECUTION_FAILED', _rc.get('state'), 'EXECUTION_FAILED')
+    _chk('P1-7③ 失败后下游步骤未执行（DAG 无 count 节点）',
+         any(o == 'count' for o in _dag_ops_c), False)
+    _chk('P1-7④ 失败时 problems 非空（不静默）', bool(_rc.get('problems')), True)
+
+    # ⑤ 步骤级召回与计划级**同一套报告语义**：executed/n 字段必须齐备（含 0 命中）
+    _plan_d = QP.empty_plan()
+    _plan_d['filters'] = {'field': 'dynasty', 'op': '=', 'value': '清'}
+    _plan_d['steps'] = [{'op': 'limit', 'n': 5},
+                        {'op': 'retrieve', 'mode': 'fts', 'q': '绝无此词绝无此词', 'topk': 5}]
+    _rd = execute(conn, _plan_d)
+    _rep_d = [x for x in (_rd.get('retrieve_report') or []) if x.get('mode') == 'fts']
+    _chk('P1-7⑤ 步骤级召回写入 retrieve_report', bool(_rep_d), True)
+    _chk('P1-7⑤ 步骤级报告带 executed/n/level（同一套语义）',
+         bool(_rep_d) and set(('executed', 'n', 'level')) <= set(_rep_d[0]), True)
+    _chk('P1-7⑤ 召回 0 命中不算失败（由上层判非穷尽）', _rd.get('state'), 'EXECUTION_OK')
+    _chk('P1-7⑤ 0 命中帧标 retrieve_empty（与"条件空集"区分）',
+         _rd['frame'].note, 'retrieve_empty')
+
     print('自检：%s' % ('全部通过' if ok_all else '存在失败'))
     return ok_all
 
