@@ -30,7 +30,9 @@ function blockHtml(b) {
     + '<div class="m">' + b.sent_n + ' 句 / ' + b.han_len + ' 字，平 ' + b.ping + '、仄 ' + b.ze
     + '，仄声比例 ' + b.ze_ratio + '%，声情 ' + U.esc(b.scene)
     + (b.n_match ? ('｜命中条件的句：' + b.n_match + ' 句') : '')
-    + '｜出处 ' + U.esc(b.pid) + '</div>'
+    // 2026-10-10（P2-1 引用环）：source_note 优先（个人作品块用它标明「个人录入」）；
+    //   语料块无此字段，回落到 pid，零回归。
+    + '｜出处 ' + U.esc(b.source_note || b.pid) + '</div>'
     + (rows ? '<table><tr><th>句</th><th>原文</th><th>平仄（逐字）</th><th>句脚</th></tr>' + rows + '</table>' : '')
     + '</div>';
 }
@@ -68,6 +70,9 @@ function askHtml(j) {
       + (_np ? ('（' + U.esc(_np) + '）') : '') + '。</div>';
   }
   h += (j.blocks || []).map(blockHtml).join('');
+  // 2026-10-10（P2-1 引用环）：个人作品证据块以独立键 personal_evidence 到达
+  //   （不进 blocks、不进 set_check），这里追加渲染，与语料证据同版式。
+  h += (j.personal_evidence || []).map(blockHtml).join('');
   return h;
 }
 

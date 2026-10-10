@@ -36,6 +36,11 @@ sys.path.insert(0, os.path.join(ROOT, 'solve'))
 # ⚠ 2026-10-09：快照隔离（功能 1）——本门禁会跑 q_ask，而 q_ask 现在会落「冻结快照」；
 #   指向临时目录，避免污染真实 data/snapshots/（必须在 import serve 之前设置）。
 os.environ.setdefault('LVC_SNAPSHOT_DIR', tempfile.mkdtemp(prefix='lvc_snap_gate_'))
+# ⚠ 2026-10-10（P2-1）：研究库隔离——本门禁 personal 端点用例会写研究库；
+#   指向临时文件，避免污染真实 data/research.db（必须在 import serve 之前设置）。
+_LVC_RESEARCH_TMP = os.path.join(
+    tempfile.mkdtemp(prefix='lvc_research_gate_'), 'research.db')
+os.environ.setdefault('LVC_RESEARCH_DB', _LVC_RESEARCH_TMP)
 
 import serve as S                        # noqa: E402
 import aggregate as AGG                  # noqa: E402
@@ -247,6 +252,27 @@ def main():
     ok('解析接口：longest_seq 指向的句长 == longest_len',
        (not _ls) or all(pj['lines'][i - 1]['han_len'] == pj['longest_len'] for i in _ls),
        '%s / longest_len=%s' % (_ls, pj['longest_len']))
+
+    # ---------- 六-b、personal:<n> 端点（P2-1 个人作品解析） ----------
+    # 写一行个人作品到临时研究库，走 q_parse('personal:<id>') 解析（绝不查 corpus.db）。
+    import research as _RSCH
+    _rc = _RSCH.connect(_LVC_RESEARCH_TMP)
+    _wtest = _RSCH.add_personal_work(_rc, 'P21接口验证', '风急天高猿啸哀，渚清沙白鸟飞回。',
+                                     author='P21', client_token='tok-api-p21')
+    _pid_p = 'personal:%d' % _wtest['work_id']
+    _pp = S.q_parse(_pid_p)
+    ok('personal 解析：无 error 键', 'error' not in _pp, repr(_pp.get('error')))
+    ok('personal 解析：pid 前缀正确', _pp.get('pid') == _pid_p, repr(_pp.get('pid')))
+    ok('personal 解析：dynasty 为空', _pp.get('dynasty') == '')
+    ok('personal 解析：sent_n 与 lines 行数一致',
+       _pp.get('sent_n') == len(_pp.get('lines') or []),
+       '%s vs %d' % (_pp.get('sent_n'), len(_pp.get('lines') or [])))
+    ok('personal 解析：每句 pz 长度 = han_len',
+       all(len(L['pz']) == L['han_len'] for L in (_pp.get('lines') or [])))
+    # 不存在的 personal pid 返回 error（不是 500 异常）
+    _pn = S.q_parse('personal:99999')
+    ok('personal 解析：不存在 id 返回 error', 'error' in _pn, repr(_pn.get('error')))
+    _rc.close()
 
     # ---------- 七、流式问答（SSE）：「答案先到」契约（本地桩，不联网） ----------
     import time as _time

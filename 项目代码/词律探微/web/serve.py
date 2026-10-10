@@ -954,6 +954,52 @@ def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
     return out
 
 
+def _split_personal_pids(pids):
+    """把 pid 集拆成「语料 pid」与「个人作品 pid」两路（P2-1 引用环）。
+
+    `personal:<n>` 前缀 = 研究库个人录入。它**绝不能**进语料问答链（`ASK.answer` 的
+    ctx_pids）或集合身份校验（`verify_result` 会把「不在语料命中集内」的 pid 判成
+    「结果集合与条件不符 → FAILED」）——这里把它们单独拆出来，语料 pid 原样继续走原链。
+    """
+    pids = list(pids or [])
+    personal = [p for p in pids if isinstance(p, str) and p.startswith('personal:')]
+    corpus = [p for p in pids if not (isinstance(p, str) and p.startswith('personal:'))]
+    return corpus, personal
+
+
+def _personal_evidence(personal_pids):
+    """把「个人作品 pid 集」转成**证据块**（字段与 `evidence.poem_block` 同形，供前端 `blockHtml` 渲染）。
+
+    返回 `[block, …]`（研究库不存在 / 某篇不存在时跳过该篇，不抛异常、不影响语料主链）。
+    每块带 `eid`/`source_note`，来源如实标「个人录入，非交付语料」（红线：不得冒充语料）。
+    """
+    if not personal_pids:
+        return []
+    rc = get_research_conn_ro()
+    if rc is None:
+        return []
+    blocks = []
+    for i, p in enumerate(personal_pids):
+        try:
+            wid = int(str(p).split(':', 1)[1])
+            w = RSRCH.analyze_work(rc, wid)
+        except Exception:                                   # noqa: BLE001
+            continue
+        blocks.append({
+            'eid': 'P%d' % (i + 1),
+            'pid': w['pid'], 'dynasty': '', 'author': w.get('author') or '',
+            'title': w.get('title'), 'cipai': w.get('cipai') or '',
+            'sent_n': w.get('sent_n'), 'han_len': w.get('han_len'),
+            'ping': w.get('ping'), 'ze': w.get('ze'),
+            'ze_ratio': w.get('ze_ratio'), 'scene': w.get('scene'),
+            'lines': [{'idx': L.get('idx'), 'text': L.get('text'),
+                       'pz': L.get('pz'), 'tail': L.get('tail')} for L in (w.get('lines') or [])],
+            'source_note': '研究库个人录入 #%d（个人录入，非交付语料）' % wid,
+            'personal': True,
+        })
+    return blocks
+
+
 def _result_pids_of(out):
     """从返回体取「结果里给出的 pid 集」：优先显式 `pid`（第 N 名等），否则 `blocks[].pid`。"""
     if out.get('pid'):
@@ -1210,6 +1256,9 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
     resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
     _fb_pids = _split_ctx_pids(ctx_pids)                  # 前端兜底（≤200）
     ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
+    # ⚠ 2026-10-10（P2-1 引用环）：把 `personal:<n>` 拆出去——不进语料问答链、不进 set_check，
+    #   只在返回体里以**独立键** `personal_evidence` 附证据块（前端 ask.js 渲染同形块）。
+    pids_v, _personal_pids = _split_personal_pids(pids_v)
     # ② 独立再理解一次（取 spec 供复核；见 _derive_understanding 的代价声明）
     spec, note = _derive_understanding(q, parse, client, policy, ctx_v, pids_v)
     # ⭐ 2026-10-09（主人实测）：「内容/情感类问题」「开放提问」或「问句含未理解片段」
@@ -1233,6 +1282,10 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
                        'from_session': bool(cinfo.get('used_context'))}
     # ④ 集合身份校验 + 未理解状态
     _attach_checks(out, conn, spec, note, _result_pids_of(out), agg_result=out.get('agg'))
+    # ⚠ 2026-10-10（P2-1 引用环）：个人作品证据块以**独立键**附加（不进 set_check / 会话存储）。
+    _pe = _personal_evidence(_personal_pids)
+    if _pe:
+        out['personal_evidence'] = _pe
     # ⑤ 会话落盘（完整集合，供下一轮指代）
     turn = _store_turn(session, q, spec, out, _result_pids_of(out))
     out['sid'] = (session.sid if session is not None else (sid or ''))
@@ -1304,6 +1357,9 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
             _fb_pids = _split_ctx_pids(ctx_pids)          # 前端兜底（≤200）
             ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
+            # ⚠ 2026-10-10（P2-1 引用环，与 q_ask 同一纪律）：personal pid 拆出去，
+            #   不进语料问答链 / set_check，只在 engine / final 里以独立键附证据块。
+            pids_v, _personal_pids = _split_personal_pids(pids_v)
             emit('status', {'text': '正在理解问句…',
                             'model': (client.name if client and client.available() else None)})
             # ② 独立再理解一次（取 spec 供 set_check / understanding_status）
@@ -1321,6 +1377,9 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
                 eng['ctx_pids'] = dict(_cp)
                 _attach_checks(eng, conn, spec, note, _result_pids_of(eng),
                                agg_result=eng.get('agg'))
+                _pe = _personal_evidence(_personal_pids)   # 独立键，不进 set_check
+                if _pe:
+                    eng['personal_evidence'] = _pe
                 emit('engine', eng)
 
             # ⚠ 2026-10-06 修（P1-29）：不再持全局锁调用 ASK.answer（含 LLM）。
@@ -1336,6 +1395,9 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             fin['ctx_pids'] = dict(_cp)
             # ③ 集合身份校验 + 未理解状态；④ 会话落盘（完整集合，供下一轮指代）
             _attach_checks(fin, conn, spec, note, _result_pids_of(fin), agg_result=fin.get('agg'))
+            _pe = _personal_evidence(_personal_pids)   # 独立键，不进 set_check / 会话存储
+            if _pe:
+                fin['personal_evidence'] = _pe
             turn = _store_turn(session, q, spec, fin, _result_pids_of(fin))
             fin['sid'] = (session.sid if session is not None else (sid or ''))
             if turn is not None:
@@ -1393,6 +1455,17 @@ def _sse(kind, payload):
 
 
 def q_parse(pid):
+    # ⚠ 2026-10-10（P2-1）：`personal:<n>` 前缀 = **个人作品**（研究库录入）。
+    #   走 `research.analyze_work`（与建库同一引擎、同一口径），**绝不查 corpus.db**
+    #   （那是只读交付语料）。解析页深链 `parse.html?pid=personal:<n>` 由此生效，前端零改动。
+    if isinstance(pid, str) and pid.startswith('personal:'):
+        _rc = get_research_conn_ro()
+        if _rc is None:
+            return {'error': '没有这一篇：%s（研究库不存在）' % pid}
+        try:
+            return RSRCH.analyze_work(_rc, pid[len('personal:'):])
+        except ValueError as e:
+            return {'error': str(e)}
     c = get_conn()
     with LOCK:
         row = c.execute('SELECT * FROM poems WHERE pid=?', (pid,)).fetchone()
@@ -1752,6 +1825,27 @@ class H(BaseHTTPRequestHandler):
                 # ★ 2026-10-10（词谱修复）：`form` 原样透传（可为 `form_key`，如「钦定词谱|1」）。
                 #   旧版 `_num(..., int)` 会把 form_key 强制成 None，于是"按谱书+体号精确选体"
                 #   这条路根本走不通（前端只能退化成数字体号，撞号时还会选错）。
+                # ⚠ 2026-10-10（P2-1）：`personal:<n>` 前缀 = 个人作品（研究库录入）。
+                #   走 `research.analyze_work` 组 poem → `CIPU.compare_poem`（与语料库同一对照逻辑）。
+                if g('pid').startswith('personal:'):
+                    _rc = get_research_conn_ro()
+                    if _rc is None:
+                        return self._send({'error': {'code': 'NOT_FOUND',
+                                                     'message': '没有这一篇：%s（研究库不存在）' % g('pid')}},
+                                          code=404)
+                    try:
+                        _work = RSRCH.analyze_work(_rc, g('pid')[len('personal:'):])
+                    except ValueError:
+                        return self._send({'error': {'code': 'NOT_FOUND',
+                                                     'message': '没有这一篇：%s' % g('pid')}},
+                                          code=404)
+                    res = CIPU.compare_poem(g('pid'),
+                                            {'pid': _work['pid'], 'author': _work['author'],
+                                             'title': _work['title'], 'cipai': _work['cipai'],
+                                             'lines': _work['lines']},
+                                            tune=g('tune') or None,
+                                            form=(g('form') or None))
+                    return self._send({'ok': True, 'result': res})
                 res = CIPU.compare_pid(get_conn(), g('pid'),
                                        tune=g('tune') or None,
                                        form=(g('form') or None))

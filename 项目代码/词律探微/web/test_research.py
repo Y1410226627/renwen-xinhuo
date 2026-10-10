@@ -480,6 +480,39 @@ def main():
         expect = _hl.sha256(('%d|%d|%s|%s' % (n_p, n_l, s_h, mx)).encode('utf-8')).hexdigest()[:16]
         ok('C18 语料指纹=独立复算（同式同值）', SNAP.fingerprint()['corpus'] == expect)
 
+        # ---------- C19 个人作品声律解析（P2-1）：与独立引擎逐字段一致 ----------
+        from pronounce import Pronouncer as _Pr2, default_overrides_path as _dop2
+        from prosody import Engine as _Eng2
+        _HAN2 = re.compile('[\u3400-\u4dbf\u4e00-\u9fff]')
+        _CONTENT_C19 = '风急天高猿啸哀，渚清沙白鸟飞回。'
+        wC = RS.add_personal_work(conn, 'C19验证', _CONTENT_C19,
+                                  author='C19', client_token='tok-c19')
+        outC = RS.analyze_work(conn, wC['work_id'])
+        ok('C19 pid 前缀 personal:<n>', outC['pid'] == 'personal:%d' % wC['work_id'],
+           outC['pid'])
+        ok('C19 dynasty 为空（个人录入无朝代）', outC['dynasty'] == '')
+        ok('C19 author 与录入一致', outC['author'] == 'C19', outC['author'])
+        _eng2 = _Eng2(_Pr2(_dop2()))
+        _sents2, _pzs2 = _eng2.lines(_CONTENT_C19)
+        ok('C19 sent_n = 独立引擎句数', outC['sent_n'] == len(_sents2),
+           '%d vs %d' % (outC['sent_n'], len(_sents2)))
+        ok('C19 lines 行数与独立引擎一致', len(outC['lines']) == len(_sents2))
+        for _i, (_L, _s, _pz) in enumerate(zip(outC['lines'], _sents2, _pzs2)):
+            ok('C19 lines[%d].text 一致' % _i, _L['text'] == _s,
+               repr(_L['text']) + ' vs ' + repr(_s))
+            ok('C19 lines[%d].pz 一致' % _i, _L['pz'] == _pz,
+               repr(_L['pz']) + ' vs ' + repr(_pz))
+            ok('C19 lines[%d].han_len = len(pz)' % _i, _L['han_len'] == len(_pz))
+            _hans2 = _HAN2.findall(_s)
+            ok('C19 lines[%d].tail = 最后汉字' % _i,
+               _L['tail'] == (_hans2[-1] if _hans2 else ''))
+        # 不存在的 work_id 必须抛 ValueError（不静默返回）
+        try:
+            RS.analyze_work(conn, 99999)
+            ok('C19 不存在 work_id 抛 ValueError', False, '未抛异常')
+        except ValueError:
+            ok('C19 不存在 work_id 抛 ValueError', True)
+
     finally:
         try:
             conn.close()

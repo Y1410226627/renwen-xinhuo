@@ -1368,3 +1368,51 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
   「需先跑本地服务」的离线说明（与 ① 在线问答卡同套路，不显示假入口）。
 - **验收**：前端 `check-core` 213,972/0 ｜ `ssr-smoke` 31/0 ｜ `test_ui` 147/0；
   后端 `test_api` 150/0 ｜ `test_research` 89/0 ｜ `test_cipu` 33/0。
+
+## D47 ✅（2026-10-10）：P2-1 个人作品融入研读链（解析 / 词谱对照 / 引用 / 检索 四环打通）
+
+- **由来**：主人 P2 清单第 1 项——「让研究库录入的个人作品能被检索、解析、
+  词谱对照、问答引用」。此前个人作品只在研究库自己的页里可见，
+  无法进入任何研读链路（语料库 `corpus.db` 只读且无 dynasty 字段，个人库
+  `research.db` 的 `personal_works` 表也从未被解析/对照/问答侧触碰）。
+- **核心设计（方案 B：`pid=personal:<n>` 前缀路由）**：
+  前端一律只透传 pid；后端按 `personal:` 前缀把请求分流到研究库，
+  绝不查语料库。深链（`parse.html?pid=personal:<n>`、
+  `cipu.html?pid=personal:<n>`）天然支持，无需新路由。
+  个人作品没有朝代，`dynasty` 如实返回空串（不编造）。
+- **四环落点**：
+  1. **解析**：`solve/research.py` 新增 `analyze_work`（逐句拆句+拼音+句脚，
+     与独立引擎 `prosody.Engine` 同一实现，输出 `pid='personal:<n>'`）；
+     `web/serve.py` 的 `q_parse` 增加 personal 分支，不存在 id 返回 error 而非 500。
+  2. **词谱对照**：`solve/cipu.py` 把原 `compare_pid` 的对照逻辑抽成
+     `compare_poem(pid, poem_dict)`（纯函数，不碰库），`compare_pid` 退为薄壳
+     （行为不变，D8 测试双跑校验零回归）；serve 的 `/api/cipu/compare`
+     增加 personal 分支，从研究库取作品走 `compare_poem`。
+     词牌未收录时返回 `no_tune` 并带 `source_note`（来源红线：
+     明示「个人录入，非交付语料」）。
+  3. **引用（问答证据链）**：`web/serve.py` 新增 `_split_personal_pids`——
+     在 `_resolve_context` 之后立即把 personal pid 从 `pids_v` 拆出：
+     **不进** ASK.answer 的 ctx_pids、**不进** set_check、**不进**会话存储；
+     `_personal_evidence` 以独立键 `out['personal_evidence']` 附加
+     （`eid='P<n>'`、`personal:True`、字段与语料 evidence 块同形），
+     避免混入 `out['blocks']` 触发 `verify_result` 的 extra→FAILED。
+     前端：`core/ask.js` 的 `blockHtml` 出处行改为
+     `source_note || pid`（语料块无 source_note 字段，回落原路径，零回归）；
+     `askHtml` 与 `AskView` 的 `evidHtml` 各追加渲染 `personal_evidence`。
+  4. **检索**：`ParseView.vue` 在线模式新增「我的录入」区（`loadMyWorks`
+     拉研究库列表，onMounted 自动加载），每篇有「研读」按钮 →
+     `showDetail('personal:<n>')`；`ResearchView.vue` 作品表每行加「研读」链接
+     直达解析页深链。
+- **红线**：`corpus.db` 表结构与数据零改动；个人证据与语料证据
+  在数据结构上隔离（独立键 + source_note 标注），任何界面都不会
+  把个人录入冒充成交付语料。
+- **验收（新增 20 项断言）**：`test_research` C19（10 项：analyze_work
+  与独立引擎逐字段一致 + 不存在 id 抛 ValueError）→ **99/0**；
+  `test_cipu` D8（4 项：compare_pid 与 compare_poem 双跑一致 +
+  个人作品 no_tune 带 source_note）→ **37/0**；`test_api` 六-b（6 项：
+  personal 端点解析 + 不存在 id 返回 error；临时研究库隔离不污染真实库）
+  → **156/0**；`selftest` 235/0 ｜ `op_truth_check` 303/0 ｜ `qa_eval` 34/37 ｜
+  `nl_benchmark` 20/40（均符合已知基线）｜前端 `check-core` 213,972/0 ｜
+  `ssr-smoke` 31/0 ｜ `test_ui` 147/0 ｜ `test_render` 522,242/0 ｜
+  `verify_views` 43,459/0 ｜ `fixture_gate` 6/6 ｜ `check_conditions` FAIL 1
+  （已知基线「龘」句脚）。`build-all.mjs` 重建成功。

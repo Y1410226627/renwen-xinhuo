@@ -189,6 +189,16 @@ async function loadTunes() {
 }
 loadTunes();
 
+/* 2026-10-10（P2-1）：深链 `?pid=` 进入即自动对照（含 `personal:<n>` 个人作品）。
+ *   与解析页同一条约定：前端只透传 pid，后端按前缀分流（个人作品走研究库）。
+ *   SSR / 离线（file:）无 window，跳过——不读 URL 也不报错。 */
+if (isOnline) {
+  try {
+    const _up = new URLSearchParams(window.location.search).get('pid');
+    if (_up) { pid.value = _up; compareByPid(); }
+  } catch (e) { /* URL 解析异常忽略，回落到手填篇号 */ }
+}
+
 async function search(p) {
   err.value = ''; hits.value = [];
   const want = Math.max(1, p || 1);

@@ -274,7 +274,13 @@ function scrollBottom() {
 /* 把返回体拆成「结论」「证据」两段 —— 都调用 core 自己的渲染器（askHtml / blockHtml），
    不重写契约，只把证据块摆到单独一栏，让「结论 / 证据 / 理解详情」三段一眼分开。 */
 function conclHtml(j) { return AskApp.askHtml(Object.assign({}, j, { blocks: [] })); }
-function evidHtml(j) { return ((j && j.blocks) || []).map(AskApp.blockHtml).join(''); }
+/* 2026-10-10（P2-1 引用环）：个人作品证据块走独立键 personal_evidence（不进 blocks/set_check），
+   这里与语料 blocks 一起渲染到「证据」栏。 */
+function evidHtml(j) {
+  const b = ((j && j.blocks) || []).map(AskApp.blockHtml).join('');
+  const pe = ((j && j.personal_evidence) || []).map(AskApp.blockHtml).join('');
+  return b + pe;
+}
 
 /* 从返回体取「本轮命中的篇号」：优先显式 pid 列表，否则取每个证据块的 pid 字段
    （先读实际返回结构再写：/api/ask 的证据块里确有 pid）。

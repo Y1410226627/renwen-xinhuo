@@ -311,22 +311,23 @@ def _match_form(fs, form):
     return None, '无法识别的体标识：%r' % (form,)
 
 
-def compare_pid(conn, pid, tune=None, form=None):
-    """按作品 pid 出对照：自动匹配词牌与体（也可显式指定 `tune` / `form`）。
+def compare_poem(pid, poem, tune=None, form=None):
+    """对**一篇作品**出词谱对照（自动匹配词牌与体，也可显式指定 `tune` / `form`）。
 
-    返回体一律带 `source_note`（红线）。词牌未收录 / 有歧义时如实返回 `status` 与候选。
+    `poem` 形态（与 `/api/parse` / 建库 lines 同形）：
+      `{'pid':…, 'author':…, 'title':…, 'cipai':…, 'lines': [{'idx','text','pz'…},…]}`
+    抽出来是为了**让个人作品也能走词谱对照**（P2-1）：语料库走 `compare_pid`（从 poems/lines
+    取行组 poem），个人作品走 `research.analyze_work`（组同一形态的 poem），两条路汇入这一处，
+    对照逻辑**只有一份**。返回体一律带 `source_note`（红线）。词牌未收录 / 有歧义时
+    如实返回 `status` 与候选。
     """
-    r = conn.execute('SELECT pid,author,cipai,title,raw FROM poems WHERE pid=?',
-                     (pid,)).fetchone()
-    if r is None:
-        return None
-    lines = [dict(x) for x in conn.execute(
-        'SELECT idx,text,pz FROM lines WHERE pid=? ORDER BY idx', (pid,))]
+    lines = poem.get('lines') or []
     n_chars = sum(len(_HAN_RE.findall(x.get('text') or '')) for x in lines)
-    name = (tune or r['cipai'] or '').strip()
+    cipai = poem.get('cipai') or ''
+    name = (tune or cipai).strip()
     canon, cands = resolve_tune(name)
     if canon is None:
-        return {'status': 'no_tune', 'pid': pid, 'cipai': r['cipai'], 'asked': name,
+        return {'status': 'no_tune', 'pid': pid, 'cipai': cipai, 'asked': name,
                 'candidates': cands, 'source_note': SOURCE_NOTE,
                 'available_tunes': [t['tune'] for t in list_tunes()],
                 'note': ('词牌「%s」不在谱库（当前收录 %d 个词牌）'
@@ -342,10 +343,25 @@ def compare_pid(conn, pid, tune=None, form=None):
         if str(form or '').strip() != '':
             form_note = '指定的体未能采用（%s）——本次按自动匹配给出：%s' % (why, _awhy)
         f, why = _auto, _awhy
-    res = compare({'pid': pid, 'author': r['author'], 'title': r['title'],
-                   'cipai': r['cipai'],
-                   'lines': lines}, f)
-    res.update({'status': 'ok', 'pid': pid, 'cipai': r['cipai'], 'tune': canon,
+    res = compare({'pid': pid, 'author': poem.get('author'), 'title': poem.get('title'),
+                   'cipai': cipai, 'lines': lines}, f)
+    res.update({'status': 'ok', 'pid': pid, 'cipai': cipai, 'tune': canon,
                 'form': form_brief(f), 'form_why': why, 'form_note': form_note,
                 'source_note': SOURCE_NOTE})
     return res
+
+
+def compare_pid(conn, pid, tune=None, form=None):
+    """按**语料库**作品 pid 出对照：从 poems/lines 取行组 poem，委托 `compare_poem`。
+
+    返回体一律带 `source_note`（红线）。词牌未收录 / 有歧义时如实返回 `status` 与候选。
+    """
+    r = conn.execute('SELECT pid,author,cipai,title FROM poems WHERE pid=?',
+                     (pid,)).fetchone()
+    if r is None:
+        return None
+    lines = [dict(x) for x in conn.execute(
+        'SELECT idx,text,pz FROM lines WHERE pid=? ORDER BY idx', (pid,))]
+    poem = {'pid': pid, 'author': r['author'], 'title': r['title'],
+            'cipai': r['cipai'], 'lines': lines}
+    return compare_poem(pid, poem, tune=tune, form=form)

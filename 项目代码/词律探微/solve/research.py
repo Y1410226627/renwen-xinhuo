@@ -31,6 +31,8 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from corpus import HAN_CLASS as _HAN_CLASS      # 汉字判定单一来源（与 pronounce/prosody 同口径）
+from pronounce import Pronouncer, default_overrides_path   # 个人作品解析共用同一注音器
+from prosody import Engine                          # 个人作品声律指标（与 build_corpus 同口径）
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PATH = os.path.join(_ROOT, 'data', 'research.db')
@@ -864,6 +866,78 @@ def list_personal_works(conn, state=None):
         args.append(state)
     sql += ' ORDER BY id DESC LIMIT 500'
     return [dict(r) for r in conn.execute(sql, args)]
+
+
+# --- 个人作品声律解析（与 build_corpus.py 同一引擎、同一口径）
+# 背景（P2-1）：让「个人录入」的作品也能被解析 / 词谱对照 / 引用。
+# 关键纪律：
+#   · pid 用 `personal:<n>` 前缀（沿用本文件 L111 既有约定），与语料库 pid **物理隔离**——
+#     个人作品**绝不写入** data/corpus.db（那是只读交付语料，58,852 篇）。
+#   · 注音器 `Pronouncer` 模块级懒缓存（构造需读标定表，避免每次解析重读文件）；
+#     但 `Engine` **每次新建**——它的 `_lines_memo` 是「单条缓存」，多线程共享同一实例
+#     会把甲篇的切句结果串给乙篇（serve 是 ThreadingHTTPServer）。
+#   · `dynasty` 置空：personal_works 表**没有朝代字段**，不猜。
+#   · 返回体与 `/api/parse` 出口**同形**（19 个篇级键 + lines + raw），解析页 / 词谱对照 /
+#     问答引用链共用这一份，谁拿到都是同一口径。
+_PRON_CACHE = None
+
+
+def _pronouncer():
+    """注音器懒缓存（模块级单例）。"""
+    global _PRON_CACHE
+    if _PRON_CACHE is None:
+        _PRON_CACHE = Pronouncer(default_overrides_path())
+    return _PRON_CACHE
+
+
+def _last_han(text):
+    """句脚字 = 该句**最后一个汉字**（与 build_corpus.last_han 同口径；无汉字给空串）。"""
+    m = _HAN_RE.findall(text or '')
+    return m[-1] if m else ''
+
+
+def analyze_work(conn, work_id):
+    """对一篇**个人作品**做声律解析（与建库同一引擎、同一口径）。
+
+    返回体与 `/api/parse` 出口同形（19 个篇级键 + lines + raw）：
+      · `pid` = `personal:<n>`（前缀标识，供解析页深链 / 词谱对照 / 问答引用分流）；
+      · `dynasty` 置空（个人录入无朝代字段，不猜）；
+      · `longest_seq` 直接给**真数组**（空篇为 `[]`），省去调用方的字符串再解析；
+      · `lines` 每行 `{idx,text,han_len,ping,ze,pz,tail}`，`han_len = len(pz)`（与建库同口径）；
+      · 末尾对该篇（`personal:<n>`）套用「人工读音裁定」（与语料库同等待遇，无裁定原样返回）。
+    作品不存在时抛 ValueError（由调用方转成友好错误）。
+    """
+    w = conn.execute('SELECT * FROM personal_works WHERE id=?', (int(work_id),)).fetchone()
+    if w is None:
+        raise ValueError('个人作品 %s 不存在' % work_id)
+    pid = 'personal:%d' % int(w['id'])
+    content = w['content'] or ''
+    eng = Engine(_pronouncer())
+    sents, pzs = eng.lines(content)
+    h = eng.halves(content)
+    lg = eng.longest(content)
+    ratio = eng.ratio(content)
+    ld = eng.long_density(content)
+    scene = eng.scene_emotion(content)['转向']
+    lines = [{'idx': k, 'text': s, 'han_len': len(pz),
+              'ping': pz.count('平'), 'ze': pz.count('仄'), 'pz': pz,
+              'tail': _last_han(s)} for k, (s, pz) in enumerate(zip(sents, pzs))]
+    out = {
+        'pid': pid, 'dynasty': '', 'author': w['author'] or '',
+        'title': w['title'], 'cipai': w['cipai'] or '',
+        'sent_n': len(sents), 'han_len': ratio['总字'],
+        'ping': ratio['平'], 'ze': ratio['仄'], 'ze_ratio': ratio['仄声比例'],
+        'f_ratio': h['前段比例'], 'b_ratio': h['后段比例'],
+        'change': h['变化'], 'abs_change': h['绝对变幅'],
+        'longest_seq': [int(x) for x in lg['最长句序']],
+        'longest_len': lg['最长句字数'], 'threshold': ld['阈值'], 'scene': scene,
+        'raw': content, 'lines': lines,
+    }
+    _ls2, _adj = apply_pron_to_lines(conn, pid, lines)
+    if _adj:
+        out['lines'] = _ls2
+        out['pron_adjusted'] = _adj
+    return out
 
 
 # ---------------------------------------------------------------- 功能 13：批量导入（manifest + 批次对账）

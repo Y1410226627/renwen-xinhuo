@@ -79,6 +79,20 @@ const orderBy = ref('');
 const cnt = ref(0);
 const lastHits = ref([]);        // 供导出 CSV
 let lastCond = {};
+/* 2026-10-10（P2-1 检索环）：我的录入（研究库个人作品，仅在线）——点「研读」走
+ *   `showDetail('personal:<n>')`（后端按前缀分流到研究库，不改语料库）。 */
+const myWorks = ref([]);
+const myWorksErr = ref('');
+const MY_STATE = { draft: '草稿', material_sample: '材料样例', source_matched: '已对上来源' };
+function myStateLabel(s) { return MY_STATE[s] || s || '—'; }
+async function loadMyWorks() {
+  if (!online) { return; }
+  try {
+    const j = await api.works('');
+    myWorks.value = (j && j.result) || [];
+    myWorksErr.value = '';
+  } catch (e) { myWorksErr.value = String((e && e.message) || e); }
+}
 
 /* ⚠ 2026-10-08 精修（本轮交付）——把「状态」显式化，空态/加载态/错误态各有明确文案，
  *   不再让错误挤在成功元信息行里、也不出现「永远转圈」：
@@ -624,6 +638,7 @@ onMounted(() => {
   if (q0.q !== undefined) { cond.q = q0.q; }
   if (q0.size) { cond.size = q0.size; size.value = parseInt(q0.size, 10) || size.value; }
   run(1);
+  if (online) { loadMyWorks(); }
   if (q0.pid) { showDetail(q0.pid); }
 });
 </script>
@@ -671,6 +686,24 @@ onMounted(() => {
         <span v-if="nlSource" class="dim" style="flex:1 1 100%">
           {{ nlSource }}<template v-if="nlNote">　{{ nlNote }}</template>
         </span>
+      </div>
+      <!-- 2026-10-10（P2-1 检索环）：我的录入（研究库个人作品，仅在线）
+           点「研读」→ showDetail('personal:<n>')（后端按前缀分流到研究库，不改语料库） -->
+      <div v-if="online" style="margin-top:10px">
+        <div style="display:flex;align-items:baseline;gap:6px">
+          <b style="font-size:13px">我的录入</b>
+          <span class="dim" style="font-size:12px">（研究库·{{ myWorks.length }} 篇）</span>
+          <button class="ghost" style="font-size:12px" @click="loadMyWorks">刷新</button>
+        </div>
+        <p v-if="myWorksErr" class="dim" style="font-size:12px;margin:4px 0 0">{{ myWorksErr }}</p>
+        <p v-else-if="!myWorks.length" class="dim" style="font-size:12px;margin:4px 0 0">还没有个人录入（去「研究库」页添加）</p>
+        <div v-for="w in myWorks" :key="w.id" style="display:flex;align-items:center;gap:6px;font-size:13px;padding:2px 0">
+          <span class="dim">#{{ w.id }}</span>
+          <span>{{ w.title }}</span>
+          <span class="dim">{{ w.cipai || '—' }}</span>
+          <span class="badge" :class="{ ok: w.verification_state === 'source_matched' }">{{ myStateLabel(w.verification_state) }}</span>
+          <button class="ghost" style="font-size:12px" @click="showDetail('personal:' + w.id)">研读</button>
+        </div>
       </div>
     </div>
 

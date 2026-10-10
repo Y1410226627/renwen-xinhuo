@@ -191,6 +191,7 @@
               <td><span class="badge" :class="{ ok: w.verification_state === 'source_matched' }">{{ stateLabel(w.verification_state) }}</span></td>
               <td class="dim">{{ w.source || '—' }}</td>
               <td>
+                <a v-if="isOnline" class="mini" :href="'parse.html?pid=personal:' + w.id" title="进入逐字解析（pid=personal:<id>，走研究库，不改语料库）">研读</a>
                 <button type="button" class="mini" @click="editWork(w.id)">流转</button>
               </td>
             </tr>

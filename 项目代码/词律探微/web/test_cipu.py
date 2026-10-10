@@ -188,6 +188,41 @@ def main():
     ok('D7 每行带 ending_label 字段（前端不自行解释）',
        'ending_label' in _r70['rows'][0] and _r70['rows'][0]['ending_label'] == '韵')
 
+    # ---------- D8 2026-10-10 P2-1：compare_poem 重构 + 个人作品接入 ----------
+    # ① compare_pid（语料库）与 compare_poem（同一篇）结果必须一致（重构不改变行为）
+    _cc8 = sqlite3.connect(os.path.join(ROOT, 'data', 'corpus.db'))
+    _cc8.row_factory = sqlite3.Row
+    _pr8 = _cc8.execute(
+        "SELECT pid,author,cipai,title FROM poems WHERE cipai IS NOT NULL "
+        "AND cipai != '' LIMIT 1").fetchone()
+    if _pr8:
+        _pl8 = [dict(x) for x in _cc8.execute(
+            'SELECT idx,text,pz FROM lines WHERE pid=? ORDER BY idx', (_pr8['pid'],))]
+        _cc8.close()
+        _cc8b = sqlite3.connect(os.path.join(ROOT, 'data', 'corpus.db'))
+        _cc8b.row_factory = sqlite3.Row
+        _rp1 = C.compare_pid(_cc8b, _pr8['pid'])
+        _cc8b.close()
+        _poem8 = {'pid': _pr8['pid'], 'author': _pr8['author'], 'title': _pr8['title'],
+                  'cipai': _pr8['cipai'], 'lines': _pl8}
+        _rp2 = C.compare_poem(_pr8['pid'], _poem8)
+        ok('D8 compare_pid 与 compare_poem status 一致',
+           (_rp1 or {}).get('status') == (_rp2 or {}).get('status'),
+           '%s vs %s' % (( _rp1 or {}).get('status'), (_rp2 or {}).get('status')))
+        ok('D8 compare_pid 与 compare_poem summary 一致',
+           (_rp1 or {}).get('summary') == (_rp2 or {}).get('summary'),
+           repr((_rp1 or {}).get('summary'))[:80] + ' vs ' +
+           repr((_rp2 or {}).get('summary'))[:80])
+    else:
+        _cc8.close()
+    # ② 个人作品（词牌不在谱库）→ no_tune + source_note（红线）
+    _p8 = {'pid': 'personal:999', 'author': '测试', 'title': 'D8验证',
+           'cipai': '不存在词牌XYZ', 'lines': [{'idx': 0, 'text': '风急天高', 'pz': '平仄平平'}]}
+    _r8 = C.compare_poem('personal:999', _p8)
+    ok('D8 个人作品词牌未收录 → no_tune', _r8['status'] == 'no_tune',
+       repr(_r8.get('status')))
+    ok('D8 no_tune 时带 source_note（来源红线）', bool(_r8.get('source_note')))
+
     print('=' * 64)
     print('词谱门禁：比对 %d 项，不符 %d 项' % (CMP[0], len(BAD)))
     for b in BAD:
