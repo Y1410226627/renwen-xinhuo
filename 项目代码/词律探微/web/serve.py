@@ -955,16 +955,21 @@ def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
 
 
 def _split_personal_pids(pids):
-    """把 pid 集拆成「语料 pid」与「个人作品 pid」两路（P2-1 引用环）。
+    """把 pid 集拆成四路：「语料 / 个人作品 / 材料 / 事实」（P2-1+P2-2 引用环）。
 
-    `personal:<n>` 前缀 = 研究库个人录入。它**绝不能**进语料问答链（`ASK.answer` 的
+    `personal:<n>` = 研究库个人录入；`material:<n>` = 研究库文献摘录；
+    `fact:<n>` = 研究库研究事实。它们**绝不能**进语料问答链（`ASK.answer` 的
     ctx_pids）或集合身份校验（`verify_result` 会把「不在语料命中集内」的 pid 判成
     「结果集合与条件不符 → FAILED」）——这里把它们单独拆出来，语料 pid 原样继续走原链。
     """
     pids = list(pids or [])
     personal = [p for p in pids if isinstance(p, str) and p.startswith('personal:')]
-    corpus = [p for p in pids if not (isinstance(p, str) and p.startswith('personal:'))]
-    return corpus, personal
+    materials = [p for p in pids if isinstance(p, str) and p.startswith('material:')]
+    facts = [p for p in pids if isinstance(p, str) and p.startswith('fact:')]
+    corpus = [p for p in pids if not (isinstance(p, str)
+              and (p.startswith('personal:') or p.startswith('material:')
+                   or p.startswith('fact:')))]
+    return corpus, personal, materials, facts
 
 
 def _personal_evidence(personal_pids):
@@ -996,6 +1001,80 @@ def _personal_evidence(personal_pids):
                        'pz': L.get('pz'), 'tail': L.get('tail')} for L in (w.get('lines') or [])],
             'source_note': '研究库个人录入 #%d（个人录入，非交付语料）' % wid,
             'personal': True,
+        })
+    return blocks
+
+
+def _research_evidence(material_pids, fact_pids):
+    """把「研究资料/事实 pid 集」转成**证据块**（P2-2 引用环）。
+
+    材料块取 title/author/year/kind/latest_content/locator；
+    事实块取 statement/出处/引文/核验状态。
+    每块 eid 用 `M`/`F` 前缀（与语料 `E`、个人 `P` 区分），
+    `source_note` 如实标「研究库，非交付语料」。
+    返回 `[block, …]`（研究库不存在 / 某条不存在时跳过，不抛异常、不影响语料主链）。
+    """
+    if not material_pids and not fact_pids:
+        return []
+    rc = get_research_conn_ro()
+    if rc is None:
+        return []
+    blocks = []
+    for p in material_pids:
+        try:
+            mid = int(str(p).split(':', 1)[1])
+        except (ValueError, IndexError):
+            continue
+        try:
+            chain = RSRCH.get_material_chain(rc, mid)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if chain is None:
+            continue
+        mat = chain['material']
+        latest = chain['revisions'][-1] if chain['revisions'] else {}
+        content = latest.get('content') or ''
+        blocks.append({
+            'eid': 'M%d' % mid,
+            'pid': 'material:%d' % mid,
+            'kind': mat.get('kind') or 'book',
+            'title': mat.get('title') or '',
+            'author': mat.get('author') or '',
+            'year': mat.get('year') or '',
+            'source_url': mat.get('source_url') or '',
+            'locator': latest.get('locator') or '',
+            'content': content[:500],
+            'content_len': len(content),
+            'source_note': '研究库材料 #%d（研究库，非交付语料）' % mid,
+            'research': True,
+        })
+    for p in fact_pids:
+        try:
+            fid = int(str(p).split(':', 1)[1])
+        except (ValueError, IndexError):
+            continue
+        try:
+            row = rc.execute('SELECT * FROM facts WHERE id=?', (fid,)).fetchone()
+        except Exception:                                   # noqa: BLE001
+            continue
+        if row is None:
+            continue
+        f = dict(row)
+        src_parts = []
+        if f.get('material_id'):
+            src_parts.append('材料 #%d' % f['material_id'])
+        if f.get('poem_pid'):
+            src_parts.append('作品 %s' % f['poem_pid'])
+        blocks.append({
+            'eid': 'F%d' % fid,
+            'pid': 'fact:%d' % fid,
+            'statement': f.get('statement') or '',
+            'locator': f.get('locator') or '',
+            'evidence': f.get('evidence') or '',
+            'verified': bool(f.get('verified')),
+            'source_desc': '、'.join(src_parts) if src_parts else '',
+            'source_note': '研究库事实 #%d（研究库，非交付语料）' % fid,
+            'research': True,
         })
     return blocks
 
@@ -1256,9 +1335,10 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
     resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
     _fb_pids = _split_ctx_pids(ctx_pids)                  # 前端兜底（≤200）
     ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
-    # ⚠ 2026-10-10（P2-1 引用环）：把 `personal:<n>` 拆出去——不进语料问答链、不进 set_check，
-    #   只在返回体里以**独立键** `personal_evidence` 附证据块（前端 ask.js 渲染同形块）。
-    pids_v, _personal_pids = _split_personal_pids(pids_v)
+    # ⚠ 2026-10-10（P2-1/P2-2 引用环）：把 `personal:<n>` / `material:<n>` / `fact:<n>`
+    #   拆出去——不进语料问答链、不进 set_check，只在返回体里以**独立键**
+    #   `personal_evidence` / `research_evidence` 附证据块（前端 ask.js 渲染）。
+    pids_v, _personal_pids, _material_pids, _fact_pids = _split_personal_pids(pids_v)
     # ② 独立再理解一次（取 spec 供复核；见 _derive_understanding 的代价声明）
     spec, note = _derive_understanding(q, parse, client, policy, ctx_v, pids_v)
     # ⭐ 2026-10-09（主人实测）：「内容/情感类问题」「开放提问」或「问句含未理解片段」
@@ -1282,10 +1362,14 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
                        'from_session': bool(cinfo.get('used_context'))}
     # ④ 集合身份校验 + 未理解状态
     _attach_checks(out, conn, spec, note, _result_pids_of(out), agg_result=out.get('agg'))
-    # ⚠ 2026-10-10（P2-1 引用环）：个人作品证据块以**独立键**附加（不进 set_check / 会话存储）。
+    # ⚠ 2026-10-10（P2-1/P2-2 引用环）：个人作品 / 研究资料证据块以**独立键**附加
+    #   （不进 set_check / 会话存储；研究块无 lines/pz 字段，前端用 researchBlockHtml 渲染）。
     _pe = _personal_evidence(_personal_pids)
     if _pe:
         out['personal_evidence'] = _pe
+    _re = _research_evidence(_material_pids, _fact_pids)
+    if _re:
+        out['research_evidence'] = _re
     # ⑤ 会话落盘（完整集合，供下一轮指代）
     turn = _store_turn(session, q, spec, out, _result_pids_of(out))
     out['sid'] = (session.sid if session is not None else (sid or ''))
@@ -1357,9 +1441,10 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
             _fb_pids = _split_ctx_pids(ctx_pids)          # 前端兜底（≤200）
             ctx_v, pids_v, cinfo = _resolve_context(session, resolved, carry, ctx, _fb_pids)
-            # ⚠ 2026-10-10（P2-1 引用环，与 q_ask 同一纪律）：personal pid 拆出去，
-            #   不进语料问答链 / set_check，只在 engine / final 里以独立键附证据块。
-            pids_v, _personal_pids = _split_personal_pids(pids_v)
+            # ⚠ 2026-10-10（P2-1/P2-2 引用环，与 q_ask 同一纪律）：
+            #   personal / material / fact pid 拆出去，不进语料问答链 / set_check，
+            #   只在 engine / final 里以独立键附证据块。
+            pids_v, _personal_pids, _material_pids, _fact_pids = _split_personal_pids(pids_v)
             emit('status', {'text': '正在理解问句…',
                             'model': (client.name if client and client.available() else None)})
             # ② 独立再理解一次（取 spec 供 set_check / understanding_status）
@@ -1380,6 +1465,9 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
                 _pe = _personal_evidence(_personal_pids)   # 独立键，不进 set_check
                 if _pe:
                     eng['personal_evidence'] = _pe
+                _re = _research_evidence(_material_pids, _fact_pids)
+                if _re:
+                    eng['research_evidence'] = _re
                 emit('engine', eng)
 
             # ⚠ 2026-10-06 修（P1-29）：不再持全局锁调用 ASK.answer（含 LLM）。
@@ -1398,6 +1486,9 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             _pe = _personal_evidence(_personal_pids)   # 独立键，不进 set_check / 会话存储
             if _pe:
                 fin['personal_evidence'] = _pe
+            _re = _research_evidence(_material_pids, _fact_pids)
+            if _re:
+                fin['research_evidence'] = _re
             turn = _store_turn(session, q, spec, fin, _result_pids_of(fin))
             fin['sid'] = (session.sid if session is not None else (sid or ''))
             if turn is not None:

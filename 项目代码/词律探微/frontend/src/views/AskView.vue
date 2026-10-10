@@ -55,6 +55,54 @@ const speakingIdx = ref(-1);     // 正在朗读的轮次下标（-1 = 未在朗
 /* 「发送中」：任一轮还在流式/请求中 → 发送按钮禁用（防连点重发）。 */
 const busy = computed(() => turns.value.some((t) => t.streaming));
 
+/* ─────────────── P2-2 引用环：引研究库（材料 / 事实 / 我的作品）进本轮证据链 ───────────────
+ * 用户主动勾选 → pid 以 `material:<n>` / `fact:<n>` / `personal:<n>` 前缀并入 ctx_pids；
+ * 服务端把它们拆出去（不进语料检索、不进 set_check），只以独立键附证据块。
+ * 勾选是**会话级**的：勾上后每轮都带，取消勾选即停（按钮上显示已勾数量）。 */
+const citeOpen = ref(false);
+const citeLoading = ref(false);
+const citeErr = ref('');
+const citeMats = ref([]);
+const citeFacts = ref([]);
+const citeWorks = ref([]);
+const citeSel = ref(Object.create(null));   // pid → true（已勾选项）
+let citeLoaded = false;
+
+async function loadCite() {
+  if (citeLoaded) { return; }
+  citeLoading.value = true;
+  citeErr.value = '';
+  try {
+    const [jm, jf, jw] = await Promise.all([
+      api.materials(false), api.facts({}), api.works('')
+    ]);
+    citeMats.value = (jm && jm.result) || [];
+    citeFacts.value = (jf && jf.result) || [];
+    citeWorks.value = (jw && jw.result) || [];
+    citeLoaded = true;
+  } catch (e) {
+    citeErr.value = String((e && e.message) || e);
+  } finally {
+    citeLoading.value = false;
+  }
+}
+
+function citeToggle() {
+  citeOpen.value = !citeOpen.value;
+  if (citeOpen.value) { loadCite(); }
+}
+
+function citeCheck(pid, on) {
+  // ⚠ 2026-10-11 修（P2-2 缺陷）：原写法每次重建空对象再赋一个键 → **只能单选**
+  //   （UI 是 checkbox 多选，勾上 B 会把 A 清掉）。改为在**现有选择**上增删键后
+  //   整体替换（新对象触发 ref 响应式），才是真多选。
+  const o = Object.assign(Object.create(null), citeSel.value);
+  if (on) { o[pid] = true; } else { delete o[pid]; }
+  citeSel.value = o;
+}
+
+function citePids() { return Object.keys(citeSel.value); }
+
 /* ─────────────── 多会话（本地保存，可删除）───────────────
  * 目标：像大模型对话那样「一个会话一条线」，互不污染；会话存 localStorage，可新建 / 切换 / 删除。
  * 存储纪律：只存**能恢复视图的字段**（问题、结论/证据 HTML、理解详情、状态、篇号），
@@ -275,11 +323,14 @@ function scrollBottom() {
    不重写契约，只把证据块摆到单独一栏，让「结论 / 证据 / 理解详情」三段一眼分开。 */
 function conclHtml(j) { return AskApp.askHtml(Object.assign({}, j, { blocks: [] })); }
 /* 2026-10-10（P2-1 引用环）：个人作品证据块走独立键 personal_evidence（不进 blocks/set_check），
-   这里与语料 blocks 一起渲染到「证据」栏。 */
+   这里与语料 blocks 一起渲染到「证据」栏。
+ * 2026-10-10（P2-2 引用环）：研究资料/事实证据块走独立键 research_evidence，
+ *   材料/事实块**没有** lines/pz 字段，用 researchBlockHtml 单独渲染。 */
 function evidHtml(j) {
   const b = ((j && j.blocks) || []).map(AskApp.blockHtml).join('');
   const pe = ((j && j.personal_evidence) || []).map(AskApp.blockHtml).join('');
-  return b + pe;
+  const re = ((j && j.research_evidence) || []).map(AskApp.researchBlockHtml).join('');
+  return b + pe + re;
 }
 
 /* 从返回体取「本轮命中的篇号」：优先显式 pid 列表，否则取每个证据块的 pid 字段
@@ -483,6 +534,14 @@ async function go() {
   const ctxv = carryOnNow
     ? `上一问：${lastTurn.q}｜上一轮解析为：${lastTurn.spec}`.slice(0, 300) : '';
   const ctxPids = carryOnNow ? (lastTurn.pids || []).slice(0, PERSIST_PIDS) : [];
+  /* P2-2 引用环：把用户勾选的研究库条目（材料/事实/我的作品）并入本轮 ctx_pids。
+   * 与「承上一轮」独立：勾了就带（即使不承上一轮）。服务端会按前缀拆出去，
+   * 只附证据块、不进语料检索与 set_check。去重防重复发送。 */
+  {
+    const seen = Object.create(null);
+    for (const p of ctxPids) { seen[p] = 1; }
+    for (const p of citePids()) { if (!seen[p]) { seen[p] = 1; ctxPids.push(p); } }
+  }
 
   turns.value.push({
     question: text, ctx: carryOnNow, ctxN: ctxPids.length,
@@ -746,9 +805,56 @@ onMounted(async () => {
                         @click="useLlm = !useLlm" title="在确定性结论之上让大模型补写说法">✎ 模型补写</button>
                 <button type="button" class="pill" :class="{ on: useArg }"
                         @click="useArg = !useArg" title="论证口径：更严、依据分列">≡ 论证草稿</button>
+                <button type="button" class="pill" :class="{ on: citeOpen || citePids().length > 0 }"
+                        @click="citeToggle()"
+                        title="把研究库里的摘录 / 事实 / 我的作品引进本轮回答的证据链（个人与研究内容，会标明出处，绝不冒充交付语料）">
+                  📎 引用研究库{{ citePids().length ? '（' + citePids().length + '）' : '' }}
+                </button>
               </div>
               <button id="go" class="send" :disabled="busy || !(q && q.trim())" @click="go"
                       title="发送（Enter）">↑</button>
+            </div>
+            <!-- P2-2 引用面板：材料 / 事实 / 我的作品 三组勾选（勾上即随本轮一起发出） -->
+            <div v-if="citeOpen" class="citepanel">
+              <div class="cp-h">
+                <b>引研究库进证据链</b>
+                <span class="dim">勾上后每轮都带；点 📎 可收起（已勾 {{ citePids().length }} 项）。
+                  个人与研究内容会<b>标明出处</b>，不会冒充交付语料。</span>
+              </div>
+              <div v-if="citeLoading" class="dim">正在载入研究库…</div>
+              <div v-else-if="citeErr" class="dim">载入失败：{{ citeErr }}</div>
+              <template v-else>
+                <div class="cp-g">
+                  <div class="cp-gt">文献摘录（{{ citeMats.length }}）</div>
+                  <label v-for="m in citeMats" :key="'m' + m.id" class="cp-it">
+                    <input type="checkbox" :checked="!!citeSel['material:' + m.id]"
+                           @change="citeCheck('material:' + m.id, $event.target.checked)">
+                    <span class="cp-tt">《{{ m.title }}》{{ m.author ? '·' + m.author : '' }}{{ m.year ? '·' + m.year : '' }}</span>
+                  </label>
+                  <div v-if="!citeMats.length" class="dim">（还没有摘录——先到「研究库」录入）</div>
+                </div>
+                <div class="cp-g">
+                  <div class="cp-gt">研究事实（{{ citeFacts.length }}）</div>
+                  <label v-for="f in citeFacts" :key="'f' + f.id" class="cp-it">
+                    <input type="checkbox" :checked="!!citeSel['fact:' + f.id]"
+                           @change="citeCheck('fact:' + f.id, $event.target.checked)">
+                    <span class="cp-tt">{{ f.statement }}
+                      <span v-if="f.verified" class="ok">已核对</span>
+                      <span v-else class="dim">未核对</span></span>
+                  </label>
+                  <div v-if="!citeFacts.length" class="dim">（还没有事实——先到「研究库」登记）</div>
+                </div>
+                <div class="cp-g">
+                  <div class="cp-gt">我的作品（{{ citeWorks.length }}）</div>
+                  <label v-for="w in citeWorks" :key="'w' + w.id" class="cp-it">
+                    <input type="checkbox" :checked="!!citeSel['personal:' + w.id]"
+                           @change="citeCheck('personal:' + w.id, $event.target.checked)">
+                    <span class="cp-tt">《{{ w.title }}》{{ w.author ? '·' + w.author : '' }}
+                      {{ w.cipai ? '·' + w.cipai : '' }}</span>
+                  </label>
+                  <div v-if="!citeWorks.length" class="dim">（还没有个人作品——先到「研究库」录入）</div>
+                </div>
+              </template>
             </div>
           </div>
           <div class="cfoot dim">数字归引擎 · 文料归检索 · 说法归生成 · 出处归引用——内容由本地引擎与大模型共同生成，请对照证据甄别</div>
@@ -822,6 +928,10 @@ onMounted(async () => {
 #log .ans > .a { border: none; background: transparent; padding: 0; margin: 0; }
 /* 证据块：左侧换成本项目强调色，和结论文本一眼区分 */
 #log .ans > .e { border-left: 3px solid color-mix(in srgb, var(--accent2) 65%, transparent); }
+/* P2-2 研究块（材料/事实）：正文区 + 与语料块区分（虚线左条，标「研究库，非交付语料」） */
+#log .ans > .e.res { border-left-style: dashed; }
+#log .ans .rbody { margin-top: 6px; padding: 8px 10px; font-size: 13.5px; line-height: 1.8;
+  background: var(--panel3); border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
 
 /* 5) 加载 / 缺口 / 增量 / 出错：都要有明确文案与不刺眼的颜色 */
 #log .loading { margin: 4px 0; color: var(--ink2); }
@@ -878,6 +988,22 @@ onMounted(async () => {
   font-size: 17px; line-height: 1; }
 .send:disabled { opacity: .45; cursor: not-allowed; }
 .cfoot { text-align: center; padding: 6px 0 2px; font-size: 11.5px; }
+
+/* 7b) P2-2 引用面板：材料 / 事实 / 我的作品 三组勾选（勾上随本轮一起发出） */
+.citepanel { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.citepanel .cp-h { font-size: 12.5px; margin-bottom: 6px; display: flex; flex-wrap: wrap;
+  gap: 4px 10px; align-items: baseline; }
+.citepanel .cp-h span { font-size: 11.5px; }
+.citepanel .cp-g { margin-bottom: 8px; }
+.citepanel .cp-gt { font-size: 11.5px; letter-spacing: 1px; color: var(--ink2);
+  padding: 2px 0 4px; border-bottom: 1px dashed var(--line); }
+.citepanel .cp-it { display: flex; align-items: flex-start; gap: 6px; padding: 3px 2px;
+  font-size: 13px; cursor: pointer; border-radius: 6px; }
+.citepanel .cp-it:hover { background: var(--panel3); }
+.citepanel .cp-it input { flex: none; margin-top: 3px; }
+.citepanel .cp-tt { min-width: 0; line-height: 1.6; }
+.citepanel .cp-tt .ok { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
+.citepanel .cp-tt .dim { font-size: 11.5px; margin-left: 6px; }
 
 /* 8) 窄屏不塌：左栏隐藏（会话仍在 localStorage，宽屏可见），气泡放宽 */
 @media (max-width: 900px) {

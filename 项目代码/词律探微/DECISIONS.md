@@ -1416,3 +1416,40 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
   `ssr-smoke` 31/0 ｜ `test_ui` 147/0 ｜ `test_render` 522,242/0 ｜
   `verify_views` 43,459/0 ｜ `fixture_gate` 6/6 ｜ `check_conditions` FAIL 1
   （已知基线「龘」句脚）。`build-all.mjs` 重建成功。
+
+## D48 ✅（2026-10-11）：P2-2 研究资料融入问答证据链（文献摘录 / 研究事实进 ask 证据环）
+
+- **由来**：主人 P2 清单第 2 项——「研究资料融入问答（摘录与研究事实进入 `ask` 的证据链）」。
+  D47 已打通个人作品（`personal:<n>`），但研究库的**文献摘录**（`material:<n>`）与
+  **研究事实**（`fact:<n>`）仍只在研究库页可见，无法作为引用进入问答证据。
+- **核心设计（沿用 D47 的「独立键 + 前缀路由」纪律）**：
+  · `serve.py` 的 `_split_personal_pids` 由 3 元组扩为 **4 元组**
+    `(corpus, personal, materials, facts)`；三类研究 pid 一律**不进**
+    `ASK.answer` 的 ctx_pids、**不进** set_check、**不进**会话存储。
+  · 新增 `_research_evidence(material_pids, fact_pids)`：材料块取
+    title/author/year/kind/latest_content/locator，事实块取
+    statement/出处/引文/核验状态；每块 `eid` 用 `M`/`F` 前缀
+    （语料 `E`、个人 `P`，互不混淆）。
+  · 证据块以**独立键** `out['research_evidence']` 附加——绝不混入
+    `out['blocks']`（否则触发 `verify_result` 的 extra→FAILED）。
+  · `q_ask` 与 `q_ask_stream` 的 **engine / final / work-final 三处挂点**同步。
+- **前端**：
+  · `core/ask.js` 新增 `researchBlockHtml(b)`——材料/事实块**没有** lines/pz
+    字段（不是诗体），不能套 `blockHtml`，按「标题 + 元数据 + 正文/陈述」单列；
+    `askHtml` 追加渲染 `research_evidence`；导出新增该函数。
+  · `AskView.vue` 的 `evidHtml` 追加 `research_evidence`；composer 新增
+    「📎 引用研究库」pill + 三组勾选面板（文献摘录 / 研究事实 / 我的作品），
+    勾选即把 `material:<n>` / `fact:<n>` / `personal:<n>` 并入本轮 ctx_pids
+    （**顺带补上 D47 遗留的「我的作品」问答侧用户入口**）。
+  · 修复一处缺陷：`citeCheck` 原每次重建空对象 → **只能单选**；
+    改为在现有选择上增删键（真多选）。
+- **红线**：来源如实标「研究库，非交付语料」（`source_note`），绝不冒充交付语料；
+  `corpus.db` 零改动；研究库不存在 / 某条不存在时静默跳过，不影响语料主链。
+- **验收（新增 9 项断言）**：`test_api` 六-c（研究库引用：证据块 M/F 前缀、
+  不进 blocks、`ctx_pids.received=0`、护栏不受影响、不存在 id 跳过不报错）
+  → **165/0**；`selftest` 235/0 ｜ `op_truth_check` 303/0 ｜
+  `test_research` 99/0 ｜ `test_cipu` 37/0 ｜ `qa_eval` 34/37 ｜
+  `nl_benchmark` 20/40（均符合已知基线）｜前端 `check-core` 213,972/0 ｜
+  `ssr-smoke` 31/0 ｜ `test_ui` 147/0 ｜ `test_render` 522,242/0 ｜
+  `verify_views` 43,459/0 ｜ `fixture_gate` 6/6 ｜ `check_conditions` FAIL 1
+  （已知基线「龘」句脚）。`build-all.mjs` 重建成功。

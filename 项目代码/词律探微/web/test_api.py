@@ -274,6 +274,61 @@ def main():
     ok('personal 解析：不存在 id 返回 error', 'error' in _pn, repr(_pn.get('error')))
     _rc.close()
 
+    # ---------- 六-c、研究库引用进证据链（P2-2 引用环） ----------
+    # 纪律：`material:<n>` / `fact:<n>` / `personal:<n>` 只做「证据块」，
+    #   绝不进语料问答链（ASK.answer 的 ctx_pids）与集合身份校验（set_check）。
+    import research as _RSCH2
+    _rc2 = _RSCH2.connect(_LVC_RESEARCH_TMP)
+    _mat = _RSCH2.add_material(_rc2, 'P22测试摘录', '临江仙一调，宋人多以此调写羁旅。',
+                               kind='book', author='P22', year='2026',
+                               source_url='https://example.org/p22',
+                               client_token='tok-api-p22-m')
+    _mid = _mat['material_id']
+    _fact = _RSCH2.add_fact(_rc2, '清词《临江仙》仄声比例偏高者为多。',
+                            material_id=_mid, locator='卷三·页12',
+                            evidence='临江仙一调，宋人多以此调写羁旅。',
+                            client_token='tok-api-p22-f')
+    _fid = _fact['fact_id']
+    _rc2.close()
+    _mpid = 'material:%d' % _mid
+    _fpid = 'fact:%d' % _fid
+    _rr = S.q_ask('清 临江仙 仄声比例高于45%', topk=3, ctx_pids=[_mpid, _fpid])
+    _re = _rr.get('research_evidence') or []
+    ok('P2-2 引用：返回体带 research_evidence', len(_re) == 2, 'n=%d' % len(_re))
+    _eids = [b['eid'] for b in _re]
+    ok('P2-2 引用：eid 前缀 M/F 区分材料与事实',
+       any(e.startswith('M') for e in _eids) and any(e.startswith('F') for e in _eids),
+       repr(_eids))
+    _mblk = next((b for b in _re if b['eid'].startswith('M')), {})
+    ok('P2-2 引用：材料块含标题与正文',
+       _mblk.get('title') == 'P22测试摘录' and bool(_mblk.get('content')),
+       repr({k: _mblk.get(k) for k in ('title', 'content_len')}))
+    _fblk = next((b for b in _re if b['eid'].startswith('F')), {})
+    ok('P2-2 引用：事实块含陈述与核验状态',
+       '临江仙' in (_fblk.get('statement') or '') and ('verified' in _fblk),
+       repr({k: _fblk.get(k) for k in ('statement', 'verified')}))
+    ok('P2-2 引用：来源如实标「研究库，非交付语料」',
+       all('研究库' in (b.get('source_note') or '') for b in _re))
+    # 红线：研究库 pid 绝不进语料链 blocks，也不送语料检索（ctx_pids.received=0）
+    _bpid = [b.get('pid') for b in (_rr.get('blocks') or [])]
+    ok('P2-2 引用：研究库 pid 不进语料 blocks',
+       not any(str(p).startswith(('material:', 'fact:', 'personal:')) for p in _bpid),
+       repr(_bpid[:5]))
+    ok('P2-2 引用：研究库 pid 不送语料链（received=0）',
+       (_rr.get('ctx_pids') or {}).get('received') == 0,
+       repr(_rr.get('ctx_pids')))
+    ok('P2-2 引用：护栏不受研究库引用影响仍通过',
+       bool((_rr.get('verify') or {}).get('ok')),
+       '；'.join((_rr.get('verify') or {}).get('problems') or [])[:160])
+    # 不存在的 pid：跳过、不抛异常（证据块为空，主链照常）
+    _rr2 = S.q_ask('清 临江仙 仄声比例高于45%', topk=3,
+                   ctx_pids=['material:999999', 'fact:999999'])
+    ok('P2-2 引用：不存在的 id 被跳过且不报错',
+       not (_rr2.get('research_evidence') or [])
+       and bool((_rr2.get('verify') or {}).get('ok')),
+       're=%r' % (_rr2.get('research_evidence'),))
+
+
     # ---------- 七、流式问答（SSE）：「答案先到」契约（本地桩，不联网） ----------
     import time as _time
 

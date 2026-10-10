@@ -10,7 +10,7 @@
  *   外壳用 UMD（经典脚本）：**既能在 node 的 `vm` 沙箱里直接加载**（旧门禁一行不改），
  *   也能被 Vite 打包进 Vue 组件（`frontend/src/core/index.mjs` 提供 ESM 桥接）。
  *
- * 对外：askHtml(j) / blockHtml(b) / renderErrorHtml(err)
+ * 对外：askHtml(j) / blockHtml(b) / researchBlockHtml(b) / renderErrorHtml(err)
  */
 (function (root, factory) {
   var api = factory(root.UI);
@@ -35,6 +35,36 @@ function blockHtml(b) {
     + '｜出处 ' + U.esc(b.source_note || b.pid) + '</div>'
     + (rows ? '<table><tr><th>句</th><th>原文</th><th>平仄（逐字）</th><th>句脚</th></tr>' + rows + '</table>' : '')
     + '</div>';
+}
+
+/* 2026-10-10（P2-2 引用环）：研究资料 / 研究事实证据块（独立键 research_evidence）。
+ *   材料 / 事实块**没有** lines / pz / 句脚字段（不是诗体），不能套 blockHtml，
+ *   这里单独按「标题 + 元数据 + 正文/陈述」摆。eid 前缀 M（材料）/ F（事实）。 */
+function researchBlockHtml(b) {
+  const isMat = String(b.eid || '').charAt(0) === 'M';
+  const meta = [];
+  if (b.author) { meta.push(U.esc(b.author)); }
+  if (b.year) { meta.push(U.esc(String(b.year))); }
+  if (b.locator) { meta.push('定位：' + U.esc(b.locator)); }
+  if (b.source_url) { meta.push('来源：' + U.esc(b.source_url)); }
+  let body = '';
+  if (isMat) {
+    const txt = String(b.content || '');
+    body = '<div class="rbody">' + U.esc(txt)
+      + (b.content_len > txt.length ? '……（全文 ' + b.content_len + ' 字，此处截 500 字）' : '')
+      + '</div>';
+  } else {
+    const v = b.verified ? '已核对' : '未核对';
+    body = '<div class="rbody"><b>陈述</b>：' + U.esc(b.statement || '')
+      + (b.evidence ? ('<br><b>引文</b>：「' + U.esc(b.evidence) + '」') : '')
+      + '<br><b>出处</b>：' + (b.source_desc ? U.esc(b.source_desc) : '—')
+      + '（核验：' + v + '）</div>';
+  }
+  const label = isMat ? ('《' + U.esc(b.title) + '》') : U.esc(b.statement || '');
+  return '<div class="e res"><b>[' + U.esc(b.eid) + ']</b> ' + label
+    + '<div class="m">' + (meta.length ? (meta.join('　·　') + '｜') : '')
+    + '出处 ' + U.esc(b.source_note || b.pid) + '</div>'
+    + body + '</div>';
 }
 
 function askHtml(j) {
@@ -73,6 +103,9 @@ function askHtml(j) {
   // 2026-10-10（P2-1 引用环）：个人作品证据块以独立键 personal_evidence 到达
   //   （不进 blocks、不进 set_check），这里追加渲染，与语料证据同版式。
   h += (j.personal_evidence || []).map(blockHtml).join('');
+  // 2026-10-10（P2-2 引用环）：研究资料/事实证据块以独立键 research_evidence 到达
+  //   （不进 blocks、不进 set_check），用 researchBlockHtml 单独渲染。
+  h += (j.research_evidence || []).map(researchBlockHtml).join('');
   return h;
 }
 
@@ -84,5 +117,6 @@ function renderErrorHtml(err) {
   return '<span class="bad">引擎出错：' + U.esc(err) + '</span>';
 }
 
-return { askHtml: askHtml, blockHtml: blockHtml, renderErrorHtml: renderErrorHtml };
+return { askHtml: askHtml, blockHtml: blockHtml, researchBlockHtml: researchBlockHtml,
+         renderErrorHtml: renderErrorHtml };
 }));
