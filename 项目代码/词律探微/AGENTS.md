@@ -97,7 +97,8 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 | `node web/test_render.js` | 逐篇渲染（**26,742 篇 / 522,242 项**） |
 | `node web/verify_views.js --n 3000` | 前端 JS ↔ Python 引擎逐字段（**43,459 项**） |
 | `node web/test_ui.js` | 前端功能（含检索标尺、页面审计、**130 项**） |
-| `python web/test_api.py` | 服务端接口（**140 项**） |
+| `python web/test_api.py` | 服务端接口（**171 项**） |
+| `python web/test_e2e.py` | **端到端回归集**（真实问句 + 失败场景 + 多轮上下文 + 流式，**37 项**；会话/快照/研究库全隔离，可重复跑） |
 
 > 构建顺序：**先 `node frontend/tools/build-all.mjs`（Vite 出页面 → Python 出数据）**，
 > 顺序反了数据会被 Vite 的 `emptyOutDir` 清掉。改了 `web/*.js` 转发文件没用 —— 逻辑真源在 `frontend/src/core/`。
