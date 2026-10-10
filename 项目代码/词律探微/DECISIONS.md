@@ -1453,3 +1453,19 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
   `ssr-smoke` 31/0 ｜ `test_ui` 147/0 ｜ `test_render` 522,242/0 ｜
   `verify_views` 43,459/0 ｜ `fixture_gate` 6/6 ｜ `check_conditions` FAIL 1
   （已知基线「龘」句脚）。`build-all.mjs` 重建成功。
+
+## D49 ✅（2026-10-11）：P2-3 文献档案字段完善进 UI（类型 / 年份 / 来源地址 / 备注）
+
+- **由来**：主人 P2 清单第 3 项——「文献档案字段完善（类型/年份/来源地址/备注进 UI）」。
+  后端 `materials` 表早有 `kind`（book/paper/web/archive）、`year`、`source_url`、`note`
+  四列，`POST /api/materials` 也已接受这四个字段，但**前端表单从未提供录入入口**，
+  列表也不展示——字段等于沉睡。
+- **改动（纯前端，后端零改动）**：`frontend/src/views/ResearchView.vue`:
+  · 「新建摘录」表单新增：类型 `<select>`（书籍/论著、论文、网页/网络、档案/手稿）、
+    年份、来源地址、备注四个输入（`.rs-row select` 样式早已存在，复用）；
+  · 列表表头新增「类型 / 年份」两列，文献名下方显示来源链接与备注，空表 colspan 6→8；
+  · 版本链头部补一行档案信息（类型/作者/年份/来源/备注）。
+  · `mForm` 增四字段，`KIND_LABEL` 常量做「键→中文」映射（`web` → 网页/网络）。
+- **验收**：`test_research` 新增 C12b（3 项：类型/年份往返、来源地址/备注往返、
+  档案字段进版本链材料头）→ **102/0**；`ssr-smoke` 31/0（ResearchView 3504→4054 字符）；
+  `check-core` 213,972/0；`test_ui` 147/0。`build-all.mjs` 重建成功。

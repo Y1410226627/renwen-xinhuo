@@ -26,17 +26,34 @@
         <h3>新建摘录</h3>
         <div class="rs-row">
           <input v-model="mForm.title" placeholder="文献名（必填）">
+          <select v-model="mForm.kind" title="文献类型">
+            <option value="book">书籍 / 论著</option>
+            <option value="paper">论文</option>
+            <option value="web">网页 / 网络</option>
+            <option value="archive">档案 / 手稿</option>
+          </select>
           <input v-model="mForm.author" placeholder="作者（可选）">
+          <input v-model="mForm.year" placeholder="年份：如 康熙二十三年 / 1684（可选）">
+        </div>
+        <div class="rs-row">
+          <input v-model="mForm.source_url" placeholder="来源地址：如 https://…（可选）">
           <input v-model="mForm.locator" placeholder="定位：如 卷三·页12（可选）">
+          <input v-model="mForm.note" placeholder="备注（可选）">
         </div>
         <textarea v-model="mForm.content" rows="3" placeholder="摘录正文（必填）"></textarea>
         <p><button type="button" :disabled="!isOnline" @click="createMaterial">新建摘录</button></p>
         <h3>摘录列表 <small class="dim">（编辑=追加新版本，删除=撤回标记，旧行永不删除）</small></h3>
         <table class="rs-table">
-          <thead><tr><th>#</th><th>文献</th><th>作者</th><th>版本数</th><th>最新版本时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>#</th><th>文献</th><th>类型</th><th>作者</th><th>年份</th><th>版本数</th><th>最新版本时间</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="m in mList" :key="m.id">
-              <td>{{ m.id }}</td><td>{{ m.title }}</td><td>{{ m.author || '—' }}</td>
+              <td>{{ m.id }}</td>
+              <td>{{ m.title }}
+                <a v-if="m.source_url" :href="m.source_url" target="_blank" rel="noopener" class="dim">[来源]</a>
+                <div v-if="m.note" class="dim">{{ m.note }}</div></td>
+              <td class="dim">{{ KIND_LABEL[m.kind] || m.kind }}</td>
+              <td>{{ m.author || '—' }}</td>
+              <td class="dim">{{ m.year || '—' }}</td>
               <td class="num">{{ m.n_rev }}</td><td class="dim">{{ m.latest_at || '—' }}</td>
               <td>
                 <button type="button" class="mini" @click="viewChain(m.id)">版本链</button>
@@ -44,11 +61,17 @@
                         @click="withdrawMat(m.id)">撤回</button>
               </td>
             </tr>
-            <tr v-if="!mList.length"><td colspan="6" class="dim">（还没有摘录）</td></tr>
+            <tr v-if="!mList.length"><td colspan="8" class="dim">（还没有摘录）</td></tr>
           </tbody>
         </table>
         <div v-if="mChain" class="rs-detail">
           <h4>版本链 · 材料 #{{ mChain.id }}（{{ mChain.material.title }}）</h4>
+          <p class="dim">类型：{{ KIND_LABEL[mChain.material.kind] || mChain.material.kind }}
+            · 作者：{{ mChain.material.author || '—' }}
+            · 年份：{{ mChain.material.year || '—' }}
+            <template v-if="mChain.material.source_url">· 来源：
+              <a :href="mChain.material.source_url" target="_blank" rel="noopener">{{ mChain.material.source_url }}</a></template>
+            <template v-if="mChain.material.note"><br>备注：{{ mChain.material.note }}</template></p>
           <div v-for="r in mChain.revisions" :key="r.id" class="rs-rev">
             <span class="tag">v{{ r.id }}</span>
             <span class="dim">{{ r.created_at }}</span>
@@ -326,7 +349,11 @@ async function guard(fn) {
 }
 
 /* ① 文献摘录 */
-const mForm = ref({ title: '', author: '', locator: '', content: '' })
+/* 2026-10-11（P2-3）：文献档案字段进 UI——类型 / 年份 / 来源地址 / 备注。
+ * kind 取值与后端 materials 表注释一致：book / paper / web / archive。 */
+const KIND_LABEL = { book: '书籍 / 论著', paper: '论文', web: '网页 / 网络', archive: '档案 / 手稿' }
+const mForm = ref({ title: '', kind: 'book', author: '', year: '', source_url: '',
+                    locator: '', note: '', content: '' })
 const mList = ref([])
 const mChain = ref(null)
 const mRev = ref('')
@@ -341,7 +368,8 @@ function createMaterial() {
     if (!mForm.value.title.trim() || !mForm.value.content.trim()) { return flash('', '文献名与摘录正文为必填') }
     const j = await post.material(Object.assign({}, mForm.value, { client_token: newToken() }))
     flash('已新建摘录 #' + j.result.material_id)
-    mForm.value = { title: '', author: '', locator: '', content: '' }
+    mForm.value = { title: '', kind: 'book', author: '', year: '', source_url: '',
+                    locator: '', note: '', content: '' }
     loadMaterials()
   })
 }

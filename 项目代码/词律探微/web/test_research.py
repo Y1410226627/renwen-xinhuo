@@ -228,6 +228,21 @@ def main():
         ok('C12 版本链可完整回溯', len(chain['revisions']) == 2
            and chain['revisions'][0]['content'].startswith('录得词一首')
            and chain['revisions'][1]['parent_id'] == chain['revisions'][0]['id'])
+
+        # ---------- C12b（P2-3）文献档案字段：类型/年份/来源地址/备注 完整往返 ----------
+        m3 = RS.add_material(conn, '《词律探微》讲义', '档案字段测试。', kind='paper',
+                             author='某人', year='2026', source_url='https://example.org/m3',
+                             note='备注：字段完整性', locator='页 9', client_token='tok-mat-p23')
+        row3 = next(x for x in RS.list_materials(conn, include_withdrawn=True)
+                    if x['id'] == m3['material_id'])
+        ok('C12b 类型/年份往返', row3['kind'] == 'paper' and row3['year'] == '2026',
+           repr({k: row3.get(k) for k in ('kind', 'year')}))
+        ok('C12b 来源地址/备注往返', row3['source_url'] == 'https://example.org/m3'
+           and row3['note'] == '备注：字段完整性',
+           repr({k: row3.get(k) for k in ('source_url', 'note')}))
+        ch3 = RS.get_material_chain(conn, m3['material_id'])
+        ok('C12b 档案字段进版本链材料头', ch3['material']['kind'] == 'paper'
+           and ch3['material']['source_url'] == 'https://example.org/m3')
         wd = RS.withdraw_material(conn, m1['material_id'], why='重复录入', client_token='tok-mat3')
         ok('C12 删除=撤回标记（行保留）', wd['withdrawn'] and conn.execute(
             'SELECT COUNT(1) FROM materials WHERE id=? AND withdrawn=1',
