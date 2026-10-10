@@ -177,6 +177,101 @@ def get_llm():
     return LLM
 
 
+def _llm_allow_hosts():
+    """校内本地端点的**主机白名单**（P2-5）。
+
+    默认只允许当前配置的本地端点主机；可用 `LVC_LLM_ALLOW_HOSTS`（逗号分隔）扩充，
+    以便校内多台推理机 / 多端口共存。**校外主机一律不在白名单** —— 这条是
+    「只用学校本地 Qwen」约束的落点。
+    """
+    import urllib.parse as _up
+    hosts = {h.strip().lower() for h in (os.environ.get('LVC_LLM_ALLOW_HOSTS') or '').split(',')
+             if h.strip()}
+    if not hosts:
+        h = _up.urlparse(getattr(get_llm(), 'url', '') or '').hostname
+        if h:
+            hosts.add(h.lower())
+    return hosts
+
+
+def q_llm_options():
+    """**可指定的模型 / 端点**（P2-5，只读）。
+
+    模型名与端点都可指定；端点主机必须落在白名单内（默认 = 校内本地端点）。
+    候选可由环境变量扩充：`LVC_LLM_MODELS` / `LVC_LLM_ENDPOINTS`。
+    """
+    c = get_llm()
+    models = [m.strip() for m in (os.environ.get('LVC_LLM_MODELS') or '').split(',') if m.strip()]
+    m0 = getattr(c, 'model', None)
+    if m0 and m0 not in models:
+        models.insert(0, m0)
+    eps = [e.strip() for e in (os.environ.get('LVC_LLM_ENDPOINTS') or '').split(',') if e.strip()]
+    e0 = getattr(c, 'url', None)
+    if e0 and e0 not in eps:
+        eps.insert(0, e0)
+    return {
+        'provider': getattr(c, 'provider', None),
+        'label': getattr(c, 'label', '') or '',
+        'running': bool(c.available()),
+        'default_model': m0, 'default_endpoint': e0,
+        'models': models, 'endpoints': eps,
+        'allow_hosts': sorted(_llm_allow_hosts()),
+        'constraint': '仅限校内本地 Qwen（不接入任何校外模型或端点）',
+        'note': ('模型名与端点可指定；端点的**主机**必须在白名单内（默认 = 校内本地端点，'
+                 '可用 LVC_LLM_ALLOW_HOSTS 扩充）。不合规的指定会被忽略，界面**如实回显**'
+                 '实际使用的模型与端点。'),
+    }
+
+
+def get_llm_for(model=None, endpoint=None):
+    """按**单次请求**覆盖模型 / 端点（P2-5），受「只用校内本地 Qwen」约束。
+
+    返回 `(client, info)`；`info` 如实记录实际使用的 provider/model/endpoint、
+    是否来自请求指定（specified）、以及被拒原因（rejected）。
+    · 未指定 → 用进程内默认单例（零开销）；
+    · 端点主机不在白名单 / provider 未配置 / 构造失败 → **忽略并记录原因**，
+      仍用默认，**绝不悄悄换到校外**。
+    """
+    import urllib.parse as _up
+    default = get_llm()
+    info = {'provider': getattr(default, 'provider', None),
+            'model': getattr(default, 'model', None),
+            'endpoint': getattr(default, 'url', None),
+            'specified': False, 'rejected': []}
+    model = (model or '').strip() or None
+    endpoint = (endpoint or '').strip() or None
+    if not model and not endpoint:
+        return default, info
+    if endpoint:
+        h = (_up.urlparse(endpoint).hostname or '').lower()
+        if h not in _llm_allow_hosts():
+            info['rejected'].append(
+                '端点主机「%s」不在白名单（仅限校内本地端点），该指定已忽略' % (h or '(空)'))
+            endpoint = None
+    if not model and not endpoint:
+        return default, info
+    if not getattr(default, 'provider', None) or default.provider not in LLM_MOD.PROVIDERS:
+        info['rejected'].append('未配置可用的本地模型端点（provider 未就绪），指定已忽略')
+        return default, info
+    try:
+        c = LLM_MOD.LLM(provider=default.provider, model=model)
+        if endpoint:
+            c.url = endpoint
+        c.label = getattr(default, 'label', '') or c.label
+    except Exception as e:                                  # noqa: BLE001
+        info['rejected'].append('按指定构造客户端失败（%s），已回落默认' % e)
+        return default, info
+    info.update({'model': c.model, 'endpoint': c.url, 'specified': True})
+    return c, info
+
+
+def _llm_echo(info):
+    """把「实际使用的模型/端点 + 指定与被拒情况」编成**如实回显**字段（P2-5）。"""
+    return {'provider': info.get('provider'), 'model': info.get('model'),
+            'endpoint': info.get('endpoint'), 'specified': bool(info.get('specified')),
+            'rejected': list(info.get('rejected') or [])}
+
+
 def _planner_on():
     """规划路是否启用（`LVC_PLANNER` = plan/planner）。**只读**环境变量。"""
     return os.environ.get('LVC_PLANNER', 'rule').strip().lower() in ('plan', 'planner')
@@ -1323,13 +1418,16 @@ def q_pron_candidates(pid, line_idx, char_pos):
 
 
 def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always', ctx=None,
-          ctx_pids=None, sid=None, carry=False):
+          ctx_pids=None, sid=None, carry=False, model=None, endpoint=None):
     t0 = time.time()
     conn = get_conn()
+    # ★ 2026-10-11（P2-5）：按请求指定模型/端点（受「只用校内本地 Qwen」约束）；
+    #   未指定即用进程内默认单例（零开销）。
+    _base_client, _llm_info = get_llm_for(model, endpoint)
     # ⭐ 2026-10-09（第三轮审查 P1-13 补）：**规划路开启时始终建 LLM 句柄**——
     #   规划器（Planner）需要大模型；旧版只有 narrate/argument/parse 才建，
     #   导致语义题（靠 planner 生成 retrieve 计划）在默认参数下 client=None → 静默回落。
-    client = get_llm() if (narrate or argument or parse or _planner_on()) else None
+    client = _base_client if (narrate or argument or parse or _planner_on()) else None
     # ① 服务端会话 + 指代分类（外部审查 A）：带 sid 时才建会话。
     session = SESSIONS.get_or_create(sid) if sid else None
     resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
@@ -1348,7 +1446,7 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
     #   get_llm() 是进程内单例、构造零网络开销。
     if client is None and (bool(RT.content_ask_of(q)) or bool(RT.open_ask_of(q))
                            or list(getattr(spec, 'unparsed', None) or [])):
-        client = get_llm()
+        client = _base_client
     # ③ 作答（透传完整集合；仅当后端支持该形参时）
     extra, pids_sent, cut = _pids_to_answer_kwargs(pids_v)
     cinfo['ctx_truncated_send'] = cut
@@ -1370,6 +1468,8 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
     _re = _research_evidence(_material_pids, _fact_pids)
     if _re:
         out['research_evidence'] = _re
+    # ★ 2026-10-11（P2-5）：如实回显本轮**实际使用**的模型/端点（含被忽略的指定）。
+    out.setdefault('llm', {})['used'] = _llm_echo(_llm_info)
     # ⑤ 会话落盘（完整集合，供下一轮指代）
     turn = _store_turn(session, q, spec, out, _result_pids_of(out))
     out['sid'] = (session.sid if session is not None else (sid or ''))
@@ -1395,7 +1495,7 @@ def q_ask(q, topk=3, narrate=False, argument=False, parse=False, policy='always'
 
 
 def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='auto', ctx=None,
-                 ctx_pids=None, sid=None, carry=False):
+                 ctx_pids=None, sid=None, carry=False, model=None, endpoint=None):
     """**SSE 流式问答**：把「进度」与「大模型逐字增量」实时推给浏览器。
 
     为什么要流式：原先网页点一下要**干等 1.4~5 秒**（大模型整段写完才返回）。
@@ -1435,7 +1535,9 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
         t0 = time.time()
         try:
             conn = get_conn()
-            client = get_llm() if (narrate or argument or parse or _planner_on()) else None
+            # ★ 2026-10-11（P2-5）：与 q_ask 同一纪律——按请求指定模型/端点。
+            _base_client, _llm_info = get_llm_for(model, endpoint)
+            client = _base_client if (narrate or argument or parse or _planner_on()) else None
             # ① 服务端会话 + 指代分类（与 q_ask 同一套，外部审查 A）。
             session = SESSIONS.get_or_create(sid) if sid else None
             resolved = CONTEXT.resolve(session, q) if session is not None else {'kind': 'none'}
@@ -1452,7 +1554,7 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             # ⭐ 2026-10-09：内容/开放类问题补建大模型句柄（与 q_ask 同一纪律，见彼处注释）。
             if client is None and (bool(RT.content_ask_of(q)) or bool(RT.open_ask_of(q))
                                    or list(getattr(spec, 'unparsed', None) or [])):
-                client = get_llm()
+                client = _base_client
             extra, pids_sent, _cut = _pids_to_answer_kwargs(pids_v)
             _cp = {'received': len(pids_sent), 'consumed': bool(extra),
                    'from_session': bool(cinfo.get('used_context'))}
@@ -1468,6 +1570,7 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
                 _re = _research_evidence(_material_pids, _fact_pids)
                 if _re:
                     eng['research_evidence'] = _re
+                eng.setdefault('llm', {})['used'] = _llm_echo(_llm_info)   # P2-5 如实回显
                 emit('engine', eng)
 
             # ⚠ 2026-10-06 修（P1-29）：不再持全局锁调用 ASK.answer（含 LLM）。
@@ -1489,6 +1592,7 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             _re = _research_evidence(_material_pids, _fact_pids)
             if _re:
                 fin['research_evidence'] = _re
+            fin.setdefault('llm', {})['used'] = _llm_echo(_llm_info)   # P2-5 如实回显
             turn = _store_turn(session, q, spec, fin, _result_pids_of(fin))
             fin['sid'] = (session.sid if session is not None else (sid or ''))
             if turn is not None:
@@ -1750,7 +1854,10 @@ class H(BaseHTTPRequestHandler):
                                         ctx_pids=qs.get('ctx_pids'),
                                         # 服务端会话（外部审查 A）：带 sid 时用服务端完整结果集
                                         sid=((g('sid') or '').strip() or None),
-                                        carry=b('carry')))
+                                        carry=b('carry'),
+                                        # ★ P2-5：模型/端点可指定（受校内本地约束）
+                                        model=(g('model') or '').strip() or None,
+                                        endpoint=(g('endpoint') or '').strip() or None))
             if u.path == '/api/ask_stream':
                 # 流式问答：**不能用 _send**（那会带 Content-Length，浏览器要等整包）
                 b = lambda k: g(k).lower() in ('1', 'true', 'yes', 'on')
@@ -1772,7 +1879,9 @@ class H(BaseHTTPRequestHandler):
                                           ctx_pids=qs.get('ctx_pids'),
                                           # 服务端会话（外部审查 A）
                                           sid=((g('sid') or '').strip() or None),
-                                          carry=b('carry')):
+                                          carry=b('carry'),
+                                          model=(g('model') or '').strip() or None,
+                                          endpoint=(g('endpoint') or '').strip() or None):
                     self.wfile.write(frame.encode('utf-8'))
                     self.wfile.flush()
                 return
@@ -1971,6 +2080,9 @@ class H(BaseHTTPRequestHandler):
                                    'provider': c.provider,
                                    'hint': '未就绪：设 ZAI_API_KEY / DEEPSEEK_API_KEY / DASHSCOPE_API_KEY'
                                            if not c.available() else '就绪'})
+            if u.path == '/api/llm/options':
+                # ★ 2026-10-11（P2-5）：可指定的模型 / 端点（仅限校内本地 Qwen）。
+                return self._send({'ok': True, 'result': q_llm_options()})
             if u.path == '/api/parse':
                 return self._send(q_parse(g('pid')))
             if u.path == '/api/rand':

@@ -329,6 +329,48 @@ def main():
        're=%r' % (_rr2.get('research_evidence'),))
 
 
+
+    # ---------- 六-d、模型/端点可指定 + 如实回显（P2-5） ----------
+    _opts = S.q_llm_options()
+    ok('P2-5 选项：带「仅限校内本地」约束声明',
+       ('校内' in (_opts.get('constraint') or '')) and ('校外' in (_opts.get('constraint') or '')),
+       repr(_opts.get('constraint')))
+    ok('P2-5 选项：models / endpoints / allow_hosts 均为列表',
+       isinstance(_opts.get('models'), list) and isinstance(_opts.get('endpoints'), list)
+       and isinstance(_opts.get('allow_hosts'), list))
+    # 用假默认客户端钉死两条规则（校外端点被拒 / 校内指定生效），不联网：
+    _FAKE_URL = 'http://10.27.66.12/v1/chat/completions'
+
+    class _FakeLocal:
+        provider = 'ucass'
+        model = 'qwen3.8-27b'
+        url = _FAKE_URL
+        label = '校内 Qwen'
+
+        def available(self):
+            return True
+
+    _fake = _FakeLocal()
+    _old_get = S.get_llm
+    S.get_llm = lambda: _fake
+    try:
+        _c1, _i1 = S.get_llm_for(None, 'http://evil.example.com/v1/chat/completions')
+        ok('P2-5 校外端点被拒并如实记录（回落默认）',
+           _c1 is _fake and bool(_i1['rejected']) and _i1['specified'] is False, repr(_i1))
+        _c2, _i2 = S.get_llm_for('qwen-test', _FAKE_URL)
+        ok('P2-5 校内端点 + 模型指定生效',
+           _c2 is not _fake and _i2['specified'] is True and _i2['model'] == 'qwen-test'
+           and _i2['endpoint'] == _FAKE_URL, repr(_i2))
+        ok('P2-5 端点白名单含默认主机', '10.27.66.12' in S.q_llm_options()['allow_hosts'],
+           repr(S.q_llm_options()['allow_hosts']))
+        _r25 = S.q_ask('清 临江仙 仄声比例高于45%', topk=3, model='qwen-test')
+    finally:
+        S.get_llm = _old_get
+    _used = (_r25.get('llm') or {}).get('used') or {}
+    ok('P2-5 问答如实回显本轮实际使用的模型',
+       _used.get('specified') is True and _used.get('model') == 'qwen-test',
+       repr(_used))
+
     # ---------- 七、流式问答（SSE）：「答案先到」契约（本地桩，不联网） ----------
     import time as _time
 

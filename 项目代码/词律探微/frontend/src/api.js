@@ -117,6 +117,8 @@ export function newToken() {
 
 export const api = {
   llm: () => getJson('/api/llm'),
+  /* 2026-10-11（P2-5）：可指定的模型/端点（仅限校内本地 Qwen）。 */
+  llmOptions: () => getJson('/api/llm/options'),
   examples: () => getJson('/api/examples'),
   ask: (q, opt = {}) => getJson('/api/ask', Object.assign({ q }, normCtxPids(opt))),
   search: (cond, page, size) => getJson('/api/search', Object.assign({}, cond, { page, size })),

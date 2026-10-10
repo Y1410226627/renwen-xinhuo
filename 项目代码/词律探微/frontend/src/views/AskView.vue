@@ -38,6 +38,11 @@ const useParse = ref(true);
 const useLlm = ref(false);
 const useArg = ref(false);
 const llmTag = ref('');
+/* ★ 2026-10-11（P2-5）：模型/端点可指定（选项来自 /api/llm/options，仅限校内本地 Qwen）；
+ *   空串 = 用默认。*/  
+const llmOpts = ref(null);
+const modelChoice = ref('');
+const endpointChoice = ref('');
 const chips = ref([]);
 const turns = ref([]);          // [{ question, ctx, ctxN, concl, evid, detail, gap, status, delta, ... }]
 let lastTurn = null;            // { q, spec, pids } —— 供下一轮 ctx / ctx_pids 取用
@@ -417,6 +422,15 @@ function applyResult(turn, j) {
 /* 一次返回体 → 落盘到某一轮，并把**服务端会话**用了多少篇（指代承接情况）同步回界面。 */
 function afterResult(turn, j, text) {
   applyResult(turn, j);
+  /* ★ 2026-10-11（P2-5）：如实回显本轮**实际使用**的模型/端点（含被忽略的指定）。 */
+  const used = (j && j.llm && j.llm.used) || null;
+  if (used) {
+    const rj = used.rejected || [];
+    llmTag.value = '本轮模型：' + (used.model || '默认')
+      + (used.specified ? '（请求指定）' : '（默认）')
+      + (used.endpoint ? (' @ ' + used.endpoint) : '')
+      + (rj.length ? ('；' + rj.join('；')) : '');
+  }
   const se = turn.sess;
   if (se) {
     if (typeof se.pids_used === 'number') { turn.ctxN = se.pids_used; }
@@ -575,7 +589,9 @@ async function go() {
         ctx: ctxv,
         ctx_pids: ctxPids,
         sid: sid,
-        carry: carryOn.value ? 1 : ''
+        carry: carryOn.value ? 1 : '',
+        model: modelChoice.value || '',
+        endpoint: endpointChoice.value || ''
       }, (type, d) => {
         if (type === 'status') {
           turn.status = (d.text || '') + (d.model ? `（大模型：${d.model}）` : '');
@@ -603,7 +619,8 @@ async function go() {
       try {
         const j = await api.ask(text, {
           parse: useParse.value ? 1 : '', narrate: 1, argument: useArg.value ? 1 : '',
-          ctx: ctxv, ctx_pids: ctxPids, sid: sid, carry: carryOn.value ? 1 : ''
+          ctx: ctxv, ctx_pids: ctxPids, sid: sid, carry: carryOn.value ? 1 : '',
+          model: modelChoice.value || '', endpoint: endpointChoice.value || ''
         });
         if (j && j.error) { turn.error = j.error; }
         else { afterResult(turn, j, text); }
@@ -623,7 +640,8 @@ async function go() {
     const j = await api.ask(text, {
       parse: useParse.value ? 1 : '', narrate: (useLlm.value || useArg.value) ? 1 : '',
       argument: useArg.value ? 1 : '', ctx: ctxv, ctx_pids: ctxPids,
-      sid: sid, carry: carryOn.value ? 1 : ''
+      sid: sid, carry: carryOn.value ? 1 : '',
+      model: modelChoice.value || '', endpoint: endpointChoice.value || ''
     });
     if (j && j.error) { turn.error = j.error; }
     else { afterResult(turn, j, text); }
@@ -644,6 +662,7 @@ onMounted(async () => {
     const x = await api.llm();
     llmTag.value = x.available ? `大模型就绪：${x.model}` : '大模型未接入（按模板作答）';
   } catch (e) { llmTag.value = ''; }
+  try { llmOpts.value = await api.llmOptions(); } catch (e) { llmOpts.value = null; }
   try { chips.value = await api.examples(); } catch (e) { chips.value = []; }
   /* 深链：?q= 自动提问 */
   const q0 = UI.query();
@@ -671,6 +690,21 @@ onMounted(async () => {
         <div class="sfoot dim">
           <div>本地 · 词律探微</div>
           <div class="sllm">{{ llmTag }}</div>
+          <!-- ★ 2026-10-11（P2-5）：模型/端点可指定（选项来自服务端，仅限校内本地 Qwen）。 -->
+          <div v-if="llmOpts && (llmOpts.models || []).length > 1" class="sllm">
+            模型
+            <select v-model="modelChoice" class="mselect" :title="llmOpts.constraint">
+              <option value="">默认（{{ llmOpts.default_model }}）</option>
+              <option v-for="m in llmOpts.models" :key="m" :value="m">{{ m }}</option>
+            </select>
+          </div>
+          <div v-if="llmOpts && (llmOpts.endpoints || []).length > 1" class="sllm">
+            端点
+            <select v-model="endpointChoice" class="mselect" :title="llmOpts.constraint">
+              <option value="">默认（{{ llmOpts.default_endpoint }}）</option>
+              <option v-for="e in llmOpts.endpoints" :key="e" :value="e">{{ e }}</option>
+            </select>
+          </div>
           <label class="carry"><input type="checkbox" v-model="carryOn"> 承上一轮结果集</label>
           <div class="dim" style="font-size:11.5px">不勾 = 每问独立（默认）；勾上才把上一轮的篇目范围带进来</div>
         </div>
@@ -897,6 +931,9 @@ onMounted(async () => {
 .sdel:hover { color: var(--warn); }
 .sfoot { margin-top: auto; padding: 10px 8px 2px; border-top: 1px solid var(--line); line-height: 1.8; }
 .sfoot .carry { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; font-weight: 600; }
+/* 2026-10-11（P2-5）：模型/端点选择器（选项来自服务端，仅限校内本地 Qwen） */
+.sfoot .mselect { max-width: 160px; font-size: 12px; padding: 1px 4px; }
+.sfoot .sllm { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; }
 
 /* 2) 主区：对话流 + 粘性输入区 */
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding-left: 18px; }
