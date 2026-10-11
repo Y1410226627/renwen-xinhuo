@@ -36,8 +36,12 @@ PROVIDERS = {
     # 思考会把预算吃光导致 `content` 为 null（实测 max_tokens=16 时 content=null）。
     # 因此默认带 `chat_template_kwargs={"enable_thinking": false}`：实测既拿得到 content，
     # 首字延迟也从 0.90 秒降到 0.40 秒（2.25×）。
+    # ⚠ 2026-10-11 修（开源发布）：原先在此**硬编码校内内网 IP**（10.x.x.x），
+    #   开源发布 / 异网环境既不可达、也属于不该随仓库外泄的内部信息。
+    #   改法：端点一律由 `UCASS_LLM_URL`（或本地配置 solve/data/llm_local.json）提供；
+    #   未配置时留空串，由调用方判定「未配置 → 该 provider 不可用」，不会误连。
     'ucass': dict(label='校内 Qwen（qwen3.8-27b）',
-                  url=os.environ.get('UCASS_LLM_URL', 'http://10.27.66.12/v1/chat/completions'),
+                  url=os.environ.get('UCASS_LLM_URL', ''),
                   model=os.environ.get('UCASS_LLM_MODEL', 'qwen3.8-27b'),
                   env=('UCASS_API_KEY', 'SPARK_API_KEY', 'LVC_LLM_KEY')),
     'zhipu': dict(label='智谱 GLM', url='https://open.bigmodel.cn/api/paas/v4/chat/completions',

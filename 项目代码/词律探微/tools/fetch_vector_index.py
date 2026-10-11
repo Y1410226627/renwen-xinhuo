@@ -8,7 +8,7 @@
       1) `data/vector/manifest.json` 已存在且 `vector_index.available()` 为真 → 直接可用；
       2) 环境变量 `LVC_VECTOR_SRC` 指向一个含 `poem.index` 的目录（另一份副本 / 移动硬盘）
          → 校验指纹一致后复制；
-      3) 同机器的**相邻副本**（如 `D:\桌面\人文薪火\项目代码\词律探微\data\vector`）→ 自动发现；
+      3) 同机器的**相邻副本**（如 `D:\\桌面\\人文薪火\\项目代码\\词律探微\\data\\vector`）→ 自动发现；
       4) 以上都不行 → 打印重建指引（`python build_vector_index.py --dynasty 清`，需嵌入端点）。
 
 关键前提（为什么可以跨机复用）

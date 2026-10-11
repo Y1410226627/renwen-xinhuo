@@ -50,8 +50,9 @@ def warn(name, detail=''):
 
 def main():
     ap = argparse.ArgumentParser()
-    # T11：语料路径「环境变量优先 → 本机默认兜底」（不设 LVC_CORPUS 时行为与原来完全一致）
-    ap.add_argument('--corpus', default=os.environ.get('LVC_CORPUS') or r'D:\桌面\人文薪火\数据\语料')
+    # T11：语料路径「环境变量优先 → 仓库结构自动推得兜底」（可移植，异机/异盘符可用）
+    ap.add_argument('--corpus', default=os.environ.get('LVC_CORPUS') or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), '数据', '语料'))
     ap.add_argument('--questions', default=None, help='题面 jsonl（写答案的那份）')
     ap.add_argument('--answers', default=None, help='对应的答案 jsonl（本程序产出）')
     ap.add_argument('--gold', default=None, help='标准答案 jsonl（可选，用于复算一致率）')

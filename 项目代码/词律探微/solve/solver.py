@@ -135,10 +135,31 @@ def locate_one_traced_safe(poems, spec):
         spec['作者'], spec['词牌'], spec['首句'], spec.get('朝代', ''))
 
 
+def default_corpus_dir():
+    """默认语料根目录：按「可移植」原则定位，避免硬编码本机绝对路径。
+
+    优先级：
+      1) 环境变量 `LVC_CORPUS`（显式指定，最高优先）；
+      2) 由本文件位置向上推得的仓库根下的 `数据/语料`
+         （`<repo>/项目代码/词律探微/solve/solver.py` → `<repo>/数据/语料`）。
+         与 reproduce.py 的 `_corpus_dir()` 保持同一约定。
+
+    说明：原实现硬编码 `D:\\桌面\\人文薪火\\数据\\语料`，评委在异机/异盘符下会直接失败，
+    与「成果可复现、可推广」相悖。
+    """
+    env = os.environ.get('LVC_CORPUS')
+    if env and os.path.isdir(env):
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))          # <repo>/项目代码/词律探微/solve
+    proj = os.path.dirname(here)                               # <repo>/项目代码/词律探微
+    repo = os.path.dirname(os.path.dirname(proj))              # <repo>
+    return os.path.join(repo, '数据', '语料')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--question', required=True)
-    ap.add_argument('--corpus', default=r'D:\桌面\人文薪火\数据\语料')
+    ap.add_argument('--corpus', default=default_corpus_dir())
     ap.add_argument('--output', required=True)
     ap.add_argument('--overrides', default=default_overrides_path())
     ap.add_argument('--limit', type=int, default=0)

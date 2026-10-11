@@ -1,12 +1,12 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
 title CiLv TanWei - Local QA App
 
-rem 解释器优先级：环境变量 LVC_PYTHON → 本机硬编码路径 → PATH 里的 python
-set PY=%LVC_PYTHON%
-if not exist "%PY%" set PY=D:\conda_envs\langchain-env\python.exe
-if not exist "%PY%" set PY=python
+rem 解释器优先级：环境变量 LVC_PYTHON → 项目内 .venv → PATH 里的 python（可移植，不再硬编码本机 conda 路径）
+set "PY=%LVC_PYTHON%"
+if not exist "%PY%" if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
 
 rem Enable the planner-based route (Planner - Plan - Executor) by default.
 rem Every answer reports which route it actually used (see route.used in /api/ask).

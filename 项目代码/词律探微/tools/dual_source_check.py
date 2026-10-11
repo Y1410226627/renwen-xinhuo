@@ -130,14 +130,14 @@ def main():
     ck('count_hits 有硬条件零命中返回 0', retrieve.count_hits(conn, sp_hard) == 0)
 
     # 10 语料载入的承诺：pid 唯一（审查 B11：缺 id 时曾全部变成 ps:None）
-    # 10 语料载入的承诺：pid 唯一（审查 B11：缺 id 时曾全部变成 ps:None）
     # ⚠ 2026-10-04 修（代码审查 P2-15）：旧版路径写成 `dirname(DB)/语料` = `data/语料`（并不存在），
     #   于是这条防回归检查**永远走 else 只打印提示**、不计入失败——形同虚设。
     #   现在：语料目录可用 CLI/环境变量指定，找不到就**明确失败**（不再静默跳过）。
     corpus_dir = (os.environ.get('LVC_CORPUS')
                   or os.path.join(os.path.dirname(os.path.dirname(DB)), '语料'))
     if not os.path.isdir(corpus_dir):
-        corpus_dir = r'D:\桌面\人文薪火\数据\语料'          # 本机默认（换机请用 LVC_CORPUS）
+        # 由仓库结构自动推得（ROOT=<repo>/项目代码/词律探微，语料在 <repo>/数据/语料）；可移植
+        corpus_dir = os.path.join(os.path.dirname(os.path.dirname(ROOT)), '数据', '语料')
     ps = corpus.load_qing(corpus_dir)
     if ps:
         pids = [x.pid for x in ps]

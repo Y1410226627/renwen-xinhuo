@@ -43,7 +43,10 @@ sys.path.insert(0, os.path.join(ROOT, 'solve'))
 
 DELIVERY = os.path.join(ROOT, 'solve', 'data', 'pron_overrides.json')
 CANDIDATE = os.path.join(ROOT, 'data', 'candidate_overrides.json')
-CORPUS_DEFAULT = r'D:\桌面\人文薪火\数据\语料'
+# 语料默认路径：环境变量优先，否则由仓库结构自动推得（可移植，异机/异盘符可用）
+_REPO = os.path.dirname(os.path.dirname(ROOT))          # ROOT=<repo>/项目代码/词律探微
+CORPUS_DEFAULT = os.environ.get('LVC_CORPUS') or os.path.join(_REPO, '数据', '语料')
+_QUESTIONS_DEFAULT = os.path.join(_REPO, '数据', '初赛数据')
 
 # 全库通用声明（写入 stdout，提示覆写表的口径局限）
 GLOBAL_MODEL_NOTICE = (
@@ -226,16 +229,16 @@ def evaluate_dataset(label, questions, gold, corpus, base_out, cand_out, deliver
 def main():
     ap = argparse.ArgumentParser(description='校订回流（生成候选覆写表 → 复算 → 决定采纳）')
     ap.add_argument('--decisions', required=True)
-    # T5：语料路径改为「环境变量优先 → 本机默认兜底」
+    # T5：语料路径改为「环境变量优先 → 仓库结构自动推得兜底」（可移植）
     ap.add_argument('--corpus', default=os.environ.get('LVC_CORPUS') or CORPUS_DEFAULT,
-                    help='语料根（默认取环境变量 LVC_CORPUS，缺省用本机默认路径）')
-    ap.add_argument('--questions', default=r'D:\桌面\人文薪火\数据\初赛数据'
-                                          r'\薪火人文-清词-1000题库-V5版本\公开测试集_700题.jsonl')
+                    help='语料根（默认取环境变量 LVC_CORPUS，缺省由仓库结构自动推得）')
+    ap.add_argument('--questions', default=os.path.join(
+        _QUESTIONS_DEFAULT, '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl'))
     ap.add_argument('--questions2', default='',
                     help='第二套题面（**不预置路径**：按「不得默认读取保密数据」的纪律，'
                          '需要时由使用者显式传入）')
-    ap.add_argument('--gold', default=r'D:\桌面\人文薪火\数据\初赛数据'
-                                     r'\薪火人文-清词-1000题库-V5版本\公开测试集_700题.jsonl')
+    ap.add_argument('--gold', default=os.path.join(
+        _QUESTIONS_DEFAULT, '薪火人文-清词-1000题库-V5版本', '公开测试集_700题.jsonl'))
     ap.add_argument('--gold2', default='',
                     help='第二套答案（同为不预置；终检时由使用者显式传入）')
     ap.add_argument('--dry-run', action='store_true')
