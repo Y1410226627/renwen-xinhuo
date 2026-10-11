@@ -17,7 +17,8 @@
 | --- | --- | --- |
 | 初赛公开集 | **公开集 700/700 = 100.0%** | `python solve/eval.py --pred answers_700.jsonl --gold <题面>` |
 | 第二套（保密，仅验收用） | 300/300 = 100.0% | 同上，换文件 |
-| 自检 | `python solve/selftest.py` → **235 项 0 失败** | 见 §20/§21（安全与说法层）与 §43（本轮新增） |
+| 自检 | `python solve/selftest.py` → **270 项 0 失败** | 见 §20/§21（安全与说法层）与 §43（本轮新增：词面净化 + 相似意图拓宽） |
+| 统一门禁 | `python tools/check_all.py [--fast]` → 全绿 | **一键入口**：SHA256 + selftest + test_api + check-core + verify_1000 |
 | 交付前体检 | `python solve/preflight.py` → 26/0/0 | 依赖、标定表、语料计数、答案契约、合规扫描 |
 | 库不变式 | `python tools/invariant_check.py` → 1,731,388 项 0 违反 | 从句级平仄串重算篇级指标 |
 | 问答用例 | `python tools/qa_eval.py` → **护栏 37/37、用例通过 34/37** | 固定用例集 `tests/qa_cases.jsonl`（37 条；3 例为既有口径分歧，见该脚本输出） |

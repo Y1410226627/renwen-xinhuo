@@ -1,0 +1,59 @@
+#!/bin/sh
+# ============================================================
+# 词律探微 · pre-commit 钩子
+# ------------------------------------------------------------
+# 作用：提交前自动跑「快速档」门禁（交付答案 SHA256 + selftest），
+#       约 10–20 秒，挡住「改完忘了验就提交」的缺口。
+#
+# 为什么只跑快速档：
+#   pre-commit 会阻塞每一次提交，必须**快**。全档（2–4 分钟）留给
+#   `tools/check_all.py` 手动跑 / CI。快速档已能挡住最致命的
+#   「交付答案被污染」与「自检断言失败」两类问题。
+#
+# 安装（克隆后执行一次）：
+#   git config core.hooksPath .githooks
+#
+# 紧急跳过（仅限确知无害时）：
+#   git commit --no-verify
+# ============================================================
+
+set -e
+
+# 跳到仓库根（钩子运行时 cwd 通常是 .git/）
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT" || exit 0
+
+# --- 找 Python 解释器（与 tools/check_all.py 同口径，取第一个可用的）---
+PY=""
+for c in \
+    "$LVC_PYTHON" \
+    "C:/Users/湮貉/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe" \
+    "D:/conda_envs/langchain-env/python.exe" \
+    "C:/Python314/python.exe" \
+    "$(command -v python 2>/dev/null)" \
+    "$(command -v python3 2>/dev/null)"
+do
+    if [ -n "$c" ] && [ -x "$c" ]; then
+        if "$c" -c "import pypinyin,sqlite3,json,hashlib" >/dev/null 2>&1; then
+            PY="$c"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PY" ]; then
+    echo "[pre-commit] 未找到带 pypinyin 的 Python 解释器 —— 跳过门禁（请检查环境）。"
+    echo "[pre-commit] 提示：设置环境变量 LVC_PYTHON 指向可用解释器。"
+    exit 0   # 环境缺失不阻塞提交（诚实跳过，而非假装通过）
+fi
+
+echo "[pre-commit] 跑快速门禁：$PY tools/check_all.py --fast"
+if "$PY" tools/check_all.py --fast; then
+    echo "[pre-commit] 快速门禁通过。"
+    exit 0
+else
+    echo ""
+    echo "[pre-commit] ✗ 快速门禁失败 —— 提交已阻断。"
+    echo "[pre-commit]   修好后再提交；确知无害时可用 git commit --no-verify 跳过。"
+    exit 1
+fi
