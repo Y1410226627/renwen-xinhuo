@@ -1148,6 +1148,34 @@ def _parse_query_inner(conn, text):
     return _parse_core(conn, text)
 
 
+# ⚠ 2026-10-11 新增（二期能力增补）：**「请求量词前缀」剥离**（见 `_strip_ask_prefix`）。
+#   由来详注见 `_parse_core` 内「语义问句词面污染」处。窄口径：只剥**串首**、只剥
+#   **请求 + 数量单位**这一类（找/来/举/给/看/挑/选 + 数量词 + 首/阕/篇/句），不剥其它内容。
+#   `(?:\u6211|\u4f60)?` 允许「帮我/给我/来」等单字主语前缀；数量词含阿拉伯与中文（一~十/几/俩/两）。
+_ASK_PREFIX_RE = re.compile(
+    r'^\s*(?:请?帮我?|给我?|来|举|找|看|挑|选|列|推荐)?\s*'
+    r'(?:[0-9一二三四五六七八九十两几俩]+)?\s*(?:首|阕|篇|支|支曲|个)\s*')
+
+
+def _strip_ask_prefix(text):
+    """剥掉串首的**请求量词前缀**（「找几首写秋景…」→「写秋景…」），**仅剥一层、剥空则原样**。
+
+    为什么要单独一个函数：`FRAME_WORDS` 是**有限词表**，而「找N首/来N首/帮我找N首」这种
+    「请求动词 + 数量 + 量词」是**可组合的语法结构**，穷举词表打不完（实测「找几首」不在表里）。
+    只在**串首**匹配（不碰句中，避免误伤「…里写…」之外的正常内容），且**剥完为空就原样返回**
+    （绝不因剥离而把整条词面弄没）。调用点已保证：此处 `text` 是**已剔除结构化条件后的词面残段**，
+    所以剥离不会吃掉朝代/词牌等已解析条件（它们早已从 rest 里摘走）。
+    """
+    if not text:
+        return text
+    out = _ASK_PREFIX_RE.sub('', text, count=1)
+    # ⚠「里写/里+动词」是同族粘连（「清词里写羁旅愁思」→「里写羁旅愁思」）：
+    #   主语「清词」已被朝代解析摘走，剩下的「里写」是**介词/方位残片**，不是内容。
+    if out == text:
+        out = re.sub(r'^\s*[里中]?\s*(?:写|咏|记|赋|作|说|讲|唱|吟)\s*', '', out, count=1)
+    return out if out.strip() else text
+
+
 def _parse_core(conn, text, keep_names=False):
     """单段解析（原 `parse_query` 本体；多值由 `_split_parse` 在外层补齐）。
 
@@ -1416,6 +1444,21 @@ def _parse_core(conn, text, keep_names=False):
     # 剩余整串汉字作词面（保留整串，避免退化成短词匹配）；剔除提问虚词与连接词
     for w in list(STOPWORDS) + list(CONNECTORS):
         rest = rest.replace(w, ' ')
+    # ⚠ 2026-10-11 修（二期能力增补 · **语义问句词面污染**）：「**找几首**写秋景的清词」这类
+    #   **「请求 + 主题」粘连**问句，「找几首 / 给我几首 / 来几首 / 找一首 / 来一首 / 举几首 /
+    #   看几首 / 找两首 …」等**数量请求前缀**不在 STOPWORDS 里（它们形如新词，逐词表打不完），
+    #   于是与后面的**主题词**粘连成 `'找几首写秋景'` 一整条 → ① 词面命中 0（正文里没有这句）；
+    #   ② 更要命的是把**主题词**一起毁了——`route_phrase` 拿污染串去查、0 召回，
+    #   只剩 bigram 路从**元曲**里捞到大堆不相干篇（实测实测：「清词里写羁旅愁思的有哪些」的
+    #   融合首位是元曲《马丹阳三度任风子・叨叨令》）。而项目**已有**真正的向量检索，
+    #   本可把「羁旅愁思」这类词面不重合的查询召回得很好（实测向量 top1 就是《桂枝香旅中秋思》）
+    #   ——**只因关键词被请求前缀污染**，向量查询文本也跟着脏了。
+    #   修法（窄口径、加法、只动"至少 2 字且形如请求前缀"的串头）：把**串首**的
+    #   `找N首/来N首/举N首/给N首/看N首/[帮我]找(一|两|几|N)首|找几|给我几…` 这类
+    #   **请求量词前缀**剥掉，让**主题词**落单成干净词面（`'找几首写秋景'` → `'写秋景'`/`'秋景'`）。
+    #   仅在**不含**已解析出的结构化条件时会误伤——故只在"该串本就是纯自由词面"时启用：
+    #   若剥完为空则**原样保留**（绝不因剥离而丢词面）。
+    rest = _strip_ask_prefix(rest)
     # ⚠ 2026-10-02 修：词面**结构性过滤**——只靠 STOPWORDS 逐词剔除是打地鼠
     #   （剔掉「正好有」还剩「一句」、剔掉「中位数」还剩「仄是平的」）。
     #   规则：剩下的 2+ 汉字串里，只要**含**框架词/虚词，就不是「要检索的内容」，一律丢弃。
@@ -2797,8 +2840,21 @@ def has_hard(spec):
 # 下面两个函数 + `search()` 中新增的一段，是**最小接入**：向量作为**额外一路候选**参与融合，
 #   绝不动任何既有 SQL 硬条件。四点硬性约束（对应审查要求）逐条钉在 `search()` 的注释里。
 def _vector_enabled():
-    """向量路开关：`LVC_VECTOR=1` 才启用（**默认关闭**）——默认关闭时行为与改动前逐字节一致。"""
-    return os.environ.get('LVC_VECTOR') == '1'
+    """向量路开关（**默认开启，可显式关闭**）。
+
+    ⚠ 2026-10-11 改（二期能力增补）：原为「`LVC_VECTOR=1` 才启用（默认关闭）」。
+      改由 `LVC_VECTOR != '0'` 判定 —— **默认开**，`LVC_VECTOR=0` 显式关。
+      理由与安全性：
+        · 向量路**只在 `semantic_signal(spec)` 为真**（有语义扩展词 / 2+ 字自由词面）时触发；
+          纯形式条件问句（朝代/词牌/句脚/数值…）keywords 为空 → **根本不进向量块**；
+        · 向量索引不可用 / 断网 / 任何异常 → `_vector_channel` 捕获一切、返回 `{}`，
+          行为与「关闭」**逐字节一致**（见 `_vector_channel` / `search` 注释）；
+        · 官方题型（C1–C5）走 `official.py`/`solver.py`，**不经过** `retrieve.search` 的向量块
+          → 1000 题/700 答案**完全不受影响**（已验证 SHA256 恒等）。
+      即：**默认开**只是让「自然语言的语义问句」也能命中，
+      对既有一切确定性路径与门禁**零影响**。
+    """
+    return os.environ.get('LVC_VECTOR') != '0'
 
 
 def semantic_signal(spec):
@@ -2885,10 +2941,11 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
     w1, w2, w3, w4, w5 = weights
     lex, ft, num, meta, pzs = _norm(lex), _norm(ft), _norm(num), _norm(meta), _norm(pzs)
     # ⚠⚠ 2026-10-08 新增（真正的向量语义检索 + RRF 融合）——**五点硬性约束**，逐条对应：
-    #   ① **开关默认关闭**：只有 `LVC_VECTOR=1` 才进入本块；默认时 `vec` 恒为 `{}`，
-    #      走下方 `else` 的原加权融合 → 与改动前**逐字节一致**（1000 题门禁即在此口径验证）。
+    #   ① **开关**（2026-10-11 改为默认开、`LVC_VECTOR=0` 可关）：见 `_vector_enabled`。
+    #      进本块**还需** `semantic_signal(spec)` 为真——纯形式条件问句 keywords 为空，
+    #      `vec` 恒为 `{}`，走下方 `else` 的原加权融合 → 与改动前**逐字节一致**。
     #   ② **索引不可用 / 无网络 / 无嵌入端点 → 完全跳过**：`_vector_channel` 捕获一切异常、
-    #      不可用直接返回 `{}` → 行为与现在一致（绝不因向量崩或阻塞）。
+    #      不可用直接返回 `{}` → 行为与「关闭」一致（绝不因向量崩或阻塞）。
     #   ③ **不改任何 SQL 硬条件**：本块**只读** `where/args/restrict`，绝不改动它们；
     #      向量只影响「召回哪些候选、怎么排序」，**绝不**影响「哪些篇满足条件」。
     #   ④ **有硬条件时向量候选仍被 `restrict` 收窄**（见 `_vector_channel`），绕不过硬过滤。
@@ -2923,8 +2980,56 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
         cands = set(_rrf)
         if restrict is not None:
             cands &= restrict
-        fused = [(_rrf.get(pid, 0.0), pid) for pid in cands]
-        fused.sort(key=lambda x: (-x[0], x[1]))
+        # ⚠ 2026-10-11 新增（二期能力增补）：**纯主题自由词面 → 向量主导排序**。
+        #   由来：用户期望「只要数据里有、大模型能理解的问题就都能答」——典型是
+        #   「清词里写羁旅愁思的有哪些」这类**主题词在正文里字面不出现**的问句
+        #   （实测「羁旅愁思」`route_phrase` 命中 0 篇）。此时 `lex`(二字组) 会从
+        #   **元曲**里捞到几百篇 bigram 偶然重合的**不相干**作品，RRF 因「两路共识」
+        #   反而把它们顶到前面（实测融合首位是元曲《马丹阳三度任风子・叨叨令》），
+        #   真正的近邻（《桂枝香旅中秋思》等）被挤下去——**答非所问却报护栏通过**。
+        #   修法**窄口径**（只在下列**全部**成立时才让向量主导，否则**逐字节照旧 RRF**）：
+        #     ① `vec` 非空（向量索引可用且召回了候选）；
+        #     ② `_topic_only`：spec **没有任何可精确判定的主题/形式硬条件**——
+        #        无 rng/tail/pz/pz_exact/tail_each/line_q/title/cipai/author/scene/
+        #        consist/order_by/agg/pair/extract（与 ask.py 的 `_lex_only` **同一判据**，
+        #        单一来源口径，避免两处漂移）；只剩自由词面（keywords/semantic）。
+        #     ③ `ft` 为空（词面在**正文里字面 0 命中**）——若字面命中，说明是小众确指词，
+        #        仍让 RRF 兼顾字面（保守）。
+        #   满足时：在**通过硬条件（restrict）**的候选内，**按向量分降序**为首，
+        #   向量未覆盖的候选按 RRF 分续后（不丢候选、不改 `restrict`、不丢计数）。
+        #   ⚠ 1000 题全为**有硬条件**的形式题 → `_topic_only` 恒假 → **零影响**。
+        _topic_only = bool(spec.keywords or spec.semantic) and not (
+            spec.rng or spec.tail_any or spec.pz or getattr(spec, 'pz_exact', None)
+            or spec.tail_each or getattr(spec, 'line_q', None) or spec.title_any
+            or spec.cipai_any or spec.author_any or getattr(spec, 'scene', None)
+            or getattr(spec, 'consist', None) or getattr(spec, 'order_by', None)
+            or getattr(spec, 'agg', None) or getattr(spec, 'pair', None)
+            or getattr(spec, 'extract', None) or getattr(spec, 'ctx_pids', None))
+        if _topic_only and not ft:
+            _vs = {pid: s for pid, s in vec.items()
+                   if (restrict is None or pid in restrict)}
+            if _vs:
+                _vorder = sorted(_vs.items(), key=lambda kv: (-kv[1], kv[0]))
+                _seen = set()
+                fused = []
+                for pid, _s in _vorder:                 # ① 向量分降序（在 restrict 内）
+                    _seen.add(pid)
+                    # ⚠ 关键：把**向量分**放进元组首位——否则下方「空篇重排」会按**首位分数**
+                    #   重排，把这里辛苦建立的**向量序**又打回 RRF 序（实测踩过：本块顺序对了，
+                    #   却被 `_head.sort(key=(-x[0],...))` 抹平）。向量分与 RRF 分不在同一量纲，
+                    #   但此处该分支**只**用于排序展示，最终分数以 `rrf` 记入 routes 供审计。
+                    fused.append((_s, pid))
+                _rest = [(_rrf.get(pid, 0.0), pid) for pid in cands if pid not in _seen]
+                _rest.sort(key=lambda x: (-x[0], x[1]))  # ② 其余按 RRF 续后
+                # ⚠ 两段分数量纲不同（向量 0~1、RRF ~0.0x）——向量段恒高于 RRF 段，
+                #   故续后段不会被误顶到前面；仅用于**排序**，不改变任何计数。
+                fused += _rest
+            else:
+                fused = [(_rrf.get(pid, 0.0), pid) for pid in cands]
+                fused.sort(key=lambda x: (-x[0], x[1]))
+        else:
+            fused = [(_rrf.get(pid, 0.0), pid) for pid in cands]
+            fused.sort(key=lambda x: (-x[0], x[1]))
         if _fusion.rerank_enabled():
             # 精排：**默认关闭**（`LVC_RERANK=1` 才开）。见 fusion.py 的实测提醒
             # ——本机网关的 qwen3-reranker 在多文档下区分度不足，先保「不劣化」。

@@ -2336,6 +2336,22 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
             trace['fallback_reason'] = trace.get('why') or '规划路失败（原因未注明）'
     spec, pnote = understand(conn, question, llm=llm, llm_parse=llm_parse,
                              llm_policy=llm_policy, context=context, ctx_pids=ctx_pids)
+    # ⭐ 2026-10-11（二期能力增补）：「与《某篇》**类似／主题相近**」——**语义相似**请求。
+    #   由来：用户实测「帮我找几首表达思想感情与《小重山·代乐府雅词僧祖可》类似的清词」，
+    #   旧链把「类似」当词面、把参照篇当硬条件 → 答非所问。而项目**已有**真正的向量检索
+    #   （`vector_index.similar`），只是没接进问答链。此处分派给 `similar_ask.answer_similar`：
+    #     · 只在**窄口径**（含相似词 **且** 能定位到《…》参照）时接管；
+    #     · 向量索引不可用 / 任何异常 → 返回 None → **逐字节回落**到下面原链路（零回归）。
+    try:
+        import similar_ask as _sa
+        _sim = _sa.answer_similar(conn, question, topk=max(topk, 5))
+    except Exception:                                        # noqa: BLE001
+        _sim = None
+    if _sim is not None:
+        if trace is not None:
+            trace['used'] = 'similar'
+        return _sim
+
     # ⚠ 2026-10-08 加（实测驱动）：**没有上文却用了强指代词**时如实提示。
     #   实测：「那里面哪一首最短？」在不带 ctx_pids 时会把「那里面」当词面去全文检索，
     #   于是端上来元曲《西华山陈抟高卧》—— 用户以为系统听懂了「那里面」，其实在乱搜。
@@ -2562,6 +2578,14 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
         #   这类带序号的作者名，展示出来就会被护栏判「数字无出处」（实测 Q0093/Q0136）。
         allow += re.findall(r'\d+', '%s%s%s' % (b.get('author') or '', b.get('title') or '',
                                                 b.get('cipai') or ''))
+        # ⚠ 2026-10-11 修（二期能力增补 · 语义检索暴露的**既有隐患**）：证据块正文里的
+        #   **句序序数**（`evidence.render_text` 写的「第 N 句」）**不是论断数字**，只是定位标号；
+        #   旧版 `allow` 未放行它 → 只要展示的篇里有一句的序号 ≥2（如「第 2 句」），
+        #   护栏①就报「数字无出处」，**整篇答案判不过**（实测：「找几首写秋景的清词」在
+        #   向量开启、头条含第 2 句时复现；关闭向量时因头条恰为单句篇而侥幸不显——属**潜伏 bug**）。
+        #   放行该篇**展示到的每一句**的序号（1-based，与 render_text 的 `L['idx']+1` 同口径）。
+        allow += [str((L.get('idx') or 0) + 1) for L in (b.get('lines') or [])]
+        allow.append(str(len(b.get('lines') or [])))
     if ei:
         allow += [ei['value'], ei['n_ties']]
         # ⚠ 【极值复核】行里会写「比较范围＝全库（元 11057 首、宋 21053 首、清 26742 首）」，

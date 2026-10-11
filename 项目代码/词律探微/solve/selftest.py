@@ -423,6 +423,25 @@ def main():
            (_stq.author_any, _stq.cipai_any))
         _btn = _rt.count_hits(_c4, _stq)
         ok('题名：带书名号的问句命中数=真值且>0', _btn == 1, _btn)
+        # ⭐ 2026-10-11 加（二期能力增补 · 实测驱动）：「**请求量词前缀**」不得与主题词粘连。
+        #   由来：「找几首写秋景的清词」把「找几首」与「秋景」粘连成 `'找几首写秋景'` →
+        #   词面在正文 0 命中、全文路空转，只剩 bigram 从元曲里捞噪声。修法 `_strip_ask_prefix`。
+        #   铁律：剥完后**主题词必须落单**、且**不得吃掉已解析的结构化条件**。
+        for _qp, _want in (('找几首写秋景的清词', '秋景'),
+                           ('清词里写羁旅愁思的有哪些', '羁旅愁思'),
+                           ('给我几首写离别的清词', '离别'),
+                           ('来两首咏梅的清词', '咏梅')):
+            _sp = _rt.parse_query(_c4, _qp)
+            _joined = ''.join(_sp.keywords or [])
+            ok('请求前缀：%s → 主题词不被前缀污染' % _qp,
+               _want in _joined and not any(w in _joined for w in ('找几首', '给我几首', '来两首', '里写')),
+               _sp.keywords)
+            ok('请求前缀：%s → 朝代条件不被吞' % _qp, _sp.dynasty_any == ['清'], _sp.dynasty_any)
+        # 纯形式条件问句**不得**因前缀剥离而丢条件（回归防线）
+        _sp3 = _rt.parse_query(_c4, '清 临江仙 仄声比例高于45%')
+        ok('请求前缀：纯形式条件问句不误伤（词牌/阈值仍在）',
+           _sp3.cipai_any == ['临江仙'] and _sp3.rng.get('ze_min') == 45.0,
+           (_sp3.cipai_any, _sp3.rng))
         # ④ 句脚平仄 / 声律模式两类条件同样要「展示命中句」
         for _q2 in ('句脚为平 清 临江仙', '声律模式 仄仄平平仄'):
             _sp2 = _rt.parse_query(_c4, _q2)
@@ -758,6 +777,36 @@ def main():
     ok('配对题：未实现的维度必须认账（拒答且说清）',
        _ask10.answer(_c10, _q10c, topk=3).get('refused') is True)
     _c10.close()
+
+    # ============================================================ ⑬ 语义相似（二期能力增补）
+    # 2026-10-11 加：`similar_ask.answer_similar` 的**意图识别 + 优雅降级 + 护栏**三条铁律。
+    #   · 窄口径意图：含相似词 **且** 能定位/引用《…》参照 → 接管；否则返回 None 回落主链。
+    #   · 向量不可用 / 定位不到 / 任何异常 → 返回 None（主链逐字节照旧，绝不半成品）。
+    #   · 接管时：答案必须过四道护栏（尤其「非全集承诺」的边界声明与优劣型问句匹配）。
+    print('\n--- 语义相似（similar_ask）---')
+    import similar_ask as _SA
+    _c13 = _sq10.connect(_db10)
+    _c13.row_factory = _sq10.Row
+    for _q13, _want in (('与《小重山·代乐府雅词僧祖可》类似的清词', True),
+                        ('找几首与《念奴娇·赤壁怀古》主题相近的词', True),
+                        ('清 临江仙 仄声比例高于45%', False),
+                        ('句脚是「愁」的清词有哪些', False),
+                        ('找几首写秋景的清词', False)):
+        ok('相似意图：%s → %s' % (_q13, '接管' if _want else '不接管'),
+           _SA.is_similarity_ask(_q13) is _want, _SA.is_similarity_ask(_q13))
+    _c13.close()
+    _c13b = _sq10.connect(_db10)
+    _r13b = _ask10.answer(_c13b, '与《小重山·代乐府雅词僧祖可》类似的清词', topk=5)
+    ok('相似问答：接管并给出证据块', bool(_r13b.get('blocks')), len(_r13b.get('blocks') or []))
+    ok('相似问答：护栏通过', _r13b['verify'][0], '；'.join(_r13b['verify'][1])[:140])
+    ok('相似问答：如实声明「非全集承诺」',
+       '全集' in _r13b['answer'] and '最像' in _r13b['answer'])
+    _c13b.close()
+    # 参照篇不存在 → 优雅回退（不是崩、不是空答案）：要么按其文字做语义检索，要么回落主链
+    _c13c = _sq10.connect(_db10)
+    _r13c = _ask10.answer(_c13c, '与《不存在的词·假题目》类似的清词', topk=5)
+    ok('相似问答：参照不存在 → 不崩且给出答案', bool(_r13c.get('answer')), _r13c.get('kind'))
+    _c13c.close()
 
     print('\n================ 自检汇总 ================')
     print('检查项 %d，失败 %d' % (N, len(FAIL)))

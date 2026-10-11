@@ -82,6 +82,16 @@ def check_numbers(answer_text, blocks, allow=()):
         except (TypeError, ValueError):
             pass
     per_block = {b['eid']: evidence.numbers_of(b) for b in blocks}
+    # ⚠ 2026-10-11 修（二期能力增补 · 语义检索暴露的**既有隐患**）：证据块**逐句渲染**会给
+    #   每句标上**句序序数**（「第 N 句」，= `L['idx']+1`）。这些序数是**通用标号**（任何篇都能
+    #   出现 1、2、3…），与某篇的 change 绝对值**同形**时极易误伤：实测某篇 change=-2.0 →
+    #   abs_only={'2','2.0'}，于是一篇**未引用**的「第 2 句」行被判「绝对值专属写法」而误剥。
+    #   序数**永远不是**「change 的绝对值专属写法」——故在 abs_only 里**全局排除**所有序数。
+    _ordinals = set()
+    for b in blocks:
+        for L in b.get('lines', []):
+            if L.get('idx') is not None:
+                _ordinals |= evidence.num_variants(L['idx'] + 1)
     # ⚠ 2026-10-06 修（外部审查 P1-24）：「变化值」与「绝对变幅」语义不同，但
     #   evidence.numbers_of 把 change 与其 abs 混进同一扁平集合——证据 change=-3.7 时，
     #   答案写「变化 3.7」（未提「绝对/变幅」）也会被放行。这里按行语义收窄：
@@ -111,9 +121,34 @@ def check_numbers(answer_text, blocks, allow=()):
             for k in ('han_len', 'ping', 'ze'):
                 if L.get(k) is not None:
                     others |= evidence.num_variants(L[k])
-        d = (derived - base) - others
+            # ⚠ 2026-10-11 修（二期能力增补 · 语义检索暴露的**既有隐患**）：
+            #   证据块正文里的**句序序数**（`render_text` 写的「第 N 句」，= `L['idx']+1`）
+            #   是**定位标号**、不是论断数字，`evidence.numbers_of` 已把它算作合法。
+            #   但 `abs_only` 的「扣除他字段」集合此前没算它 → 当某篇 change 恰为 ±N
+            #   （如 E5 change=-2.0 → abs_only={'2','2.0'}）时，一篇**未引用**的
+            #   「第 2 句」行会把 `2` 当作「绝对值专属写法」而**误剥** → 整篇答案判不过
+            #   （实测：「找几首写秋景的清词」向量开启后复现）。把序数并入 `others` 即修。
+            if L.get('idx') is not None:
+                others |= evidence.num_variants(L['idx'] + 1)
+        d = (derived - base) - others - _ordinals
         if d:
             abs_only[b['eid']] = d
+    # ⚠ 2026-10-11 修（同族根因 · **跨块**视角）：某篇的 change 绝对值 `N`，可能是**另一篇**
+    #   某字段的**合法值**（实测 E5 change=-7.0 → abs_only={'7','7.0'}，而 E2 某句 `ze=7` 合法）。
+    #   旧版对**未引用**行会减去**所有**块的 abs_only → 把 E2 那句合法的 `ze=7` 误判「绝对值
+    #   专属写法」而无出处。故这里收集「全库证据块（所有篇、所有字段，除 change 外）本就合法的
+    #   数字」，在**未引用行**的判定里从 abs_only 中扣除（`_legal_anywhere`）。
+    _legal_anywhere = set()
+    for b in blocks:
+        for k in ('sent_n', 'han_len', 'ping', 'ze', 'ze_ratio', 'longest_len', 'threshold'):
+            if b.get(k) is not None:
+                _legal_anywhere |= evidence.num_variants(b[k])
+        for L in b.get('lines', []):
+            for k in ('han_len', 'ping', 'ze'):
+                if L.get(k) is not None:
+                    _legal_anywhere |= evidence.num_variants(L[k])
+            if L.get('idx') is not None:
+                _legal_anywhere |= evidence.num_variants(L['idx'] + 1)
 
     problems = []
     for raw_line in answer_text.splitlines():
@@ -125,8 +160,18 @@ def check_numbers(answer_text, blocks, allow=()):
         if not cited:
             allow_line |= all_allow
         if not any(w in raw_line for w in _ABS_WORDS):
-            for e in (cited or set(abs_only)):
-                allow_line -= abs_only.get(e, set())
+            if cited:
+                for e in cited:
+                    allow_line -= abs_only.get(e, set())
+            else:
+                # ⚠ 2026-10-11 修（跨块根因）：**未引用**行无法归到某一篇，旧版减去**所有**块的
+                #   abs_only → 会把「另一篇里本就合法的同值」误判无出处（实测 E5 change=-7.0 的
+                #   abs_only={'7'} 误伤 E2 那句合法的 `ze=7`）。故未引用行只剥**全库证据里都
+                #   取不到**的绝对值写法：`abs_only` 各块并集 减去 `_legal_anywhere`。
+                _union = set()
+                for s in abs_only.values():
+                    _union |= s
+                allow_line -= (_union - _legal_anywhere)
         for m in NUM_RE.finditer(line):
             tok = m.group(0)
             # ⚠ 2026-10-11 修（二期复核 N1）：NUM_RE 只抓「数字本体」，不含正负号，

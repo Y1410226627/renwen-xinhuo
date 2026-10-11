@@ -12,6 +12,10 @@ rem Enable the planner-based route (Planner - Plan - Executor) by default.
 rem Every answer reports which route it actually used (see route.used in /api/ask).
 if "%LVC_PLANNER%"=="" set "LVC_PLANNER=plan"
 
+rem Vector semantic retrieval is ON by default (LVC_VECTOR != 0); set LVC_VECTOR=0 to disable.
+rem It only fires on free-form semantic questions; formal-condition queries and official
+rem C1-C5 questions never enter the vector block, so delivery answers are unaffected.
+
 echo Starting local QA web app (browser will open automatically)...
 echo Close this window to stop the server.
 echo.
