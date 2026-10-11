@@ -1580,7 +1580,10 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
 - **铁证（零回归）**：`answers_700.jsonl` sha256 前 16 位 `bf863368ffaf85d8`
   == `solve/data/golden_sha.json` 公开集 `BF863368FFAF85D8…`。**交付答案逐字节未变**；
   `solve/solver.py` 不导入 ask/retrieve → 问答与前端改动**结构性不影响**交付答案。
-- **一键复现基线**：`reproduce.py --skip-build --quick` **13/15 → 14/15**（第 9 遍修 `check_agg` 之效）。
+- **一键复现基线**：`reproduce.py --skip-build --quick` **13/15 不变**（2 项 FAIL 即上文
+  D14 暂缓族，**不是缺陷、不得为凑数而改**）。`check_agg` 独立跑 **82 项 / 78 比对 / FAIL 0**
+  —— 第 9 遍自伤回归修好后本就应 PASS，故基线数字不变（**修正一处口径误记**：此前曾误写
+  「13/15→14/15」，实为 13/15；`check_agg` 在本轮开始前即已 PASS，回归是**轮内自伤并轮内修复**）。
 - **状态**：✅ 已接受。**影响**：`web/serve.py`（写接口护栏 / 只读连接 / 错误信封）、
   `frontend/src/views/{ResearchView,CipuView,GraphView}.vue`、`solve/aggregate.py`、
   `tools/build_indexes.py`；`corpus.db` **零改动**。
