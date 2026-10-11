@@ -43,6 +43,11 @@ jobs:
           # 指向不存在的路径：显式让语料相关节走 SKIP（不依赖 runner 上的偶然目录）
           CORPUS_ROOT: /nonexistent-no-corpus
         run: python solve/selftest.py
+      # 文档↔行为一致性（不依赖语料）：README 命令活性 + 数字/文件/口径承诺。
+      # 2026-10-11 修复了本脚本两处缺陷（detail 为 list 崩溃 / 误把门禁脚本
+      # 的「不支持 --help」判成不可跑），修复后稳定 9/9，遂纳入 CI 常态门禁。
+      - name: 文档↔行为一致性（doc_check；不依赖语料）
+        run: python tools/doc_check.py
 
   frontend-gates:
     name: 前端逻辑 / 冒烟 / 文档 / 类型（无语料）
