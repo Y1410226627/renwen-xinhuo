@@ -98,7 +98,20 @@ def check_numbers(answer_text, blocks, allow=()):
             continue
         base = {str(v), '%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f}
         derived = {'%.1f' % abs(f), str(int(abs(f))) if abs(f) == int(abs(f)) else '%.1f' % abs(f)}
-        d = derived - base
+        # ⚠ 2026-10-11 修（二期复核 N1 深挖）：abs_only 若只按「数值」剔除，会**误伤**
+        #   同值他字段——实测 change=-8.0 时 abs_only={'8','8.0'}，而该篇某句 ping 恰为 8，
+        #   于是正当写法「平 8」被判无出处。故先把「该块其他字段（不含 change）本就合法
+        #   的数字」收集起来，从 abs_only 中扣除：只有**仅凭 change 的绝对值才成立**的
+        #   数，才算「绝对值专属写法」。
+        others = set()
+        for k in ('sent_n', 'han_len', 'ping', 'ze', 'ze_ratio', 'longest_len', 'threshold'):
+            if b.get(k) is not None:
+                others |= evidence.num_variants(b[k])
+        for L in b.get('lines', []):
+            for k in ('han_len', 'ping', 'ze'):
+                if L.get(k) is not None:
+                    others |= evidence.num_variants(L[k])
+        d = (derived - base) - others
         if d:
             abs_only[b['eid']] = d
 
@@ -114,17 +127,26 @@ def check_numbers(answer_text, blocks, allow=()):
         if not any(w in raw_line for w in _ABS_WORDS):
             for e in (cited or set(abs_only)):
                 allow_line -= abs_only.get(e, set())
-        for m in NUM_RE.findall(line):
-            cands = {m}
+        for m in NUM_RE.finditer(line):
+            tok = m.group(0)
+            # ⚠ 2026-10-11 修（二期复核 N1）：NUM_RE 只抓「数字本体」，不含正负号，
+            #   于是「变化 -10.3」与「变化 10.3」都抽出 10.3，护栏无法区分二者——
+            #   只要真值恰为 -10.3，写绝对值也会命中真值的负号形态而误放行。
+            #   修法：看**原文中该数字紧邻的前一个字符**是否负号，据此决定候选是否带负号。
+            neg_tok = m.start() > 0 and line[m.start() - 1] in '-−'
+            cands = {tok}
             try:
-                f = float(m)
-                cands |= {'%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f,
-                          '-%s' % m, '-%.1f' % f}
+                f = float(tok)
+                cands |= {'%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f}
+                if neg_tok:
+                    # 文中写作负数 → 只认同真值的负数形态
+                    cands.add('-%s' % tok)
+                    cands.add('-%.1f' % f)
             except ValueError:
                 pass
             if not (cands & allow_line):
                 problems.append('数字无出处（%s）：%s ｜行：%s'
-                                % ('／'.join(sorted(cited)) or '无引用', m,
+                                % ('／'.join(sorted(cited)) or '无引用', tok,
                                    raw_line.strip()[:60]))
         # 中文数字断言（P1-23）：先剥离引文（语料原文里的「二十四桥」不是系统断言）
         scan = _QUOTE_SPAN_RE.sub(' ', line)

@@ -15,6 +15,7 @@ import glob
 import json
 import os
 import re
+import threading
 
 # 汉字判定范围（**单一事实来源**，prosody.py / pronounce.py / tools 均从此导入）：
 #   * CJK 统一表意　U+4E00–U+9FFF
@@ -323,20 +324,29 @@ class Locator:
 # 语料列表 -> Locator 的缓存。键用 id(list) 易踩「id 复用」坑（旧 list 被回收后
 # 新 list 可能分到同一地址，于是拿到过期定位器），因此这里同时**强引用** poems 本身。
 _LOCATORS = {}
+# ⚠ 2026-10-11 加（二期复核 N2）：get_locator 是「检查-后-行动」，网页服务
+#   （ThreadingHTTPServer）在**冷缓存**下多线程同时首次请求同一份语料时，会因
+#   未加锁而并发重复构建 Locator（实测 8 线程 → 8 次构建；单次全量构建约 0.55 秒，
+#   要重建 5 个倒排索引）。这里加一把锁把「检查-构造-写入」原子化（double-check）。
+_LOCATORS_LOCK = threading.Lock()
 
 
 def get_locator(poems):
     key = id(poems)
     ent = _LOCATORS.get(key)
-    if ent is None or ent[0] is not poems:
-        # ⚠ 2026-10-04 修（代码审查 P3-6）：此字典**只增不删**且强引用整份语料，
-        #   常驻网页进程里反复 load_corpus 会持续吃内存。加上限（只留最近 4 份，
-        #   够用且不会把上一份语料整表钉死在内存里）。
-        if len(_LOCATORS) >= 4:
-            _LOCATORS.clear()
-        ent = (poems, Locator(poems))
-        _LOCATORS[key] = ent
-    return ent[1]
+    if ent is not None and ent[0] is poems:      # 快路径：命中即返回，不进锁
+        return ent[1]
+    with _LOCATORS_LOCK:
+        ent = _LOCATORS.get(key)                 # double-check：可能在等锁期间已被填好
+        if ent is None or ent[0] is not poems:
+            # ⚠ 2026-10-04 修（代码审查 P3-6）：此字典**只增不删**且强引用整份语料，
+            #   常驻网页进程里反复 load_corpus 会持续吃内存。加上限（只留最近 4 份，
+            #   够用且不会把上一份语料整表钉死在内存里）。
+            if len(_LOCATORS) >= 4:
+                _LOCATORS.clear()
+            ent = (poems, Locator(poems))
+            _LOCATORS[key] = ent
+        return ent[1]
 
 
 def locate(poems, author, cipai, head, require=2):

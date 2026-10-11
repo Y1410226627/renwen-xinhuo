@@ -408,6 +408,21 @@ def main():
         _bad = ['%s:%s' % (b['eid'], _rt.verify_spec_on_poem(_c4, b['pid'], _sp))
                 for b in _res['blocks'] if _rt.verify_spec_on_poem(_c4, b['pid'], _sp)]
         ok('条件题：逐篇复核均满足', not _bad, _bad)
+        # ⭐ 2026-10-11 加（二期复核 · 实测驱动）：「《词牌·题名》」**书名号包裹**时，
+        #   题名识别不得失效。旧版右边界 lookahead 不含《》，导致题名捕获返回 None →
+        #   「祖可」被贪心当作词人、其余残片落入词面 → 命中 0 篇、答非所问。
+        #   铁律：**有无书名号，解析结果必须逐字段一致**。
+        _q_t = '小重山·代乐府雅词僧祖可'
+        _q_tq = '《小重山·代乐府雅词僧祖可》'
+        _st = _rt.parse_query(_c4, _q_t)
+        _stq = _rt.parse_query(_c4, _q_tq)
+        ok('题名：无书名号 → 认出题名', _st.title_any == ['代乐府雅词僧祖可'], _st.title_any)
+        ok('题名：有书名号 → 同样认出题名', _stq.title_any == ['代乐府雅词僧祖可'], _stq.title_any)
+        ok('题名：书名号不留残渣（不得把题名里的字当词人）',
+           _stq.author_any == _st.author_any and _stq.cipai_any == _st.cipai_any,
+           (_stq.author_any, _stq.cipai_any))
+        _btn = _rt.count_hits(_c4, _stq)
+        ok('题名：带书名号的问句命中数=真值且>0', _btn == 1, _btn)
         # ④ 句脚平仄 / 声律模式两类条件同样要「展示命中句」
         for _q2 in ('句脚为平 清 临江仙', '声律模式 仄仄平平仄'):
             _sp2 = _rt.parse_query(_c4, _q2)

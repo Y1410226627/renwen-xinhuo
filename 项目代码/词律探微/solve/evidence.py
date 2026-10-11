@@ -187,20 +187,32 @@ def build_blocks(conn, rows, with_lines=1, spec=None):
     return blocks
 
 
+def num_variants(v):
+    """单个数值经「字段级白名单」展开后的全部可接受写法（含绝对值形态）。
+
+    ⚠ 2026-10-11 抽（二期复核 N1 深挖）：`guard.check_numbers` 在判断「变化值的绝对
+    值写法是否专属」时，需要知道某数值是否**已能由其他字段合法给出**，以扣除误伤。
+    这里与 `numbers_of.add` 保持**同一套展开**，避免两处口径漂移。
+    """
+    out = set()
+    out.add(str(v))
+    try:
+        f = float(v)
+        out.add('%.1f' % f)
+        out.add(str(int(f)) if f == int(f) else '%.1f' % f)
+        out.add('%.1f' % abs(f))
+        out.add(str(int(abs(f))) if abs(f) == int(abs(f)) else '%.1f' % abs(f))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return out
+
+
 def numbers_of(block):
     """单个证据块里**允许被引用的数字**（字段级白名单，含由字段派生的两种写法）。"""
     out = set()
 
     def add(v):
-        out.add(str(v))
-        try:
-            f = float(v)
-            out.add('%.1f' % f)
-            out.add(str(int(f)) if f == int(f) else '%.1f' % f)
-            out.add('%.1f' % abs(f))          # 「变化 -3.7」与「变化 3.7」同源
-            out.add(str(int(abs(f))) if abs(f) == int(abs(f)) else '%.1f' % abs(f))
-        except (TypeError, ValueError, OverflowError):     # inf 会抛 OverflowError（审查 B30）
-            pass
+        out.update(num_variants(v))
 
     for k in ('sent_n', 'han_len', 'ping', 'ze', 'ze_ratio', 'change', 'longest_len', 'threshold'):
         if block.get(k) is not None:
