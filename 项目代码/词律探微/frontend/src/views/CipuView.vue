@@ -31,7 +31,9 @@
                 <td class="num">{{ t.n_forms }}</td>
                 <td class="num">{{ t.upstream_raw_forms }}</td>
                 <td class="num">{{ t.verified_form_count }}</td>
-                <td class="dim"><a v-if="t.source_url" :href="t.source_url" target="_blank" rel="noopener">搜韵</a></td>
+                <!-- ★ 2026-10-11（审查 H4 同类）：谱库数据虽来自受信上游，仍只放行 http/https -->
+                <td class="dim"><a v-if="isHttpUrl(t.source_url)" :href="t.source_url"
+                                   target="_blank" rel="noopener noreferrer">搜韵</a></td>
               </tr>
             </tbody>
           </table>
@@ -120,6 +122,8 @@
         <span v-if="(s.missing_lines || []).length" class="bad">缺句 {{ s.missing_lines.join('、') }}</span>
         <span v-if="(s.extra_lines || []).length" class="bad">多句 {{ s.extra_lines.join('、') }}</span>
       </div>
+      <!-- ★ 2026-10-11：句读口径对用户透明——语料是句号级、谱书是韵句级，拆了要明说 -->
+      <p v-if="gran && gran.note" class="cp-gran">{{ gran.note }}</p>
       <!-- ★ 2026-10-10：对齐失败的句**必须点名**，否则「异」会被误读成「出律」 -->
       <p v-if="s.n_unaligned_lines" class="cp-warn">
         ⚠ 有 {{ s.n_unaligned_lines }} 句**字数与谱书不一致**（详见各句下方提示）：
@@ -167,6 +171,7 @@
 import { computed, ref } from 'vue';
 import AppShell from '../components/AppShell.vue';
 import { UI } from '../core/index.mjs';
+import { getJson } from '../api.js';
 
 const stamp = (typeof window !== 'undefined' && window.__STAMP__) || '';
 const dataNote = '数字归引擎 · 文料归检索 · 说法归生成 · 出处归引用';
@@ -191,6 +196,17 @@ const rows = computed(() => (res.value && res.value.rows) || []);
 const s = computed(() => (res.value && res.value.summary) || {});
 const formWhy = computed(() => (res.value && res.value.form_why) || '');
 const formNote = computed(() => (res.value && res.value.form_note) || '');
+const gran = computed(() => (res.value && res.value.granularity) || null);
+/* ★ 2026-10-11（审查 H4 同类）：只把 http/https 渲染成链接（伪协议一律不生成 href）。
+   ⚠ 自查第 7 遍修：改前用 `new URL(u, window.location.href)` 解析——**带 base** 会把
+     `//evil.com`（协议相对）、`foo/bar`（相对路径）都解析成本站 http(s) 协议 → 判为
+     「可用链接」，比后端 `safe_url`（必须显式 http(s) 前缀）**更宽**，与 ResearchView
+     的自查第 1 遍修法**不一致**。现改为**只看前缀**（大小写不敏感、不解析 base）：
+     显式 `http://` / `https://` 才放行，其余（相对路径 / 协议相对 / 伪协议）一律当文本。 */
+function isHttpUrl(u) {
+  if (!u) { return false; }
+  return /^https?:\/\//i.test(String(u).trim());
+}
 /* 体式分组：句数与作品相合的排前（竞品「匹配的词谱 / 其它词谱」） */
 const formsMatched = computed(() => {
   const n = res.value && res.value.summary ? res.value.summary.n_lines_poem : null;
@@ -205,10 +221,12 @@ const curFormHeader = computed(() => {
   return f ? (f.header || f.source_url || '') : '';
 });
 
+/* ★ 2026-10-11（审查 M12 / 低）：改前这里是一条**裸 fetch**（无 base、无超时、无统一文案），
+   且只读 `j.error.message`——服务端信封统一后 `error` 是**字符串**，会退化成「请求未成功」
+   把真正原因吃掉。现：走 `api.js` 统一入口（离线/超时/文案一致），并按新信封取人话。 */
 async function call(path) {
-  const r = await fetch(path);
-  const j = await r.json();
-  if (!r.ok || j.error) throw new Error((j.error && j.error.message) || '请求未成功');
+  const j = await getJson(path);
+  if (j && j.ok === false) throw new Error(j.error || j.code || '请求未成功');
   return j;
 }
 
@@ -306,6 +324,7 @@ function tip(c) {
 .cp-err { color: var(--warn); }
 .cp-warn { color: var(--accent2); background: var(--panel2); border-left: 3px solid var(--accent2);
   padding: 4px 8px; border-radius: var(--r); font-size: 13px; margin: 6px 0; }
+.cp-gran { color: var(--ink2); font-size: 12px; margin: 6px 0; }
 .cp-forms { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
 .cp-forms button.on { font-weight: 600; border-color: var(--accent); color: var(--accent); }
 .cp-legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }

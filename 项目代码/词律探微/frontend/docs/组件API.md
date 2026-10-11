@@ -87,16 +87,16 @@
 
 ## IndexView
 
-**文件**：`src/views/IndexView.vue`　·　**用途**：「总览」视图：项目一句话 + 六个入口卡 + 三道锁与复现命令
+**文件**：`src/views/IndexView.vue`　·　**用途**：「总览」视图：项目一句话 + 八个入口卡（含词谱对照/研究库） + 三道锁与复现命令
 
 ### props
 
 | 名称 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `corpusN` | `Number` | `58852` | — |
-| `qingN` | `Number` | `26742` | — |
+| `corpusN` | `Number` | `null` | — |
+| `qingN` | `Number` | `null` | — |
 | `rulesV` | `String` | `'5.0'` | — |
-| `gateCount` | `Number` | `171` | — |
+| `gateCount` | `Number` | `null` | — |
 | `root` | `String` | `'/'` | — |
 | `stamp` | `String` | `''` | — |
 | `dataNote` | `String` | `'data/corpus.db'` | — |

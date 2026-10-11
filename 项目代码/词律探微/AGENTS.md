@@ -93,10 +93,10 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 | 命令 | 管什么 |
 | --- | --- |
 | `node frontend/tools/check-core.cjs` | 逻辑层等价性（core vs 冻结基线，**213,972 项**） |
-| `node frontend/tools/ssr-smoke.mjs` | 6 视图 SSR 组件冒烟（**26 项**） |
+| `node frontend/tools/ssr-smoke.mjs` | 6 视图 SSR 组件冒烟（**31 项**） |
 | `node web/test_render.js` | 逐篇渲染（**26,742 篇 / 522,242 项**） |
 | `node web/verify_views.js --n 3000` | 前端 JS ↔ Python 引擎逐字段（**43,459 项**） |
-| `node web/test_ui.js` | 前端功能（含检索标尺、页面审计、**130 项**） |
+| `node web/test_ui.js` | 前端功能（含检索标尺、页面审计、**147 项**） |
 | `python web/test_api.py` | 服务端接口（**171 项**） |
 | `python web/test_e2e.py` | **端到端回归集**（真实问句 + 失败场景 + 多轮上下文 + 流式，**37 项**；会话/快照/研究库全隔离，可重复跑） |
 

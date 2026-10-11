@@ -33,3 +33,6 @@ _*.err
 **/data/snapshots/
 # 评测产物（regress 生成的答案文件等）：不入仓
 **/answers_*.jsonl
+
+# 派生索引侧车库：由 tools/build_indexes.py 从 corpus.db 只读派生，可再生（200MB+）：不入仓
+**/data/derived_index.db*

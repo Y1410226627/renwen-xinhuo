@@ -13,6 +13,7 @@
 """
 import argparse
 import os
+import re
 import sqlite3
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -75,50 +76,95 @@ def main():
 
     out = sqlite3.connect(a.out)
     _skip = _fts_names(src)
+    # ★ 2026-10-11（审查·低）：改前这里 `except Exception: pass`——
+    #   建表/拷数据失败**一声不响**，CI 拿到一份**缺表**的 fixture 却照样「通过」，
+    #   于是「门禁绿」其实什么都没验到。现在把失败**收集起来**，末尾统一报并令其失败。
+    failures = []
+
+    def _try(what, fn):
+        """执行并在失败时**记录**（不静默）；返回是否成功。"""
+        try:
+            fn()
+            return True
+        except Exception as exc:                                 # noqa: BLE001
+            failures.append('%s 失败：%s: %s' % (what, type(exc).__name__, exc))
+            return False
+
     # ① 结构：照抄全部 CREATE（表/索引/触发器）
+    #   跳过三类「本来就不该由我们建」的对象，否则会被记成失败而误报：
+    #     · `sqlite_*`（`sqlite_stat1` 等保留给内部使用，建了必然报 reserved）；
+    #     · FTS5 的**影子表**（`*_data/_idx/_docsize/...`）——它们由 `CREATE VIRTUAL TABLE`
+    #       自动创建，再照抄一次必然 `already exists`。
     for _typ, _name, sql in src.execute(
             "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL"):
-        try:
-            out.execute(sql)
-        except Exception:                                        # noqa: BLE001
-            pass
+        #   注意：**FTS 主表本身仍要建**（只是它的影子表不建）。
+        if str(_name).startswith('sqlite_') or (
+                _name in _skip and 'fts5' not in (sql or '').lower()):
+            continue
+        _try('建结构 %s' % _name, (lambda _s=sql: out.execute(_s)))
     # ② 数据：按 pid 抽子集
     ph = ','.join('?' * len(pids))
     copied = {}
     for name, cols in _tables_with_pid(src, _skip):
-        try:
-            rows = src.execute('SELECT * FROM "%s" WHERE pid IN (%s)' % (name, ph), pids).fetchall()
-        except Exception:                                        # noqa: BLE001
+        _rows = []
+        _try('读源表 %s' % name,
+             (lambda _n=name: _rows.extend(
+                 src.execute('SELECT * FROM "%s" WHERE pid IN (%s)' % (_n, ph), pids).fetchall())))
+        if not _rows:
             continue
-        if not rows:
-            continue
-        out.executemany('INSERT INTO "%s" VALUES (%s)' % (name, ','.join('?' * len(cols))), rows)
-        copied[name] = len(rows)
+        _try('写子集 %s' % name,
+             (lambda _n=name, _c=cols: out.executemany(
+                 'INSERT INTO "%s" VALUES (%s)' % (_n, ','.join('?' * len(_c))), _rows)))
+        copied[name] = len(_rows)
     # ③ 非 pid 的小表（authors / cipai 之类）整体照抄，保持实体校验可用
     for (name,) in src.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
         if name in copied or name in _skip or any(name == n for n, _c in _tables_with_pid(src, _skip)):
             continue
-        try:
-            cols = [r[1] for r in src.execute('PRAGMA table_info("%s")' % name)]
-            rows = src.execute('SELECT * FROM "%s"' % name).fetchall()
-            if rows and cols:
-                out.executemany('INSERT INTO "%s" VALUES (%s)' % (name, ','.join('?' * len(cols))), rows)
-                copied[name] = len(rows)
-        except Exception:                                        # noqa: BLE001
-            pass
+        _cols, _rows2 = [], []
+        _try('读小表 %s' % name, (lambda _n=name: _cols.extend(
+            [r[1] for r in src.execute('PRAGMA table_info("%s")' % _n)])))
+        _try('读小表数据 %s' % name,
+             (lambda _n=name: _rows2.extend(src.execute('SELECT * FROM "%s"' % _n).fetchall())))
+        if _rows2 and _cols:
+            _try('写小表 %s' % name,
+                 (lambda _n=name, _c=list(_cols): out.executemany(
+                     'INSERT INTO "%s" VALUES (%s)' % (_n, ','.join('?' * len(_c))), _rows2)))
+            copied[name] = len(_rows2)
     # ④ 重建 FTS / 倒排索引（外部内容表用 'rebuild' 指令）
     rebuilt = []
     for (name, sql) in src.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND sql LIKE '%fts5%'"):
-        try:
-            out.execute('INSERT INTO "%s"("%s") VALUES(%s)' % (name, name, "'rebuild'"))
+        # contentless（`content=''`）的 fts5 **不支持** 'rebuild'——这不是失败，是它本就如此。
+        if re.search(r"content\s*=\s*''", sql or ''):
+            continue
+        if _try('重建 FTS %s' % name,
+                (lambda _n=name: out.execute(
+                    'INSERT INTO "%s"("%s") VALUES(%s)' % (_n, _n, "'rebuild'")))):
             rebuilt.append(name)
-        except Exception:                                        # noqa: BLE001
-            pass
     out.commit()
-    out.close()
     src.close()
+
+    # ⑤ 收尾自检：**核心表必须在、且必须有行**——否则这份 fixture 是废的，必须让 CI 红。
+    missing = []
+    for t in ('poems', 'lines'):
+        try:
+            n = out.execute('SELECT COUNT(1) FROM "%s"' % t).fetchone()[0]
+        except Exception as exc:                                 # noqa: BLE001
+            missing.append('%s（查不到：%s）' % (t, exc))
+            continue
+        if not n:
+            missing.append('%s（0 行）' % t)
+    out.close()
+
+    if failures:
+        print('✗ 生成过程有 %d 处失败（fixture 可能不完整）：' % len(failures))
+        for f in failures[:20]:
+            print('   · %s' % f)
+    if missing:
+        print('✗ fixture 缺核心数据：%s' % '；'.join(missing))
+    if failures or missing:
+        return 1
 
     print('✅ 已生成 %s' % os.path.relpath(a.out, ROOT))
     print('   朝代=%s 篇数=%d ｜ 表：%s ｜ 重建索引：%s'

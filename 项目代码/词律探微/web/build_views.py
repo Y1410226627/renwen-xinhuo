@@ -185,9 +185,6 @@ def main():
         '/* pack.js —— 逐字解析页数据包（由 web/build_views.py 生成，勿手改）。 */\n'
         'window.__PACK__ = %s;\n' % jdump(pack, ensure_ascii=False, separators=(',', ':')))
 
-    # graph.json：图谱数据（两种取法都行：Vue 页 fetch 它，或直接读文件）
-    w('graph.json', graph)
-
     # rev.js：校订队列数据（同样要 file:// 可开，故用经典脚本内嵌）
     io.open(os.path.join(args.out, 'rev.js'), 'w', encoding='utf-8', newline='\n').write(
         '/* rev.js —— 校订队列数据（由 web/build_views.py 生成，勿手改）。 */\n'

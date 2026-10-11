@@ -18,7 +18,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { ParseApp, UI } from '../core/index.mjs';
 import AppShell from '../components/AppShell.vue';
-import { api } from '../api.js';
+import { api, post } from '../api.js';
 
 const props = defineProps({
   mode: { type: String, default: 'offline' }      // 'offline' | 'online'
@@ -239,10 +239,17 @@ function readCond() {
 
 /* 「每页」下拉框（cond.size）**不进检索条件**，只驱动分页。
    旧版把 size 从条件里排除后忘了接到分页上 → 用户改下拉框完全无效（永远 50/页）。
-   这里监听它，改了就更新页长并回到第 1 页**重新检索/重切页**（否则只改数字、列表不重排）。 */
+   这里监听它，改了就更新页长并回到第 1 页**重新检索/重切页**（否则只改数字、列表不重排）。
+
+   ★ 2026-10-11（审查·低）：判据改用 `_appliedSize`（**已应用的页长**）而不是 `size.value`。
+   深链 `?size=20` 时，onMounted 会先写 `cond.size` 再 `run(1)`；watcher 在微任务里才触发，
+   若它拿 `size.value` 比，会遇到「已被 onMounted 改成 20」的时序竞态（取决于 flush 时机，
+   表现为**首次检索跑两遍**——同样的请求打两次，慢且可能在慢机器上出现闪烁）。
+   现在 onMounted 同步把 `_appliedSize` 也写上，watcher 一眼看出「这就是我刚设的值」。 */
+let _appliedSize = size.value;
 watch(() => cond.size, (v) => {
   const n = parseInt(v, 10);
-  if (n > 0 && n !== size.value) { size.value = n; page.value = 1; run(1); }
+  if (n > 0 && n !== _appliedSize) { _appliedSize = n; size.value = n; page.value = 1; run(1); }
 });
 
 /* 声律模式白名单（与 core/parse.js 的 PZ_OK / web/serve.py _pz_glob 同一口径） */
@@ -448,7 +455,15 @@ async function showDetail(pid) {
   if (online) {
     try {
       const j = await api.parse(pid);
-      if (j.error) { detailHtml.value = `<span class="bad">${UI.esc(j.error)}</span>`; return; }
+      /* ★ 2026-10-11（审查·低）：失败分支原先**直接 return** —— 于是「换一篇看解析」失败时，
+         上一个字位的候选面板（`cand`）仍挂在页面上，pid 与候选对不上，看着像「A 篇的字的读音
+         被安到 B 篇」。失败也要收起候选面板，并把当前篇置空。 */
+      if (j.error) {
+        detailHtml.value = `<span class="bad">${UI.esc(j.error)}</span>`;
+        cand.value = null;
+        curDetailPid.value = '';
+        return;
+      }
       curDetailPid.value = j.pid || pid;      // 字位候选以「当前这篇」为主体
       cand.value = null;                       // 换篇即收起上一字位的候选面板
       const lines = (j.lines || []).map((L) => ({ text: L.text, pz: L.pz, tail: L.tail }));
@@ -460,6 +475,8 @@ async function showDetail(pid) {
       }, lastCond);
     } catch (e) {
       detailHtml.value = `<span class="bad">${UI.esc(e)}</span>`;
+      cand.value = null;                       // 同上：请求级失败也要收起残留候选面板
+      curDetailPid.value = '';
     }
     return;
   }
@@ -480,13 +497,10 @@ async function onCharClick(ev) {
   if (li === null || pos === null || !curDetailPid.value) { return; }
   candErr.value = '';
   try {
-    const p = new URLSearchParams({
-      pid: curDetailPid.value, line: String(li), pos: String(pos)
-    });
-    const r = await fetch('/api/pronounce/candidates?' + p.toString());
-    const j = await r.json();
-    if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '取候选失败'); }
-    const c0 = j.result || {};
+    // ★ 2026-10-11 修（审查 H1 同源）：走 api.js 唯一入口（带 base/超时/统一错误文案），
+    //   不再裸 fetch（旧写法在离线模式与超时场景没有任何提示）。
+    const j = await api.pronCandidates(curDetailPid.value, li, pos);
+    const c0 = (j && j.result) || {};
     c0.line = Number(li); c0.pos = Number(pos);
     cand.value = c0;
   } catch (e) { candErr.value = String(e.message || e); cand.value = { line: Number(li), pos: Number(pos), char: t.textContent, candidates: [], history: [] }; }
@@ -504,17 +518,15 @@ async function decide(c0) {
   if (!cand.value || !curDetailPid.value) { return; }
   const why = (cand.value.whyDraft || '').trim();
   try {
-    const r = await fetch('/api/research/write', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path: '/api/pronounce/decide',
-        pid: curDetailPid.value, line: cand.value.line, pos: cand.value.pos,
-        reading: c0.reading, tone: c0.tone, basis: (c0.source || ''), why,
-        client_token: `pron:${curDetailPid.value}:${cand.value.line}:${cand.value.pos}:${c0.reading}`
-      })
+    // ★ 2026-10-11 修（审查 H1）：旧写法 POST 到 **不存在的** `/api/research/write`
+    //   （服务端只按 URL 路径路由，根本不读 body 里的 path）→ 一律 LookupError → 404，
+    //   于是「人工选读」在本页**恒失败**（同一功能在研究库页正常）。改用已登记的
+    //   `/api/pronounce/decide`（与 ResearchView 同一条通路）。
+    await post.pronDecide({
+      pid: curDetailPid.value, line: cand.value.line, pos: cand.value.pos,
+      reading: c0.reading, tone: c0.tone, basis: (c0.source || ''), why,
+      client_token: `pron:${curDetailPid.value}:${cand.value.line}:${cand.value.pos}:${c0.reading}`
     });
-    const j = await r.json();
-    if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '选读失败'); }
     UI.toast('已登记选读（决策事件）');
     cand.value = Object.assign({}, cand.value, { picking: null });
     await refreshCand();
@@ -523,15 +535,11 @@ async function decide(c0) {
 
 async function withdraw(d) {
   try {
-    const r = await fetch('/api/research/write', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path: '/api/pronounce/withdraw', decision_id: d.decision_id || d.id,
-        why: '人工撤回', client_token: `wd:${d.decision_id || d.id}`
-      })
+    // ★ 2026-10-11 修（审查 H1，同上）：撤回走已登记的 `/api/pronounce/withdraw`。
+    await post.pronWithdraw({
+      decision_id: d.decision_id || d.id,
+      why: '人工撤回', client_token: `wd:${d.decision_id || d.id}`
     });
-    const j = await r.json();
-    if (!r.ok || j.error) { throw new Error((j.error && j.error.message) || '撤回失败'); }
     UI.toast('已撤回（回到基线）');
     await refreshCand();
   } catch (e) { candErr.value = String(e.message || e); }
@@ -539,16 +547,11 @@ async function withdraw(d) {
 
 async function refreshCand() {
   if (!cand.value) { return; }
-  const p = new URLSearchParams({
-    pid: curDetailPid.value, line: String(cand.value.line), pos: String(cand.value.pos)
-  });
-  const r = await fetch('/api/pronounce/candidates?' + p.toString());
-  const j = await r.json();
-  if (r.ok && !j.error) {
-    const c0 = j.result || {};
-    c0.line = cand.value.line; c0.pos = cand.value.pos;
-    cand.value = c0;
-  }
+  const j = await api.pronCandidates(
+    curDetailPid.value, String(cand.value.line), String(cand.value.pos));
+  const c0 = (j && j.result) || {};
+  c0.line = cand.value.line; c0.pos = cand.value.pos;
+  cand.value = c0;
 }
 
 /* 导出范围（F6）：离线 lastHits 是**全部命中**；在线是服务端分页后的**当前页**。
@@ -636,7 +639,12 @@ onMounted(() => {
   const q0 = UI.query();
   FIELDS.forEach((f) => { if (q0[f.id] !== undefined) { cond[f.id] = q0[f.id]; } });
   if (q0.q !== undefined) { cond.q = q0.q; }
-  if (q0.size) { cond.size = q0.size; size.value = parseInt(q0.size, 10) || size.value; }
+  /* 深链页长：同步写 `cond.size`（回显到下拉框）+ `size.value` + `_appliedSize`（压住 watcher），
+     于是下面那次 `run(1)` 是**唯一**的首次检索（见 watch 处说明）。 */
+  if (q0.size) {
+    const _n = parseInt(q0.size, 10);
+    if (_n > 0) { _appliedSize = _n; cond.size = q0.size; size.value = _n; }
+  }
   run(1);
   if (online) { loadMyWorks(); }
   if (q0.pid) { showDetail(q0.pid); }
@@ -747,20 +755,28 @@ onMounted(() => {
                   @click="applyFacet([['author', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
           </div>
           <div><h3>词牌 TOP</h3>
-            <span v-for="kv in facets.cipai" :key="'c' + kv[0]" class="chip"
-                  @click="applyFacet([['cipai', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
+            <span v-for="kv in facets.cipai" :key="'c' + kv[0]" class="chip" role="button"
+                  tabindex="0" @click="applyFacet([['cipai', kv[0]]])"
+                  @keydown.enter.prevent="applyFacet([['cipai', kv[0]]])"
+                  @keydown.space.prevent="applyFacet([['cipai', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
           </div>
           <div><h3>句脚字 TOP</h3>
-            <span v-for="kv in facets.tail" :key="'t' + kv[0]" class="chip"
-                  @click="applyFacet([['tail', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
+            <span v-for="kv in facets.tail" :key="'t' + kv[0]" class="chip" role="button"
+                  tabindex="0" @click="applyFacet([['tail', kv[0]]])"
+                  @keydown.enter.prevent="applyFacet([['tail', kv[0]]])"
+                  @keydown.space.prevent="applyFacet([['tail', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
           </div>
           <div><h3>仄声比例分布（点区间即筛）</h3>
-            <span v-for="(n, k) in facets.ratio" :key="'r' + k" class="chip"
-                  @click="applyFacet([['minZe', (ratioBuckets[k] || [0, 100])[0]], ['maxZe', (ratioBuckets[k] || [0, 100])[1]]])"
+            <span v-for="(n, k) in facets.ratio" :key="'r' + k" class="chip" role="button"
+                  tabindex="0" @click="applyFacet([['minZe', (ratioBuckets[k] || [0, 100])[0]], ['maxZe', (ratioBuckets[k] || [0, 100])[1]]])"
+                  @keydown.enter.prevent="applyFacet([['minZe', (ratioBuckets[k] || [0, 100])[0]], ['maxZe', (ratioBuckets[k] || [0, 100])[1]]])"
+                  @keydown.space.prevent="applyFacet([['minZe', (ratioBuckets[k] || [0, 100])[0]], ['maxZe', (ratioBuckets[k] || [0, 100])[1]]])"
             >{{ k }} <span class="dim">{{ n }}</span></span>
             <h3 style="margin-top:8px">声情转向</h3>
-            <span v-for="kv in facets.scene" :key="'s' + kv[0]" class="chip"
-                  @click="applyFacet([['scene', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
+            <span v-for="kv in facets.scene" :key="'s' + kv[0]" class="chip" role="button"
+                  tabindex="0" @click="applyFacet([['scene', kv[0]]])"
+                  @keydown.enter.prevent="applyFacet([['scene', kv[0]]])"
+                  @keydown.space.prevent="applyFacet([['scene', kv[0]]])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
           </div>
         </div>
       </div>
@@ -773,13 +789,13 @@ onMounted(() => {
         <table class="view-table">
           <thead><tr>
             <th>#</th>
-            <th class="sortable" @click="clickSort('author')">词人<span class="sort-ind" v-if="sortInd('author')">{{ sortInd('author') }}</span></th>
-            <th class="sortable" @click="clickSort('title')">题名<span class="sort-ind" v-if="sortInd('title')">{{ sortInd('title') }}</span></th>
-            <th class="sortable" @click="clickSort('cipai')">词牌<span class="sort-ind" v-if="sortInd('cipai')">{{ sortInd('cipai') }}</span></th>
-            <th class="sortable num" @click="clickSort('sent')">句数<span class="sort-ind" v-if="sortInd('sent')">{{ sortInd('sent') }}</span></th>
-            <th class="sortable num" @click="clickSort('len')">字数<span class="sort-ind" v-if="sortInd('len')">{{ sortInd('len') }}</span></th>
-            <th class="sortable num" @click="clickSort('ze')">仄比<span class="sort-ind" v-if="sortInd('ze')">{{ sortInd('ze') }}</span></th>
-            <th class="sortable" @click="clickSort('scene')">声情<span class="sort-ind" v-if="sortInd('scene')">{{ sortInd('scene') }}</span></th>
+            <th class="sortable" role="button" tabindex="0" @click="clickSort('author')" @keydown.enter.prevent="clickSort('author')" @keydown.space.prevent="clickSort('author')">词人<span class="sort-ind" v-if="sortInd('author')">{{ sortInd('author') }}</span></th>
+            <th class="sortable" role="button" tabindex="0" @click="clickSort('title')" @keydown.enter.prevent="clickSort('title')" @keydown.space.prevent="clickSort('title')">题名<span class="sort-ind" v-if="sortInd('title')">{{ sortInd('title') }}</span></th>
+            <th class="sortable" role="button" tabindex="0" @click="clickSort('cipai')" @keydown.enter.prevent="clickSort('cipai')" @keydown.space.prevent="clickSort('cipai')">词牌<span class="sort-ind" v-if="sortInd('cipai')">{{ sortInd('cipai') }}</span></th>
+            <th class="sortable num" role="button" tabindex="0" @click="clickSort('sent')" @keydown.enter.prevent="clickSort('sent')" @keydown.space.prevent="clickSort('sent')">句数<span class="sort-ind" v-if="sortInd('sent')">{{ sortInd('sent') }}</span></th>
+            <th class="sortable num" role="button" tabindex="0" @click="clickSort('len')" @keydown.enter.prevent="clickSort('len')" @keydown.space.prevent="clickSort('len')">字数<span class="sort-ind" v-if="sortInd('len')">{{ sortInd('len') }}</span></th>
+            <th class="sortable num" role="button" tabindex="0" @click="clickSort('ze')" @keydown.enter.prevent="clickSort('ze')" @keydown.space.prevent="clickSort('ze')">仄比<span class="sort-ind" v-if="sortInd('ze')">{{ sortInd('ze') }}</span></th>
+            <th class="sortable" role="button" tabindex="0" @click="clickSort('scene')" @keydown.enter.prevent="clickSort('scene')" @keydown.space.prevent="clickSort('scene')">声情<span class="sort-ind" v-if="sortInd('scene')">{{ sortInd('scene') }}</span></th>
             <th>操作</th>
           </tr></thead>
           <tbody id="rows">

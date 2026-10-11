@@ -243,6 +243,56 @@ def main():
     ok('D9 覆盖声明不得写成「原书核验」',
        all(('原书核验' not in n) for n in cov['boundary_notes']))
 
+    # ---------- D10 2026-10-11：句读口径对齐（语料句号级 vs 谱书韵句级） ----------
+    # 反例钉死：语料行是句号级（一行常含「，」两个小句），谱书句数组是韵句级；
+    # 直接拿句号级行去对谱式句 → 一句塞两句的字，多出的字被判成「多字/不符」= 大量假「异」。
+    _sub = re.compile('[，、；：]')
+    _p10a = [{'idx': 0, 'text': '上将于今数老张，飞扬世界不寻常。', 'pz': '仄仄平平仄仄平仄平仄仄仄平平'}]
+    _e10, _m10 = C.explode_lines(_p10a)
+    ok('D10 含句读的行被细分为两个小句', len(_e10) == 2 and _e10[0]['text'] == '上将于今数老张'
+       and _e10[1]['text'] == '飞扬世界不寻常。', repr([x['text'] for x in _e10]))
+    ok('D10 pz 按汉字序同步切分（不错位）',
+       _e10[0]['pz'] == '仄仄平平仄仄平' and _e10[1]['pz'] == '仄平仄仄仄平平',
+       '%r / %r' % (_e10[0]['pz'], _e10[1]['pz']))
+    ok('D10 细分后保留 origin（原行号）',
+       all(x['origin'] == 0 for x in _e10), repr([x['origin'] for x in _e10]))
+    ok('D10 meta 如实记录（n_raw/n_used/split/note）',
+       _m10['n_raw'] == 1 and _m10['n_used'] == 2 and _m10['split'] is True
+       and '细分为 2 个小句' in _m10['note'], repr(_m10))
+    _e10b, _m10b = C.explode_lines([{'idx': 0, 'text': '朱樱甜。', 'pz': '平平平'}])
+    ok('D10 无句读的行原样保留（不拆）',
+       len(_e10b) == 1 and _e10b[0]['text'] == '朱樱甜。' and _m10b['split'] is False)
+    # pz 与汉字数不等时**不细分**（交给 compare 的 align_warn 报警，绝不静默错位）
+    _e10c, _m10c = C.explode_lines([{'idx': 0, 'text': '甲乙，丙丁。', 'pz': '平平'}])
+    ok('D10 pz 与汉字数不等 → 不细分、整行保留',
+       len(_e10c) == 1 and _e10c[0]['text'] == '甲乙，丙丁。', repr(_e10c))
+
+    # 真实语料反例：如梦令（谱式 7 句）在语料里是 6 行（其中一行含「，」）
+    _cc10 = sqlite3.connect(os.path.join(ROOT, 'data', 'corpus.db'))
+    _cc10.row_factory = sqlite3.Row
+    _r10 = _cc10.execute("SELECT pid FROM poems WHERE dynasty='清' AND cipai='如梦令'"
+                         " ORDER BY pid LIMIT 1").fetchone()
+    if _r10 is None:
+        ok('D10 语料可找到清词《如梦令》', False, '语料缺失')
+    else:
+        _raw10 = [dict(x) for x in _cc10.execute(
+            'SELECT idx,text,pz FROM lines WHERE pid=? ORDER BY idx', (_r10['pid'],))]
+        ok('D10 反例前提成立：原行含句读且行数≠谱式句数',
+           any(_sub.search(x['text'] or '') for x in _raw10)
+           and len(_raw10) != 7, 'raw=%d' % len(_raw10))
+        _res10 = C.compare_pid(_cc10, _r10['pid'])
+        _s10 = _res10['summary']
+        ok('D10 细分后作品句数 = 谱式句数（旧写法会差 1 句）',
+           _s10['n_lines_poem'] == _s10['n_lines_rule'] == 7,
+           'poem=%d rule=%d' % (_s10['n_lines_poem'], _s10['n_lines_rule']))
+        ok('D10 细分后无对齐不一致行（旧写法整行错位）',
+           _s10['n_unaligned_lines'] == 0, str(_s10['n_unaligned_lines']))
+        ok('D10 返回体带 granularity 说明（口径对用户透明）',
+           _res10.get('granularity', {}).get('split') is True
+           and '细分为 7 个小句' in (_res10.get('granularity', {}).get('note') or ''),
+           repr(_res10.get('granularity')))
+    _cc10.close()
+
     print('=' * 64)
     print('词谱门禁：比对 %d 项，不符 %d 项' % (CMP[0], len(BAD)))
     for b in BAD:

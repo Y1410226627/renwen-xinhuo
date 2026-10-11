@@ -25,7 +25,7 @@ export const {
 
 export const {
   esc, attr, hz, badge, fmtInt, fmt1, signed, csvText, download, toast, spinner,
-  query, footer, mountTheme, CSS
+  query, footer, CSS
 } = g.UI;
 
 export const {

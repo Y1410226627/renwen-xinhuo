@@ -98,8 +98,7 @@ export interface UIApi {
   query(key: string, search?: string): string;
   /** 页脚 HTML。 */
   footer(stamp?: string, source?: string, n?: number): string;
-  /** 挂载主题切换。 */
-  mountTheme(root?: HTMLElement | null): void;
+  /* 2026-10-11：`mountTheme` 已删除——主题唯一状态源是 `src/stores/theme.js`。 */
 }
 
 export interface ParseHit {

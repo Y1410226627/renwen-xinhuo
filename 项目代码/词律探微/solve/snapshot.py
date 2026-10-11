@@ -174,14 +174,32 @@ def load(snapshot_id):
         snap = json.load(f)
     cur = fingerprint()
     old = snap.get('fingerprint') or {}
-    diffs = [k for k in ('corpus', 'overrides', 'golden')
-             if cur.get(k) and old.get(k) != cur.get(k)]
-    snap['stale'] = bool(diffs)
+    # ★ 2026-10-11（审查 M9）：改前 `if cur.get(k) and old.get(k) != cur.get(k)`——
+    #   `fingerprint()` 在**读库失败**时把 `fp['corpus']` 置为 `''`（见上），而空串是假值，
+    #   被 `cur.get(k) and` 短路跳过 → `stale=False`。这与本文件 docstring 自述的
+    #   「取不到即为空串——**空串不与任何快照相等**，不会误判『未陈旧』」**正好相反**：
+    #   恰恰会误判成"未陈旧"（最危险的方向：把"不知道"渲染成"没问题"）。
+    #   改后：指纹取不到一律计入 `unknown`，按**可能已陈旧**处理（fail-closed）。
+    diffs, unknown = [], []
+    for k in ('corpus', 'overrides', 'golden'):
+        cv = cur.get(k)
+        if cv in (None, ''):
+            unknown.append(k)
+            continue
+        if old.get(k) != cv:
+            diffs.append(k)
+    snap['stale'] = bool(diffs) or bool(unknown)
     snap['stale_fields'] = diffs
+    snap['fingerprint_unavailable'] = unknown
     snap['current_fingerprint'] = cur
+    names = {'corpus': '语料', 'overrides': '读音标定表', 'golden': '答案基线'}
     if diffs:
-        names = {'corpus': '语料', 'overrides': '读音标定表', 'golden': '答案基线'}
         snap['stale_note'] = ('依赖已陈旧：%s 在本快照之后发生了变化；'
                               '**旧答案原样保留、未经重算**（如需新口径，请重新提问）。'
                               % '、'.join(names.get(k, k) for k in diffs))
+    if unknown:
+        snap['stale_note'] = (snap.get('stale_note', '') +
+                              '另有指纹取不到：%s——**无法确认是否陈旧**，按「可能已陈旧」处理'
+                              '（不敢把「不知道」说成「未陈旧」）。'
+                              % '、'.join(names.get(k, k) for k in unknown))
     return snap

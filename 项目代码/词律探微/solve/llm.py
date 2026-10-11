@@ -62,6 +62,23 @@ LOCAL_CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'l
 # 「缓存未命中」哨兵：`dict.get` 无法区分「没有」与「存的就是 None」，用一个独立对象做标记。
 _MISS = object()
 
+# ★ 2026-10-11（审查·低）：`chat_template_kwargs` 是 **Qwen 系（vLLM / Chat Completions 兼容层）的
+#   非标准参数**——OpenAI 官方协议里没有它。改前 `thinking=False` 时**无条件**附加，
+#   换到 zhipu / deepseek 这类端点就可能被判「未知参数」而 400，**整段大模型能力静默失效**。
+#   现在只对**实测确认接受它**的服务商附加（目前只有校内 Qwen）；
+#   需要用别的端点又要关思考时，设 `LVC_LLM_THINKING_KW=1` 显式打开（人来决定，不猜）。
+THINKING_KW_PROVIDERS = ('ucass',)
+
+
+def _thinking_kw_ok(provider):
+    """该服务商是否可以带 `chat_template_kwargs`（可显式开关）。"""
+    force = os.environ.get('LVC_LLM_THINKING_KW')
+    if force in ('1', 'true', 'yes', 'on'):
+        return True
+    if force in ('0', 'false', 'no', 'off'):
+        return False
+    return str(provider or '') in THINKING_KW_PROVIDERS
+
 
 class LLM:
     """一个极小的对话客户端。`available()` 为假时调用方应回落到模板。"""
@@ -183,7 +200,9 @@ class LLM:
     def _body(self, messages, temperature, max_tokens, thinking):
         d = {'model': self.model, 'messages': messages, 'temperature': temperature,
              'max_tokens': max_tokens, 'stream': False}
-        if not thinking:            # 推理模型：关思考才拿得到 content，且首字延迟减半（实测 0.90→0.40 秒）
+        # 推理模型：关思考才拿得到 content，且首字延迟减半（实测 0.90→0.40 秒）。
+        # 但该参数**只对确认接受它的端点发**（见 `THINKING_KW_PROVIDERS`），否则 400。
+        if not thinking and _thinking_kw_ok(getattr(self, 'provider', None)):
             d['chat_template_kwargs'] = {'enable_thinking': False}
         return json.dumps(d).encode('utf-8')
 

@@ -35,6 +35,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from corpus import LIKE_ESCAPE as _LIKE_ESC, like_escape as _like_esc   # noqa: E402（审查 M1）
+
 # ─────────────────────────── 门槛（声明式：改这里，不改代码） ───────────────────────────
 # 词牌表有 14,143 项、其中约 80% 是「题名/整句被误当词牌」的脏数据
 # （deepseek §0.3 实测）。故词牌匹配必须过**频次 + 长度**双重门槛。
@@ -56,9 +58,13 @@ def _table(conn, sql, args=()):
 def candidates(conn, kind):
     """某类实体的候选名单（长名优先、同长按频次降序）。带进程内缓存。"""
     global _CACHE
+    # ★ 2026-10-11（审查·中）：`id(conn)` 会被**回收后的新连接复用**（内存地址复用），
+    #   只按它做键会把「上一个库」的候选名单错配给新库（表现为实体判定忽对忽错）。
+    #   连同连接对象一起校验；并设上限避免长跑里无限增长。
     key = (id(conn), kind)
-    if key in _CACHE:
-        return _CACHE[key]
+    hit = _CACHE.get(key)
+    if hit is not None and hit[0] is conn:
+        return hit[1]
     out = []
     if kind == 'cipai':
         rows = _table(conn, 'SELECT cipai, n FROM cipai WHERE n>=? AND length(cipai) BETWEEN ? AND ?',
@@ -73,7 +79,9 @@ def candidates(conn, kind):
                       (TITLE_MIN_LEN,))
         out = [(r[0], r[1]) for r in rows]
     out.sort(key=lambda x: (-len(x[0]), -x[1]))
-    _CACHE[key] = out
+    if len(_CACHE) > 64:
+        _CACHE.clear()
+    _CACHE[key] = (conn, out)
     return out
 
 
@@ -92,8 +100,10 @@ def exists(conn, kind, value):
             return bool(conn.execute('SELECT 1 FROM cipai WHERE cipai=? LIMIT 1',
                                      (value,)).fetchone())
         if kind == 'title':
-            return bool(conn.execute('SELECT 1 FROM poems WHERE title LIKE ? LIMIT 1',
-                                     ('%' + value + '%',)).fetchone())
+            # ★ M1：题名存在性判定同样要转义（`_` 不等于「任意单字」）
+            return bool(conn.execute(
+                'SELECT 1 FROM poems WHERE title LIKE ?' + _LIKE_ESC + ' LIMIT 1',
+                ('%' + _like_esc(value) + '%',)).fetchone())
         if kind == 'pid':
             return bool(conn.execute('SELECT 1 FROM poems WHERE pid=? LIMIT 1', (value,)).fetchone())
         if kind == 'dynasty':

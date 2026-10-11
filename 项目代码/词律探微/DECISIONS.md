@@ -1544,3 +1544,43 @@ rerank 介入点）记为下一迭代。**教训：排序主导权的变更必�
   改为 `S.SESSIONS = S.CONTEXT.ContextStore(dirpath=None)`（纯内存）后连跑两次均 PASS，
   且不产生残留文件（快照/研究库同样指向临时目录）。
 - **验收**：`web/test_e2e.py` **37/0**（连跑两次可重复）；AGENTS.md 门禁表已补该行。
+
+## D53 ✅（2026-10-11）：外部审查报告 30 项全核对 + 逐行自查十一遍（含 1 处真回归自伤）
+
+- **由来**：主人点名处置两份外部材料——①`代码审查报告_20261011.md`（高 4 / 中 13 / 低 13+）；
+  ②`关键核心现状.txt` 逐条。并追加纪律：**「修复完后自己再逐行检查代码问题，然后自修，至少十遍，
+  每一次检查完要出报告」**。本决策记录该任务的**结论、纪律与不可擅动边界**。
+- **高 4 条（已修，均为真实缺陷）**：
+  · **H1** 解析页读音裁定打**不存在的** `/api/research/write` → 改走真实端点 + 前端失败兜底；
+  · **H2** 写接口无同源校验 → 新增 `_write_guard()`：Content-Type 必须 `application/json`，
+    **Origin 存在时须同源**（Host 或 localhost/127.0.0.1/`::1`）；无 Origin（curl/脚本）放行；
+  · **H3** `tools/build_indexes.py` 往 `data/corpus.db` 写 → **触碰「语料库绝不改」红线**，
+    改只读派生（不写语料库）；
+  · **H4** `source_url` 无 scheme 校验 → **点击型存储 XSS**，前后端各加一道；
+    前端 `isHttpUrl()` 只看 `^https?://` 前缀（**不解析 base**——`new URL(u, location.href)`
+    会把 `//evil.com`、`foo/bar` 判成链接），`ResearchView` 与 `CipuView` **口径必须一致**。
+- **中 13 条**：含 M11 异常细节回吐收口（`_err_detail` 默认只回类型，完整串仅 `LVC_DEBUG=1`）、
+  M12 错误信封统一、M13 只读连接收口（`_do_POST/_do_GET` 包 `finally:_close_readonly()`；
+  `_ro_or_none()` 库不存在返回 `None`、**不为读建库**）等，全部修复。
+- **逐行自查十一遍**：累计**新发现 10 处**（中 8 / 低 2），全部修复复验。
+  **其中 1 处为真回归（自伤）**：第 9 遍把 `solve/aggregate.py:228` `render_ties` 文案里
+  元描述「最高/最低」误套了 `「」`——而 `「」` 在本项目是**模板严格通道（引文必须为语料原文整句）**，
+  违规触发引文护栏 → `check_agg` **FAIL**。改回普通引述后 **78/0**。
+- **纪律（本项目通行，写入备忘）**：
+  1. **门禁 FAIL ≠ 门禁错**。剩余 FAIL（`check_conditions`「龘」×1、`qa_eval` Q014/Q021/Q022 ×3）
+     经查证是 **DECISIONS D14（⏸ 已暂缓）** 族的口径分歧，**属「暂缓即结论」，不擅动任一侧**。
+     （第 10 遍曾拟改 `tools/check_conditions.py` §五 判定为「拒答或确切 0 篇」二选一 →
+     查实 D14 已把「龘」列为同族第 4 例「口径未定不得擅动」→ **完全撤回**，恢复原判定。）
+  2. **`「」`只留给语料原文**。非原文引文用普通引号。
+  3. **门禁断言色不得改**：`web/test_ui.js` 断言图点填充 `#1f6fb2`/`#c2691a`；
+     而 SVG 文字色须走主题变量（`--ping/--accent2/--ink2`）以保暗色可读——**两者不冲突，各改其位**。
+  4. **检查计数会系统性过期**：`doc_check` 不校验「N 项」，故现状表数字长期无人察觉。
+     本次校正 6 文件现状数字（test_ui→147、test_api→171、ssr-smoke→31、qa_cases→37）+
+     `reproduce.py`；**历史 changelog / 逐轮终值 / DECISIONS 旧记录不得回改**。
+- **铁证（零回归）**：`answers_700.jsonl` sha256 前 16 位 `bf863368ffaf85d8`
+  == `solve/data/golden_sha.json` 公开集 `BF863368FFAF85D8…`。**交付答案逐字节未变**；
+  `solve/solver.py` 不导入 ask/retrieve → 问答与前端改动**结构性不影响**交付答案。
+- **一键复现基线**：`reproduce.py --skip-build --quick` **13/15 → 14/15**（第 9 遍修 `check_agg` 之效）。
+- **状态**：✅ 已接受。**影响**：`web/serve.py`（写接口护栏 / 只读连接 / 错误信封）、
+  `frontend/src/views/{ResearchView,CipuView,GraphView}.vue`、`solve/aggregate.py`、
+  `tools/build_indexes.py`；`corpus.db` **零改动**。

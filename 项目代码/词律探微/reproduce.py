@@ -224,7 +224,7 @@ def main():
     lines += ['## 怎么自己验', '',
               '1. `python build_corpus.py --corpus <语料根> --db data/corpus.db --verify 100`（建库并抽样复算）',
               '2. `python tools/invariant_check.py`（15 类恒等式；0 违反）',
-              '3. `python tools/qa_eval.py`（22 条问答用例；含拒答与四类边界）',
+              '3. `python tools/qa_eval.py`（问答用例集 `tests/qa_cases.jsonl`，现行 37 条；含拒答与四类边界）',
               '4. `node web/verify_views.js --all`（前端 JS 与 Python 引擎**全库**逐字段对照，需先跑 tools/dump_metrics_all.py）',
               '5. `node web/test_render.js`（页面渲染门禁：逐字表不得有 NaN、计数必须与独立复算一致）',
               '6. `node web/test_ui.js`（前端功能门禁：检索篇数与 SQL 标尺一致、页面/共享文件自洽）',

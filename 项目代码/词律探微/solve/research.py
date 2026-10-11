@@ -29,8 +29,10 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime
+from urllib.parse import urlparse
 
 from corpus import HAN_CLASS as _HAN_CLASS      # 汉字判定单一来源（与 pronounce/prosody 同口径）
+from corpus import like_escape as _like_escape  # LIKE 通配转义单一来源（★ 审查 M1，2026-10-11）
 from pronounce import Pronouncer, default_overrides_path   # 个人作品解析共用同一注音器
 from prosody import Engine                          # 个人作品声律指标（与 build_corpus 同口径）
 
@@ -148,7 +150,10 @@ CREATE TABLE IF NOT EXISTS personal_works (
   source_material_id INTEGER,
   source_locator     TEXT,
   checked_at         TEXT,
-  checked_by         TEXT
+  checked_by         TEXT,
+  withdrawn          INTEGER NOT NULL DEFAULT 0,     -- ★ 删除=撤回标记（行保留；M10）
+  withdrawn_at       TEXT,
+  withdrawn_why      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS import_batches (
@@ -166,7 +171,7 @@ CREATE TABLE IF NOT EXISTS import_rows (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   batch_id INTEGER NOT NULL,
   file     TEXT NOT NULL,
-  row_key  TEXT NOT NULL,                       -- 行唯一键（缺省=行内容 sha）
+  row_key  TEXT NOT NULL,                       -- 行唯一键＝内容 sha（同内容第 n 次出现加 `#n`）
   row_sha  TEXT NOT NULL,
   payload  TEXT,
   work_ref INTEGER,                             -- 落到 personal_works.id（回滚据此连带撤下）
@@ -178,6 +183,22 @@ CREATE TABLE IF NOT EXISTS import_rows (
 # ---------------------------------------------------------------- 基础
 def _now():
     return datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def _row(cur, r):
+    """★ 2026-10-11（审查·低）：把一行结果转成 dict，**不假定** `row_factory`。
+
+    `dict(r)` 只在 `row_factory=sqlite3.Row` 下成立；本项目**外部传入**的连接
+    （门禁 / 脚本 / 其它模块）并不保证设了 row_factory——踩过一次坑（`row[0]` 才稳）。
+    这里兜底：不是 Row 就按 `cur.description` 拼列名，两条路返回同一个结构。
+    """
+    if r is None:
+        return None
+    try:
+        return dict(r)
+    except (TypeError, ValueError):
+        desc = getattr(cur, 'description', None) or []
+        return {d[0]: r[i] for i, d in enumerate(desc)}
 
 
 def content_sha(text):
@@ -202,10 +223,41 @@ def connect(path=None):
         conn.execute('PRAGMA journal_mode=WAL')
         conn.execute('PRAGMA busy_timeout=8000')
         conn.executescript(SCHEMA)
+        _migrate(conn)
     except sqlite3.Error:
         conn.close()
         raise
     return conn
+
+
+# ★ 2026-10-11（审查 M10）：**加列迁移**。`CREATE TABLE IF NOT EXISTS` 对**已存在**的库
+#   不会补列，于是老库里的 `personal_works` 没有 `withdrawn` 三列——回滚只能物理删除。
+#   这里显式补齐（幂等：列已存在则跳过），保证「删除=撤回标记（行保留）」这条纪律
+#   对新库老库一视同仁。
+_MIGRATIONS = (
+    ('personal_works', 'withdrawn', 'INTEGER NOT NULL DEFAULT 0'),
+    ('personal_works', 'withdrawn_at', 'TEXT'),
+    ('personal_works', 'withdrawn_why', 'TEXT'),
+)
+
+
+def _migrate(conn):
+    """补列迁移。**幂等**：列已存在就跳过（`CREATE TABLE IF NOT EXISTS` 对已存在的库不补列）。
+
+    ⚠ 2026-10-11 二修：`PRAGMA table_info` 返回的列序是 `cid, name, type, notnull,
+      dflt_value, pk`——**列名是第 2 个字段（`r[1]`）**，不是 `r[0]`（那是 cid 0/1/2…）。
+      首版误取 `r[0]`，于是 `'withdrawn' not in [0,1,2,…]` 恒为真 → 每次 `connect()`
+      都对**已有该列**的表执行 ALTER → `duplicate column name: withdrawn` →
+      **研究库打不开**（首跑即崩，本轮 `web/test_api.py` 实测抓到）。
+    """
+    for tab, col, ddl in _MIGRATIONS:
+        try:
+            cur = conn.execute('PRAGMA table_info(%s)' % tab)
+            cols = [r[1] for r in cur]
+        except sqlite3.Error:
+            continue
+        if cols and col not in cols:
+            conn.execute('ALTER TABLE %s ADD COLUMN %s %s' % (tab, col, ddl))
 
 
 @contextmanager
@@ -251,9 +303,21 @@ def run_idempotent(conn, token, endpoint, fn):
     token = str(token)[:128]
 
     def _run(conn2):
-        row = conn2.execute('SELECT response FROM idempotency WHERE token=?', (token,)).fetchone()
+        # ★ 2026-10-11（审查 M8）：改前**只按 token 查**，`endpoint` 只写不查——
+        #   前端部分 token 是确定性拼接（如 `pron:<pid>:<line>:<pos>:<reading>`、
+        #   `wd:<decision_id>`），同一 token 换个接口/换参数提交 → 静默返回**首次的异构结果**
+        #   （写的是 A 接口，拿回的是 B 接口的响应——最坏情况是用户以为操作成功了，其实没有）。
+        #   改后：连带校验 endpoint；不符即**报冲突**（ValueError → 400），绝不静默复用。
+        row = conn2.execute(
+            'SELECT response, endpoint FROM idempotency WHERE token=?', (token,)).fetchone()
         if row is not None:
-            return json.loads(row['response'])
+            prev = row['endpoint'] if isinstance(row, sqlite3.Row) else row[1]
+            if prev is not None and endpoint is not None and prev != endpoint:
+                raise ValueError('幂等键冲突：token %r 已用于接口 %s，本次却是 %s——'
+                                 '请换一个 client_token（同键不得跨接口复用）'
+                                 % (token, prev, endpoint))
+            raw = row['response'] if isinstance(row, sqlite3.Row) else row[0]
+            return json.loads(raw)
         res = fn(conn2)
         conn2.execute(
             'INSERT INTO idempotency(token, endpoint, response, created_at) VALUES(?,?,?,?)',
@@ -267,12 +331,17 @@ def get_idempotent(conn, token):
     """（诊断/门禁用）按 token 读出已存响应；不存在返回 None。"""
     if not token:
         return None
-    row = conn.execute('SELECT response, endpoint, created_at FROM idempotency WHERE token=?',
-                       (str(token)[:128],)).fetchone()
+    _cur = conn.execute('SELECT response, endpoint, created_at FROM idempotency WHERE token=?',
+                        (str(token)[:128],))
+    row = _cur.fetchone()
     if row is None:
         return None
-    return {'response': json.loads(row['response']), 'endpoint': row['endpoint'],
-            'created_at': row['created_at']}
+    # ★ 2026-10-11（审查·低）：这里原来直接 `row['...']`，与同文件其它读路径一样**假定了
+    #   `row_factory=Row`**。诊断/门禁会拿外部连接来调本函数，缺了 row_factory 就是
+    #   `TypeError: tuple indices must be integers`（把"查得到"变成"炸"）。改用统一的 `_row`。
+    d = _row(_cur, row)
+    return {'response': json.loads(d['response']), 'endpoint': d['endpoint'],
+            'created_at': d['created_at']}
 
 
 # ---------------------------------------------------------------- 决策事件（功能 8/12/15 共用）
@@ -319,12 +388,14 @@ def list_decisions(conn, kind=None, subject=None, limit=200):
         args.append(subject)
     sql += ' ORDER BY id DESC LIMIT ?'
     args.append(int(limit))
-    return [dict(r) for r in conn.execute(sql, args)]
+    _cur = conn.execute(sql, args)
+    return [_row(_cur, r) for r in _cur]
 
 
 def get_decision(conn, decision_id):
-    r = conn.execute('SELECT * FROM decisions WHERE id=?', (int(decision_id),)).fetchone()
-    return dict(r) if r else None
+    _cur = conn.execute('SELECT * FROM decisions WHERE id=?', (int(decision_id),))
+    r = _cur.fetchone()
+    return _row(_cur, r) if r else None
 
 
 # ---------------------------------------------------------------- 功能 15：文本版本链 + 元数据修订史
@@ -345,13 +416,18 @@ def add_text_version(conn, pid, content, scope='corpus', version_type='manual',
             parent = r['id'] if r else None
         else:
             parent = int(parent_id)
+        # ★ 2026-10-11（审查·低）：改前 INSERT 与返回体**各调一次** `_now()`——
+        #   跨过整秒边界时，返回给前端的 `created_at` 与库里存的那一行**差 1 秒**，
+        #   前端拿它回显、拿库值排序，就会「我刚提交的版本显示排在下一秒」。
+        #   时间戳必须**一次取准、两处共用**。
+        ts = _now()
         cur = c.execute(
             'INSERT INTO text_versions(pid,scope,parent_id,version_type,created_at,actor,'
             'content,content_sha,note) VALUES(?,?,?,?,?,?,?,?,?)',
-            (pid, scope, parent, version_type, _now(), actor, content, sha, note))
+            (pid, scope, parent, version_type, ts, actor, content, sha, note))
         return {'id': cur.lastrowid, 'pid': pid, 'scope': scope, 'parent_id': parent,
                 'version_type': version_type, 'content_sha': sha,
-                'created_at': _now()}
+                'created_at': ts}
 
     return run_idempotent(conn, client_token, 'text_versions', fn)
 
@@ -364,7 +440,8 @@ def list_text_versions(conn, pid, scope=None):
         sql += ' AND scope=?'
         args.append(scope)
     sql += ' ORDER BY id'
-    return [dict(r) for r in conn.execute(sql, args)]
+    _cur = conn.execute(sql, args)
+    return [_row(_cur, r) for r in _cur]
 
 
 def latest_text_version(conn, pid, scope=None):
@@ -374,8 +451,9 @@ def latest_text_version(conn, pid, scope=None):
         sql += ' AND scope=?'
         args.append(scope)
     sql += ' ORDER BY id DESC LIMIT 1'
-    r = conn.execute(sql, args).fetchone()
-    return dict(r) if r else None
+    _cur = conn.execute(sql, args)
+    r = _cur.fetchone()
+    return _row(_cur, r) if r else None
 
 
 def add_meta_revision(conn, pid, field, new_value, old_value=None, scope='corpus',
@@ -400,10 +478,56 @@ def list_meta_revisions(conn, pid, scope=None):
         sql += ' AND scope=?'
         args.append(scope)
     sql += ' ORDER BY id'
-    return [dict(r) for r in conn.execute(sql, args)]
+    _cur = conn.execute(sql, args)
+    return [_row(_cur, r) for r in _cur]
 
 
 # ---------------------------------------------------------------- 功能 6：文献摘录库（append-only）
+
+#: ★ 2026-10-11（审查 H4）：来源地址**只接受 http/https**。
+#:   改前 `source_url` 原样入库、原样回吐，前端直接 `:href` → 存
+#:   `javascript:alert(document.cookie)` 一点即执行（**点击型存储 XSS**；
+#:   `rel="noopener"` 只防 `window.opener`，**防不住伪协议**）。
+#:   故在**写入侧**就挡住（而不是渲染时悄悄改）——不符合的一律拒绝并说明原因，
+#:   绝不静默改写用户填的内容。
+URL_SCHEMES_OK = ('http', 'https')
+
+
+def safe_url(u, field='source_url', required=False):
+    """校验并返回来源地址；只放行 http/https。空串（不填）合法通过。
+
+    `required=True` 时空串也报错（用于"这条材料必须有出处"的场景）。
+    """
+    s = (u or '').strip()
+    if not s:
+        if required:
+            raise ValueError('%s 为必填' % field)
+        return ''
+    try:
+        sc = (urlparse(s).scheme or '').lower()
+    except Exception:                                            # noqa: BLE001
+        raise ValueError('%s 无法解析，请填完整的 http(s) 链接' % field)
+    if sc not in URL_SCHEMES_OK:
+        raise ValueError('%s 只允许 http/https（收到「%s」）——`javascript:`、`data:` 等伪协议'
+                         '会被浏览器当脚本执行，故在入库前挡住' % (field, sc or '无协议'))
+    return s
+
+
+def url_is_safe(u):
+    """只读判定（**输出侧兜底**）：该地址能否安全渲染成链接。
+
+    写入侧已挡住新数据，但**历史行**里可能已有不合规值——回吐时一律按这个判定，
+    不安全的**原样当文本显示**（不生成 `<a href>`），保证"老数据也点不出脚本"。
+    """
+    s = (u or '').strip()
+    if not s:
+        return False
+    try:
+        return (urlparse(s).scheme or '').lower() in URL_SCHEMES_OK
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def add_material(conn, title, content, kind='book', author='', year='', source_url='',
                  note='', locator='', actor='human', client_token=None):
     """新建**文献摘录**：材料本体 + 首个版本一气呵成。
@@ -414,6 +538,8 @@ def add_material(conn, title, content, kind='book', author='', year='', source_u
     """
     if not (title or '').strip() or not (content or '').strip():
         raise ValueError('title 与 content 为必填')
+    # ★ 2026-10-11（审查 H4）：来源地址只放行 http/https（防 `javascript:` 伪协议的存储型 XSS）
+    source_url = safe_url(source_url)
 
     def fn(c):
         cur = c.execute('INSERT INTO materials(created_at,kind,title,author,year,source_url,note)'
@@ -437,7 +563,8 @@ def add_material_revision(conn, material_id, content, locator='', note='', actor
 
     def fn(c):
         mid = int(material_id)
-        mat = c.execute('SELECT id, withdrawn FROM materials WHERE id=?', (mid,)).fetchone()
+        _cm = c.execute('SELECT id, withdrawn FROM materials WHERE id=?', (mid,))
+        mat = _row(_cm, _cm.fetchone())
         if mat is None:
             raise ValueError('材料 %s 不存在' % material_id)
         if mat['withdrawn']:
@@ -461,7 +588,8 @@ def withdraw_material(conn, material_id, why='', actor='human', client_token=Non
 
     def fn(c):
         mid = int(material_id)
-        mat = c.execute('SELECT id, withdrawn FROM materials WHERE id=?', (mid,)).fetchone()
+        _cm = c.execute('SELECT id, withdrawn FROM materials WHERE id=?', (mid,))
+        mat = _row(_cm, _cm.fetchone())
         if mat is None:
             raise ValueError('材料 %s 不存在' % material_id)
         if mat['withdrawn']:
@@ -487,18 +615,37 @@ def list_materials(conn, include_withdrawn=False):
     if not include_withdrawn:
         sql += ' WHERE m.withdrawn=0'
     sql += ' ORDER BY m.id DESC'
-    return [dict(r) for r in conn.execute(sql)]
+    # ★ 2026-10-11（审查 H4）：**输出侧兜底**——写入侧已挡住新数据，但历史行可能已有
+    #   不合规值；这里在**出库的最后一米**再判一次，不安全的地址一律置空，
+    #   并如实标注原因（`url_unsafe`），前端据此"当文本显示、不生成 <a href>"。
+    _cur = conn.execute(sql)
+    return [_sanitize_url_row(_row(_cur, r)) for r in _cur]
+
+
+def _sanitize_url_row(row):
+    """把一行里的 `source_url` 判安全后才保留；不合规 → 置空 + `url_unsafe` 标注。"""
+    if not isinstance(row, dict):
+        return row
+    u = row.get('source_url') or ''
+    if u and not url_is_safe(u):
+        row['source_url'] = ''
+        row['url_unsafe'] = True
+    return row
 
 
 def get_material_chain(conn, material_id):
     """材料 + **全部版本链**（旧→新，逐版带 parent_id / sha / 定位）。不存在返回 None。"""
     mid = int(material_id)
-    mat = conn.execute('SELECT * FROM materials WHERE id=?', (mid,)).fetchone()
+    _c0 = conn.execute('SELECT * FROM materials WHERE id=?', (mid,))
+    mat = _c0.fetchone()
     if mat is None:
         return None
-    revs = conn.execute('SELECT * FROM material_revisions WHERE material_id=? ORDER BY id',
-                        (mid,)).fetchall()
-    return {'material': dict(mat), 'revisions': [dict(r) for r in revs]}
+    _c1 = conn.execute('SELECT * FROM material_revisions WHERE material_id=? ORDER BY id',
+                       (mid,))
+    revs = _c1.fetchall()
+    # ★ 2026-10-11（审查 H4）：与 `list_materials` 同一道输出侧兜底
+    return {'material': _sanitize_url_row(_row(_c0, mat)),
+            'revisions': [_row(_c1, r) for r in revs]}
 
 
 # ---------------------------------------------------------------- 功能 7：研究事实库
@@ -576,7 +723,8 @@ def withdraw_fact(conn, fact_id, why='', actor='human', client_token=None):
 
     def fn(c):
         fid = int(fact_id)
-        row = c.execute('SELECT id, withdrawn FROM facts WHERE id=?', (fid,)).fetchone()
+        _cf = c.execute('SELECT id, withdrawn FROM facts WHERE id=?', (fid,))
+        row = _row(_cf, _cf.fetchone())
         if row is None:
             raise ValueError('事实 %s 不存在' % fact_id)
         if row['withdrawn']:
@@ -602,7 +750,8 @@ def list_facts(conn, poem_pid=None, material_id=None, include_withdrawn=False):
     if not include_withdrawn:
         sql += ' AND withdrawn=0'
     sql += ' ORDER BY id DESC LIMIT 500'
-    return [dict(r) for r in conn.execute(sql, args)]
+    _cur = conn.execute(sql, args)
+    return [_row(_cur, r) for r in _cur]
 
 
 # ---------------------------------------------------------------- 功能 8：读音裁定（决策事件派生）
@@ -661,15 +810,17 @@ def withdraw_pron_decision(conn, decision_id, why='', actor='human', client_toke
 
     def fn(c):
         did = int(decision_id)
-        d = c.execute('SELECT * FROM decisions WHERE id=?', (did,)).fetchone()
+        _cd = c.execute('SELECT * FROM decisions WHERE id=?', (did,))
+        d = _row(_cd, _cd.fetchone())
         if d is None:
             raise ValueError('决策 %s 不存在' % decision_id)
         if d['kind'] != 'pronounce':
             raise ValueError('决策 %s 不是读音裁定（kind=%s）' % (decision_id, d['kind']))
         if d['action'] != 'select':
             raise ValueError('只能撤回 select 类裁定（该条 action=%s）' % d['action'])
-        exists = c.execute("SELECT id FROM decisions WHERE kind='pronounce'"
-                           " AND action='withdraw' AND prev_id=?", (did,)).fetchone()
+        _ce = c.execute("SELECT id FROM decisions WHERE kind='pronounce'"
+                        " AND action='withdraw' AND prev_id=?", (did,))
+        exists = _row(_ce, _ce.fetchone())
         if exists:
             return {'withdraw_id': exists['id'], 'prev_id': did, 'note': '此前已撤回'}
         try:
@@ -691,9 +842,10 @@ def effective_pron_decisions(conn, pid=None):
     `pid` 给定时只回该篇列表；否则回 `{pid: [...]}`。库/表缺失时如实返回空。
     """
     try:
-        rows = [dict(r) for r in conn.execute(
+        _cur = conn.execute(
             "SELECT id,subject,action,payload,prev_id,ts FROM decisions"
-            " WHERE kind='pronounce' ORDER BY id")]
+            " WHERE kind='pronounce' ORDER BY id")
+        rows = [_row(_cur, r) for r in _cur]
     except sqlite3.Error:
         return [] if pid is not None else {}
     id2sub = {r['id']: (r['subject'] or '') for r in rows}
@@ -779,12 +931,16 @@ def apply_pron_to_lines(conn, pid, lines):
 
 def list_pron_decisions(conn, pid):
     """某篇的读音决策**全史**（select 与 withdraw 都列，新在前）——验收「完整回溯」用。"""
-    subj_prefix = '%s|line=%%' % pid
+    # ★ 2026-10-11（审查 M1 同类）：`pid` 进了 LIKE 模式就必须**先转义** `%`/`_`
+    #   （否则 `pid` 里带 `_` 会把「某篇的裁定史」扩成「一批篇的裁定史」——
+    #   这不是注入，是**语义被通配符悄悄放大**，与检索页 M1 同一个坑）；
+    #   末尾的 `%` 才是**有意**的前缀匹配通配，必须在转义**之后**追加。
+    subj_prefix = _like_escape(str(pid)) + '|line=%'
     try:
-        rows = conn.execute(
-            "SELECT * FROM decisions WHERE kind='pronounce' AND subject LIKE ?"
+        _cur = conn.execute(
+            "SELECT * FROM decisions WHERE kind='pronounce' AND subject LIKE ? ESCAPE '\\'"
             " ORDER BY id DESC", (subj_prefix,))
-        return [dict(r) for r in rows]
+        return [_row(_cur, r) for r in _cur]
     except sqlite3.Error:
         return []
 
@@ -832,7 +988,8 @@ def set_work_verification(conn, work_id, state, source='', source_material_id=No
 
     def fn(c):
         wid = int(work_id)
-        w = c.execute('SELECT * FROM personal_works WHERE id=?', (wid,)).fetchone()
+        _cw2 = c.execute('SELECT * FROM personal_works WHERE id=?', (wid,))
+        w = _row(_cw2, _cw2.fetchone())
         if w is None:
             raise ValueError('作品 %s 不存在' % work_id)
         src = (source if source not in (None, '') else (w['source'] or '')) if st == 'source_matched' \
@@ -856,8 +1013,12 @@ def set_work_verification(conn, work_id, state, source='', source_material_id=No
 
 
 def list_personal_works(conn, state=None):
-    """个人作品列表（新在前）；`state` 可视需要过滤（三态之一）。"""
-    sql = 'SELECT * FROM personal_works WHERE 1=1'
+    """个人作品列表（新在前）；`state` 可视需要过滤（三态之一）。
+
+    ★ M10：默认**不含已撤回**（批量导入回滚撤下）的作品——它们只是被撤下，行仍在库里，
+    但不再出现在列表与解析入口（避免"撤了还能用"）。
+    """
+    sql = 'SELECT * FROM personal_works WHERE withdrawn=0'
     args = []
     if state:
         if state not in VERIFY_STATES:
@@ -865,7 +1026,8 @@ def list_personal_works(conn, state=None):
         sql += ' AND verification_state=?'
         args.append(state)
     sql += ' ORDER BY id DESC LIMIT 500'
-    return [dict(r) for r in conn.execute(sql, args)]
+    _cur = conn.execute(sql, args)
+    return [_row(_cur, r) for r in _cur]
 
 
 # --- 个人作品声律解析（与 build_corpus.py 同一引擎、同一口径）
@@ -907,9 +1069,17 @@ def analyze_work(conn, work_id):
       · 末尾对该篇（`personal:<n>`）套用「人工读音裁定」（与语料库同等待遇，无裁定原样返回）。
     作品不存在时抛 ValueError（由调用方转成友好错误）。
     """
-    w = conn.execute('SELECT * FROM personal_works WHERE id=?', (int(work_id),)).fetchone()
+    # ★ 2026-10-11 二修：本函数会拿到**外部传入**的连接（`/api/parse` 走只读连接；
+    #   门禁也会自建连接），不能再假定 `row_factory=Row`——统一经 `_row` 归一。
+    _cw = conn.execute('SELECT * FROM personal_works WHERE id=?', (int(work_id),))
+    w = _row(_cw, _cw.fetchone())
     if w is None:
         raise ValueError('个人作品 %s 不存在' % work_id)
+    # ★ M10：已撤回的作品**不再被解析**（但行保留 → 引用不悬空，且错误文案说清原因，
+    #   而不是像"物理删除"那样只报「不存在」，让人以为从没导入过）。
+    if int(w['withdrawn'] or 0):
+        raise ValueError('个人作品 %s 已撤回（%s）；行仍保留，可重新导入恢复'
+                         % (work_id, (w['withdrawn_why'] or '批量导入回滚') or '未注明原因'))
     pid = 'personal:%d' % int(w['id'])
     content = w['content'] or ''
     eng = Engine(_pronouncer())
@@ -983,7 +1153,21 @@ def import_rows(conn, tag, files, actor='import', note='', client_token=None):
                                  % (name, i + 1))
         fsha = content_sha('\n'.join(json.dumps(r, ensure_ascii=False, sort_keys=True)
                                      for r in rows))
-        prepared.append((name, rows))
+        # ★ 2026-10-11（审查·低）：**同文件内两行内容完全相同**曾被静默丢掉一行
+        #   （改前 `row_key` 就是内容哈希——第二行撞 key 即被判「重复」跳过）。
+        #   但「内容相同」不等于「同一条录入」：同一首词在素材里出现两次、
+        #   或两处引文恰好一字不差，都是**合法的两条**。静默丢数据比重复更严重。
+        #   处置：`row_key` = 内容哈希 + **该文件内第几次出现**（`#0`、`#1`…）。
+        #   · 同内容的两行 → 两个不同的 key → **都导入**；
+        #   · 同一份文件重导 → 出现次序不变 → key 不变 → **幂等照旧**，不会重复灌入。
+        seen = {}
+        keys = []
+        for r in rows:
+            rs = _row_sha(r)
+            k = seen.get(rs, 0)
+            seen[rs] = k + 1
+            keys.append(rs if k == 0 else '%s#%d' % (rs, k))
+        prepared.append((name, rows, keys))
         meta.append((name, fsha, len(rows)))
     msha = _manifest_sha(meta)
 
@@ -998,11 +1182,11 @@ def import_rows(conn, tag, files, actor='import', note='', client_token=None):
                         (_now(), tag, msha, len(meta), 0, 'committed', note))
         bid = cur.lastrowid
         inserted = skipped = 0
-        for name, rows in prepared:
-            for r in rows:
+        for name, rows, keys in prepared:
+            for r, rkey in zip(rows, keys):
                 rsha = _row_sha(r)
                 ex = c.execute('SELECT id FROM import_rows WHERE file=? AND row_key=?',
-                               (name, rsha)).fetchone()
+                               (name, rkey)).fetchone()
                 if ex is not None:
                     skipped += 1
                     continue
@@ -1016,7 +1200,7 @@ def import_rows(conn, tag, files, actor='import', note='', client_token=None):
                      str(r.get('source_locator') or ''))).lastrowid
                 c.execute('INSERT INTO import_rows(batch_id,file,row_key,row_sha,payload,work_ref)'
                           ' VALUES(?,?,?,?,?,?)',
-                          (bid, name, rsha, rsha, json.dumps(r, ensure_ascii=False), w))
+                          (bid, name, rkey, rsha, json.dumps(r, ensure_ascii=False), w))
                 inserted += 1
         c.execute('UPDATE import_batches SET n_rows=? WHERE id=?', (inserted, bid))
         c.execute('UPDATE import_batches SET note=? WHERE id=?',
@@ -1034,14 +1218,15 @@ def import_rows(conn, tag, files, actor='import', note='', client_token=None):
 def list_import_batches(conn):
     """批次对账（功能 13）：承诺条数（n_rows）vs **现存行数**（rollback 会减少），逐批状态。"""
     out = []
-    for r in conn.execute('SELECT * FROM import_batches ORDER BY id DESC LIMIT 200'):
-        d = dict(r)
+    _cur = conn.execute('SELECT * FROM import_batches ORDER BY id DESC LIMIT 200')
+    for r in _cur:
+        d = _row(_cur, r)
         d['rows_now'] = conn.execute('SELECT COUNT(1) FROM import_rows WHERE batch_id=?',
-                                     (r['id'],)).fetchone()[0]
+                                     (d['id'],)).fetchone()[0]
         d['works_now'] = conn.execute(
             'SELECT COUNT(1) FROM personal_works WHERE id IN'
             ' (SELECT work_ref FROM import_rows WHERE batch_id=? AND work_ref IS NOT NULL)',
-            (r['id'],)).fetchone()[0]
+            (d['id'],)).fetchone()[0]
         out.append(d)
     return out
 
@@ -1056,16 +1241,26 @@ def rollback_import_batch(conn, batch_id, why='', actor='human', client_token=No
 
     def fn(c):
         bid = int(batch_id)
-        b = c.execute('SELECT * FROM import_batches WHERE id=?', (bid,)).fetchone()
+        _cb = c.execute('SELECT * FROM import_batches WHERE id=?', (bid,))
+        b = _row(_cb, _cb.fetchone())
         if b is None:
             raise ValueError('批次 %s 不存在' % batch_id)
         if b['status'] != 'committed':
             return {'batch_id': bid, 'status': b['status'], 'removed': 0, 'note': '此前已回滚'}
+        # ★ 2026-10-11（审查 M10）：改前 `DELETE FROM personal_works`——**物理删除**，
+        #   与模块 docstring「删除=撤回标记（行保留）」的纪律相悖，且会让指向
+        #   `personal:<n>` 的读音裁定 / 研究事实 / 问答引用变成**悬空引用**
+        #   （回滚后再去解析/对照这些 id 会失败，且无从追溯"它曾经存在过")。
+        #   改后：作品**标记撤回**（行保留），引用不会悬空；`import_rows` 明细是本批对账用，
+        #   仍随批次撤下（批次记录与决策事件都保留，随时可查"撤了什么"）。
         wids = [r[0] for r in c.execute(
             'SELECT work_ref FROM import_rows WHERE batch_id=? AND work_ref IS NOT NULL',
             (bid,))]
+        _ts = _now()
         for wid in wids:
-            c.execute('DELETE FROM personal_works WHERE id=?', (wid,))
+            c.execute('UPDATE personal_works SET withdrawn=1, withdrawn_at=?, withdrawn_why=?'
+                      ' WHERE id=? AND withdrawn=0',
+                      (_ts, (why or '批量导入回滚')[:200], wid))
         removed_rows = c.execute('DELETE FROM import_rows WHERE batch_id=?', (bid,)).rowcount
         c.execute("UPDATE import_batches SET status='rolled_back', note=COALESCE(note,'') || ?"
                   " WHERE id=?", ('\n[已回滚] %s' % (why or ''), bid))
@@ -1105,6 +1300,25 @@ def readonly_conn(path=None):
         return conn
     except sqlite3.Error:
         return None
+
+
+def close_readonly():
+    """★ 2026-10-11（审查·低）：**显式关闭**本线程的只读连接。
+
+    `readonly_conn` 把连接缓存在 `threading.local` 里长期复用（省去每次重开），
+    但 `web/serve.py` 跑的是 `ThreadingHTTPServer`——**每来一个请求新起一条线程**，
+    线程结束前那条连接一直挂着，FD 只靠 GC 兜底回收，长跑服务里会攒下一批句柄。
+    这里给出显式收口：请求处理完由 `serve.py` 在 `finally` 里调一次，
+    语义仍是「读路径绝不创建文件」，只是不再等 GC。
+    """
+    c = getattr(_RO_TLS, 'conn', None)
+    _RO_TLS.conn = None
+    _RO_TLS.path = None
+    if c is not None:
+        try:
+            c.close()
+        except sqlite3.Error:                                  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------- 概况（诊断用）

@@ -104,7 +104,11 @@ export async function postJson(path, body) {
     let j = null;
     try { j = await r.json(); } catch (e) { /* 解析失败按状态码报 */ }
     if (!r.ok) {
-      const msg = (j && j.error && j.error.message) ? j.error.message : ('HTTP ' + r.status);
+      /* ★ 2026-10-11（审查 M12）：服务端错误信封已统一为 `{ok:false, code, error:<字符串>}`。
+         这里同时兼容旧形状 `{error:{message}}`，避免服务端/前端版本错配时拿到 `[object Object]`。 */
+      const _e = j && j.error;
+      const msg = (typeof _e === 'string' && _e) ? _e
+        : ((_e && _e.message) ? _e.message : ('HTTP ' + r.status));
       throw new Error('写接口 ' + path + ' 失败：' + msg);
     }
     return j;
@@ -123,10 +127,7 @@ export const api = {
   ask: (q, opt = {}) => getJson('/api/ask', Object.assign({ q }, normCtxPids(opt))),
   search: (cond, page, size) => getJson('/api/search', Object.assign({}, cond, { page, size })),
   parse: (pid) => getJson('/api/parse', { pid }),
-  rand: (dyn) => getJson('/api/rand', { dyn }),
   nl2query: (q, llm) => getJson('/api/nl2query', { q, llm }),
-  summarize: (cond, llm) => getJson('/api/summarize', Object.assign({}, cond, { llm })),
-  compare: (group_by, values, metric) => getJson('/api/compare', { group_by, values, metric }),
   /* 语料总览统计（2026-10-09 新增）：全部数字由服务端 SQL 现算，见 web/serve.py 的 q_catalog。 */
   catalog: (top) => getJson('/api/catalog', { top }),
   /* 实体身份判定（2026-10-09 新增）：exact／ambiguous／unavailable + 近似提示。 */
@@ -145,20 +146,13 @@ export const api = {
   /* 冻结快照（功能 1）：列表 / 回查（回查**原文返回、不重算**，附「依赖已陈旧」标注）。 */
   snapshots: (n) => getJson('/api/snapshots', { n }),
   snapshot: (id) => getJson('/api/snapshots/' + encodeURIComponent(id)),
-  /* 研究库概况（各表行数）/ 决策事件（审计）。 */
-  researchSummary: () => getJson('/api/research/summary'),
-  decisions: (opt) => getJson('/api/research/decisions', opt || {}),
-  /* 读音裁定（功能 8）：候选 / 决策史。 */
+  /* 读音裁定（功能 8）：候选。
+     ★ 2026-10-11（审查·低）：删掉 9 个**零调用方**的导出
+     （researchSummary / decisions / pronDecisions / cipuList / cipuCompare / intake /
+     textVersions / metaRevisions，以及上一组的 summarize / compare / rand）。
+     它们曾给人「前端已接这些端点」的错觉，实际一个都没接——留着只会让「唯一调用入口」
+     这份承诺失真。端点仍在服务端，需要时按下面两行的写法补回一行即可。 */
   pronCandidates: (pid, line, pos) => getJson('/api/pronounce/candidates', { pid, line, pos }),
-  pronDecisions: (pid) => getJson('/api/pronounce/decisions', { pid }),
-  /* 词谱对照（功能 9）：谱库列表 / 三行对照。 */
-  cipuList: () => getJson('/api/cipu/list'),
-  cipuCompare: (pid, opt) => getJson('/api/cipu/compare', Object.assign({ pid }, opt || {})),
-  /* 录入体检（功能 11，只读）。 */
-  intake: (title, cipai, content) => getJson('/api/intake', { title, cipai, content }),
-  /* 文本版本链 / 元数据修订史（功能 15）。 */
-  textVersions: (pid, scope) => getJson('/api/text_versions', { pid, scope }),
-  metaRevisions: (pid, scope) => getJson('/api/meta_revisions', { pid, scope }),
   /* SSE 流式问答：由调用方传入 onFrame(type, payload)；返回 Promise，deliver 完即 resolve。 */
   askStream(q, opt = {}, onFrame) {
     const b = base();
@@ -215,8 +209,16 @@ export const api = {
           const ln = part.trim();
           if (ln.indexOf('data:') !== 0) { continue; }
           const p = ln.slice(5).trim();
-          if (!p || p.indexOf('"done"') >= 0) { continue; }
+          if (!p) { continue; }
+          /* ★ 2026-10-11（审查·低）：改前用 `p.indexOf('"done"') >= 0` 判断「结束帧」——
+             这是**子串**匹配：任何正文 delta 里只要出现 `"done"` 这四个字符（讲解里举例、
+             引用 JSON 片段等）就会被当成结束帧**整帧吞掉**，正文静默缺一段。
+             ⚠ 2026-10-11（自查第 5 遍）更正注释：服务端**确实会**在流末尾发一帧
+             `{"type":"done"}`（见 `web/serve.py` 的 SSE 生成器末尾），但它只是**协议级收尾哨**，
+             语义上的「结束」由 `final` / `error` 帧承担——故正确做法是**照常分派**、
+             由调用方按 `type` 决定，绝不在传输层按子串吞帧。 */
           let d; try { d = JSON.parse(p); } catch (e) { continue; }
+          if (!d || typeof d.type !== 'string') { continue; }
           onFrame(d.type, d);
         }
         return pump();

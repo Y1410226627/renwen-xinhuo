@@ -68,6 +68,8 @@ import aggregate as AGG                  # noqa: E402
 import answer_verify as AVERIFY          # noqa: E402  （集合身份校验，2026-10-08 新增）
 import ask as ASK                        # noqa: E402
 import cipu as CIPU                      # noqa: E402  （词谱对照，2026-10-09 功能 9）
+# ★ 2026-10-11（审查 M1）：LIKE 通配符转义的**单一来源**（与 solve/retrieve.py 同一份）
+from corpus import LIKE_ESCAPE as LIKE_ESC, like_escape as _like_esc     # noqa: E402
 import context as CONTEXT                # noqa: E402  （服务端会话语境，2026-10-08 新增）
 import entity_resolve as ENT             # noqa: E402  （实体身份判定，2026-10-09 新增 /api/identify）
 import evidence as EV                    # noqa: E402
@@ -168,6 +170,45 @@ SUM_SYS = ('你是清代词律声情研究助手的表述层。你只负责把�
 SUM_TASK = ('请依据下面的事实清单写 2–4 句总结（客观、简洁，不必逐篇罗列），'
             '最后一句话说明推断边界。\n\n事实清单：\n')
 SUM_BOUND = '以上只反映当前文本的形式与声调配置，不能直接推断作者意图、时代因果或作品优劣。'
+
+
+def _err_detail(exc):
+    """内部异常串的**对外口径单一来源**（★ 2026-10-11 审查 M11）。
+
+    异常正文可能含本机路径、库结构、SQL 片段、配置细节——默认只留**异常类型**
+    （足以定位方向，不足以泄漏环境）；需要完整串时设 `LVC_DEBUG=1`。
+    这与 do_GET 早先确立的「不回吐 traceback（P1-31）」是同一条政策，
+    改前 do_POST 与 set_check 各自回吐全文，属于**政策前后不一致**。
+    """
+    if os.environ.get('LVC_DEBUG'):
+        return '%s: %s' % (type(exc).__name__, exc)
+    return type(exc).__name__
+
+
+def _close_readonly():
+    """请求出口的只读连接收口（见 `research.close_readonly`）；异常一律不冒泡到响应。"""
+    try:
+        RSRCH.close_readonly()
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
+def _err(code, message, **extra):
+    """★ 2026-10-11（审查 M12）：**错误返回体统一信封**（服务端单一来源）。
+
+    改前同一服务里三种写法混用，前端只能靠猜：
+      · `{'error': '人话'}`——字符串，且多为 HTTP 200；
+      · `{'error': {'code': 'X', 'message': '人话'}}`——嵌套对象；
+      · `{'error': str(ve), 'code': 'INVALID_QUERY'}`——字符串 + 顶层 code。
+    统一为 **`{'ok': False, 'code': <机器码>, 'error': <人话>}`**：
+      · `ok` 与写接口成功体 `{ok: True, result: …}` 同一语义轴，前端不必再「看有没有 error 字段」；
+      · `code` 是机器判据（前端/门禁可按码分支），`error` 永远是可直接显示的**字符串**；
+      · HTTP 状态码**保持不变**（业务性「查无此项」仍是 200 —— 它不是请求错误），
+        即：信封统一，但**不假装**「查无此项」是客户端错误。
+    """
+    body = {'ok': False, 'code': code, 'error': str(message)}
+    body.update(extra)
+    return body
 
 
 def get_llm():
@@ -314,6 +355,24 @@ def get_research_conn_ro():
     return RSRCH.readonly_conn(RESEARCH_DB)
 
 
+def _ro_or_none():
+    """GET **只读**路径取研究库连接（★ 2026-10-11 审查 M13）。
+
+    改前这些端点一律调 `get_research_conn()` → `RSRCH.connect()`，而后者会
+    `makedirs` + `executescript(SCHEMA)`——于是**用户只是打开页面看一眼**，
+    `data/research.db` 就被造了出来，与 `readonly_conn` 注释里
+    「展示层绝不为读而创建文件」的承诺直接冲突。
+    """
+    return RSRCH.readonly_conn(RESEARCH_DB)
+
+
+def _empty_summary():
+    """研究库尚未创建时的「概况」空账（如实标注，不伪造 0 行）。"""
+    return {t: None for t in ('materials', 'material_revisions', 'facts', 'decisions',
+                              'text_versions', 'meta_revisions', 'personal_works',
+                              'import_batches', 'import_rows', 'idempotency')}
+
+
 def _num(v, cast=float):
     try:
         return cast(v)
@@ -356,22 +415,30 @@ def _tables_in_sync(conn):
     后者只在 1.4 万行的小表上做 LIKE，外层的 IN 走 `idx_poems_cipai` 索引，
     省掉 5.9 万行的全表扫描（实测单条件检索 460ms → 见报告）。不一致就退回 LIKE（语义永远等价）。
     """
+    # ★ 2026-10-11（审查·中）：缓存键**不能只存 `id(conn)`**——
+    #   `id()` 是内存地址，旧连接被回收后**新连接会复用同一个地址**，
+    #   于是这份缓存会把「上一个库」的结论（一致/不一致）错配给新库：
+    #   库真的不一致时却照旧走 `IN (小表)` 优化 → **漏篇**。
+    #   这里连同**连接对象本身**一起存，取用时校验「还是不是那个连接」（与
+    #   `retrieve._db_identity` 同一写法）；并给缓存设上限，避免长跑里无限增长。
     key = id(conn)
     hit = _SYNC_CACHE.get(key)
-    if hit is None:
-        try:
-            ok = True
-            for col, tab in (('cipai', 'cipai'), ('author', 'authors')):
-                a = conn.execute('SELECT COUNT(DISTINCT %s) FROM poems' % col).fetchone()[0]
-                b = conn.execute('SELECT COUNT(*) FROM %s' % tab).fetchone()[0]
-                if a != b:
-                    ok = False
-                    break
-            hit = ok
-        except sqlite3.Error:
-            hit = False
-        _SYNC_CACHE[key] = hit
-    return hit
+    if hit is not None and hit[0] is conn:
+        return hit[1]
+    try:
+        ok = True
+        for col, tab in (('cipai', 'cipai'), ('author', 'authors')):
+            a = conn.execute('SELECT COUNT(DISTINCT %s) FROM poems' % col).fetchone()[0]
+            b = conn.execute('SELECT COUNT(*) FROM %s' % tab).fetchone()[0]
+            if a != b:
+                ok = False
+                break
+    except sqlite3.Error:
+        ok = False
+    if len(_SYNC_CACHE) > 64:
+        _SYNC_CACHE.clear()
+    _SYNC_CACHE[key] = (conn, ok)
+    return ok
 
 
 def build_where(p, conn=None):
@@ -396,19 +463,22 @@ def build_where(p, conn=None):
             where.append('(' + ' OR '.join('%s = ?' % col for _ in vals) + ')')
             args.extend(vals)
         elif mode == 'prefix':
-            where.append('(' + ' OR '.join('%s LIKE ?' % col for _ in vals) + ')')
-            args.extend(v + '%' for v in vals)
+            # ★ M1：转义用户输入（`_`/`%` 不该当通配符）→ 命中集才不会被虚胖
+            where.append('(' + ' OR '.join('%s LIKE ?' % col + LIKE_ESC for _ in vals) + ')')
+            args.extend(_like_esc(v) + '%' for v in vals)
         else:                                  # contains（默认；向后兼容旧调用）
-            where.append('(' + ' OR '.join('%s LIKE ?' % col for _ in vals) + ')')
-            args.extend('%' + v + '%' for v in vals)
+            where.append('(' + ' OR '.join('%s LIKE ?' % col + LIKE_ESC for _ in vals) + ')')
+            args.extend('%' + _like_esc(v) + '%' for v in vals)
 
     _dyns = _multi('dynasty', '清')
     where = ['(' + ' OR '.join('p.dynasty = ?' for _ in _dyns) + ')']
     args = list(_dyns)
     q = (p.get('q') or '').strip()
     if q:
-        where.append('(p.author LIKE ? OR p.cipai LIKE ? OR p.title LIKE ? OR p.raw LIKE ?)')
-        args += ['%' + q + '%'] * 4
+        # ★ M1：全局关键词同样要转义（否则输入 `%` 就是「全库」、输入 `_` 是「任意单字」）
+        where.append('(p.author LIKE ?' + LIKE_ESC + ' OR p.cipai LIKE ?' + LIKE_ESC
+                     + ' OR p.title LIKE ?' + LIKE_ESC + ' OR p.raw LIKE ?' + LIKE_ESC + ')')
+        args += ['%' + _like_esc(q) + '%'] * 4
     # 实测（EXPLAIN QUERY PLAN）：`dynasty = '清'` 已让 SQLite 走 idx_poems_dyn，
     # 再把 LIKE 改写成 IN 子查询只是多一层、反而慢 25%（33ms vs 26ms）→ 保持 LIKE。
     _field('p.author', 'author', 'authorMode')
@@ -533,9 +603,15 @@ def q_search(conn, p):
     #   · 不再建临时表：实测 CREATE TEMP TABLE 本身要 172 ms（且大命中集拷贝更贵），
     #     而下面 4 条走索引的扫描在 439 篇命中时合计 < 5 ms。
     total = conn.execute('SELECT COUNT(1) FROM poems p WHERE %s' % where, args).fetchone()[0]
+    # ★ 2026-10-11（审查·低）：`page` 原先无上限——前端翻到 `page=99999999` 时
+    #   OFFSET 变成天文数字，SQLite 仍要先扫过全部前置行再返回空列表（慢查询可被放大成拒绝服务），
+    #   且越界页返回空列表却不给任何提示，用户以为「检索坏了」。
+    #   这里按命中总数**夹紧**到最后一页，并如实回吐 `page_clamped`，不静默改语义。
+    max_page = max(1, (total + size - 1) // size)
+    page_clamped = min(page, max_page)
     rows = conn.execute('SELECT %s FROM poems p WHERE %s ORDER BY %s LIMIT ? OFFSET ?'
                         % (','.join('p.' + f for f in SEARCH_FIELDS), where, sort),
-                        args + [size, (page - 1) * size]).fetchall()
+                        args + [size, (page_clamped - 1) * size]).fetchall()
     _fac = conn.execute(
         "SELECT * FROM (SELECT 'author' d, p.author v, COUNT(1) c FROM poems p WHERE %(w)s "
         'GROUP BY p.author ORDER BY 3 DESC, 2 LIMIT 12) '
@@ -568,7 +644,8 @@ def q_search(conn, p):
     stats = {'n': st[0], 'ze_mean': round(st[1], 1) if st[1] is not None else None,
              'ze_min': st[2], 'ze_max': st[3],
              'len_mean': round(st[4], 1) if st[4] is not None else None, 'len_max': st[5]}
-    return {'total': total, 'page': page, 'size': size,
+    return {'total': total, 'page': page_clamped, 'size': size,
+            'page_clamped': bool(page_clamped != page), 'page_requested': page,
             'rows': [dict(zip(SEARCH_FIELDS, r)) for r in rows],
             'facets': {'author': f_au, 'cipai': f_cp, 'tail': [[a, c] for a, c in f_tl],
                        'scene': f_sc, 'ratio': ratio},
@@ -715,7 +792,11 @@ def q_summarize(conn, p, use_llm=True):
             text, why = _llm_summary(client, spec_text, out['facts'], blocks)
             if text is not None and not why:
                 break
+        # ★ 2026-10-11（审查 M12）：`ok` 在本仓库曾**一名三义**（写接口成功 / 护栏通过 /
+        #   集合校验通过）。这里保留 `ok` 字段名（老调用方在读），但**显式标注它的含义**，
+        #   使契约不再靠猜——真正的「请求是否成功」看 HTTP 状态码与 `error` 字段。
         out.update({'ok': bool(text is not None and not why),
+                    'ok_meaning': '护栏是否通过（不是「请求是否成功」）',
                     'model': client.name, 'problems': ([why] if why else [])})
         if text is not None and not why:
             out['text'] = text
@@ -980,8 +1061,7 @@ def _derive_understanding(q, parse, client, policy, ctx_v, pids_v):
                 note['notes'] = ['本轮未启用大模型理解；上下文（ctx）只在理解层生效，规则路不受其影响']
         return spec, (note if isinstance(note, dict) else {})
     except Exception as exc:                              # 复核失败绝不影响作答
-        return None, {'understanding_status': None,
-                      'error': '%s: %s' % (type(exc).__name__, exc)}
+        return None, {'understanding_status': None, 'error': _err_detail(exc)}
 
 
 def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
@@ -1002,6 +1082,8 @@ def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
         pass                                     # plan 路已按实际计划校验——原样保留
     elif out.get('semantic_used'):
         out['set_check'] = {
+            # ★ 审查 M12：同上——`ok` 在这里是「集合身份校验是否通过」，不是请求成败。
+            'ok_meaning': '集合身份校验是否通过（不是「请求是否成功」）',
             'ok': None, 'checked': True, 'status': 'SEMANTIC_NOT_EXHAUSTIVE',
             'status_text': '本轮含语义召回/融合排序——**非穷尽**：这是候选集，'
                            '不代表「全部符合主题的作品」。',
@@ -1014,10 +1096,13 @@ def _attach_checks(out, conn, spec, note, result_pids, agg_result=None):
                 shown=shown, agg_result=agg_result)
         except Exception as exc:
             # ★ 未做成 ≠ 通过（审查 §24）：显式标 `NOT_CHECKED`，不许让它落在任何「✓」的语义里
-            out['set_check'] = {'ok': None, 'checked': False, 'status': 'NOT_CHECKED',
+            out['set_check'] = {'ok_meaning': '集合身份校验是否通过（不是「请求是否成功」）',
+                                'ok': None, 'checked': False, 'status': 'NOT_CHECKED',
                                 'agg_status': 'NOT_EXECUTED',
                                 'status_text': '集合校验未执行（未验证）',
-                                'reason': '集合校验未执行：%s: %s' % (type(exc).__name__, exc)}
+                                # ★ 2026-10-11（审查 M11）：异常**正文**可能含本机路径/库结构，
+                                #   默认只回类型（与 do_GET 的 P1-31 政策一致）。
+                                'reason': '集合校验未执行：%s' % _err_detail(exc)}
             if isinstance(note, dict) and note.get('error'):
                 out['set_check']['reflect'] = note['error']
     out['understanding_status'] = (note or {}).get('understanding_status')
@@ -1136,7 +1221,9 @@ def _research_evidence(material_pids, fact_pids):
             'title': mat.get('title') or '',
             'author': mat.get('author') or '',
             'year': mat.get('year') or '',
-            'source_url': mat.get('source_url') or '',
+            # ★ 2026-10-11（审查 H4）：证据块里的来源地址同样只放行 http/https
+            'source_url': (mat.get('source_url') or '') if RSRCH.url_is_safe(
+                mat.get('source_url') or '') else '',
             'locator': latest.get('locator') or '',
             'content': content[:500],
             'content_len': len(content),
@@ -1373,6 +1460,12 @@ def q_pron_candidates(pid, line_idx, char_pos):
         raise ValueError('pid 为必填')
     if line_idx is None or char_pos is None:
         raise ValueError('line 与 pos 为必填整数')
+    # ★ 2026-10-11（审查·低）：`line`/`pos` 原先只判空不判负。
+    #   Python 负索引会**回绕**——`pos=-1` 不报错、静默取到该句**最后一个**字，
+    #   页面因此会「我点第一句第一个字，却弹出了末字的候选」，属于静默误导。
+    #   这里显式拦负数（0 是合法的第 1 个汉字）。
+    if int(line_idx) < 0 or int(char_pos) < 0:
+        raise ValueError('line 与 pos 必须是非负整数（0 表示第一句／第一个字）')
     c = get_conn()
     row = c.execute('SELECT text, pz FROM lines WHERE pid=? AND idx=?',
                     (pid, int(line_idx))).fetchone()
@@ -1615,18 +1708,34 @@ def q_ask_stream(q, topk=3, narrate=True, argument=False, parse=True, policy='au
             emit('final', fin)
         except Exception as exc:
             sys.stderr.write('[sse][%s] worker 异常：%s: %s\n' % (rid, type(exc).__name__, exc))
-            emit('error', {'error': '%s: %s' % (type(exc).__name__, exc)})
+            # ★ M11：异常正文不回吐客户端（与 do_GET 的 P1-31 同政策）
+            emit('error', {'error': _err_detail(exc), 'request_id': rid})
         finally:
+            # ★ 2026-10-11（审查 M5）：改前 `put_nowait` + `except Full: pass`——
+            #   队列满（上限 256 帧）时 `__end__` **被静默丢掉**，而消费端 `out.get()`
+            #   无超时 → 该请求线程**永久挂住**（浏览器连接同样挂住，表现就是转圈到底）。
+            #   改后：① 结束帧用**阻塞 put + 超时**（消费端一直在取，空位很快出现，
+            #   故结束帧不再会丢，也不会无限等）；② 同时置 `_end_evt`，消费端据此
+            #   在"worker 已收尾且队列已空"时自行退出——双保险，任一端失效都挂不死。
+            _end_evt.set()
             try:
-                out.put_nowait(('__end__', None))
-            except _queue.Full:
+                out.put(('__end__', None), timeout=10)
+            except Exception:                                    # noqa: BLE001
                 pass
 
-    _threading.Thread(target=work, daemon=True, name='ask-stream-%s' % rid).start()
+    _end_evt = _threading.Event()
+    _th = _threading.Thread(target=work, daemon=True, name='ask-stream-%s' % rid)
+    _th.start()
     yield _sse('status', {'text': '已收到问题，正在检索语料与核对数字…', 'request_id': rid})
     try:
         while True:
-            kind, payload = out.get()
+            try:
+                kind, payload = out.get(timeout=1.0)      # ★ M5：不再无限阻塞
+            except _queue.Empty:
+                # worker 已收尾且队列已排空 → 结束帧丢了也能自行退出（不挂死）
+                if _end_evt.is_set() or not _th.is_alive():
+                    break
+                continue
             if kind == '__end__':
                 break
             yield _sse(kind, payload)
@@ -1656,16 +1765,16 @@ def q_parse(pid):
     if isinstance(pid, str) and pid.startswith('personal:'):
         _rc = get_research_conn_ro()
         if _rc is None:
-            return {'error': '没有这一篇：%s（研究库不存在）' % pid}
+            return _err('NO_SUCH_POEM', '没有这一篇：%s（研究库不存在）' % pid)
         try:
             return RSRCH.analyze_work(_rc, pid[len('personal:'):])
         except ValueError as e:
-            return {'error': str(e)}
+            return _err('NO_SUCH_POEM', str(e))
     c = get_conn()
     with LOCK:
         row = c.execute('SELECT * FROM poems WHERE pid=?', (pid,)).fetchone()
         if row is None:
-            return {'error': '没有这一篇：%s' % pid}
+            return _err('NO_SUCH_POEM', '没有这一篇：%s' % pid)
         d = dict(row)
         lines = [dict(r) for r in c.execute(
             'SELECT idx,text,han_len,ping,ze,pz,tail FROM lines WHERE pid=? ORDER BY idx', (pid,))]
@@ -1712,11 +1821,11 @@ def q_rand(dyn=''):
         args = [dyn] if dyn else []
         n = c.execute('SELECT COUNT(1) FROM poems' + where, args).fetchone()[0]
         if not n:
-            return {'error': '没有符合条件的篇目'}
+            return _err('NO_MATCH', '没有符合条件的篇目')
         row = c.execute('SELECT pid FROM poems' + where + ' LIMIT 1 OFFSET ?',
                         args + [random.randrange(n)]).fetchone()
     if not row:
-        return {'error': '随机取样失败（请重试）'}
+        return _err('RAND_FAILED', '随机取样失败（请重试）')
     return q_parse(row[0])
 
 
@@ -1767,7 +1876,46 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):
         sys.stderr.write('  · %s\n' % (fmt % a))
 
+    # ★ 2026-10-11（审查 H2）：写接口**同源校验**。
+    #   浏览器对 `Content-Type: text/plain` 的跨站 POST 属「简单请求」、**不触发预检**，
+    #   于是任意网页都能在用户本机静默调用 `/api/materials`、`/api/materials/withdraw`、
+    #   `/api/import/rollback` 等**写/撤**接口。两道闸：
+    #     ① Content-Type 必须是 application/json —— 跨站表单只能发三种简单类型，
+    #        发 JSON 就必须先过 CORS 预检（我们不发 ACAO 头 → 预检失败 → 浏览器拦下）；
+    #     ② Origin 存在时必须与本站同源（Host 一致，或 localhost/127.0.0.1/[::1]）。
+    #   非浏览器客户端（curl / 脚本 / 门禁）没有 Origin，不受影响——本服务设计为本地单机。
+    def _write_guard(self):
+        """返回拒绝原因（人话）；`None` = 放行。"""
+        ct = ((self.headers.get('Content-Type') or '').split(';')[0] or '').strip().lower()
+        if ct != 'application/json':
+            return ('写接口只接受 Content-Type: application/json（收到 %r）——'
+                    '这是本机跨站写入的第一道闸：text/plain 之类的「简单请求」不触发 CORS 预检。'
+                    % (ct or '空'))
+        origin = self.headers.get('Origin')
+        if not origin:
+            return None                       # 无 Origin：非浏览器客户端（curl/脚本/门禁）
+        try:
+            oh = (urlparse(origin).hostname or '').lower()
+        except Exception:                                        # noqa: BLE001
+            return 'Origin 无法解析，已拒绝'
+        host = ((self.headers.get('Host') or '').split(':')[0] or '').lower()
+        if oh in ('localhost', '127.0.0.1', '::1', '[::1]'):
+            return None
+        if host and oh == host:
+            return None
+        return ('跨站写入被拒绝：Origin 为 %s，与本站 %s 不同源'
+                '（本机服务只对同源页面开放写操作）' % (origin, host or '（未知 Host）'))
+
+    # ★ 2026-10-11（审查·低）：读路径的只读连接此前**只靠 GC 回收**；
+    #   ThreadingHTTPServer 每请求一条线程，长跑会攒下一批句柄。
+    #   这里在请求出口显式收口（`_do_POST` / `_do_GET` 是原实现，语义不变）。
     def do_POST(self):
+        try:
+            return self._do_POST()
+        finally:
+            _close_readonly()
+
+    def _do_POST(self):
         """**写接口**（2026-10-09 起本项目首次引入写操作；见 DECISIONS D32）。
 
         边界与纪律（和只读 GET 的区别都在这里写清）：
@@ -1785,30 +1933,42 @@ class H(BaseHTTPRequestHandler):
         except ValueError:
             n = 0
         if n < 0 or n > (1 << 20):
-            return self._send({'error': {'code': 'BODY_TOO_LARGE',
-                                         'message': '请求体超过 1 MB 上限'}}, code=413)
+            return self._send(_err('BODY_TOO_LARGE', '请求体超过 1 MB 上限'), code=413)
         raw = self.rfile.read(n) if n else b''
         try:
             data = json.loads(raw.decode('utf-8')) if raw else {}
         except (ValueError, UnicodeDecodeError):
-            return self._send({'error': {'code': 'BAD_JSON',
-                                         'message': '请求体必须是 UTF-8 的 JSON 对象'}}, code=400)
+            return self._send(_err('BAD_JSON', '请求体必须是 UTF-8 的 JSON 对象'), code=400)
         if not isinstance(data, dict):
-            return self._send({'error': {'code': 'BAD_JSON',
-                                         'message': '请求体必须是 JSON 对象'}}, code=400)
+            return self._send(_err('BAD_JSON', '请求体必须是 JSON 对象'), code=400)
+        _why = self._write_guard()                  # ★ 审查 H2：同源校验（见方法处注释）
+        if _why:
+            sys.stderr.write('  ! POST %s 被同源校验拒绝：%s\n' % (u.path, _why))
+            return self._send(_err('CROSS_ORIGIN_BLOCKED', _why), code=403)
         try:
             result = q_research_write(u.path, data)
             return self._send({'ok': True, 'result': result})
         except ValueError as e:
-            return self._send({'error': {'code': 'BAD_PARAM', 'message': str(e)}}, code=400)
+            return self._send(_err('BAD_PARAM', str(e)), code=400)
         except LookupError as e:
-            return self._send({'error': {'code': 'NOT_FOUND_WRITE', 'message': str(e)}}, code=404)
+            return self._send(_err('NOT_FOUND_WRITE', str(e)), code=404)
         except Exception as e:                                  # noqa: BLE001
+            # ★ 2026-10-11（审查 M11）：改前把 `%s % e` **原样回吐**给客户端
+            #   （可能含本机路径、库结构、SQL 片段），而同文件 do_GET 早已声明
+            #   「不回吐 traceback（P1-31）」——前后政策不一致。现统一：
+            #   完整堆栈只进服务端日志，客户端只拿 code + 请求路径（细节靠 LVC_DEBUG 开）。
             sys.stderr.write('  ! POST %s 失败：%r\n' % (u.path, e))
-            return self._send({'error': {'code': 'INTERNAL',
-                                         'message': '写入失败：%s' % e}}, code=500)
+            return self._send(
+                _err('INTERNAL', '写入失败（%s）：%s；服务端日志有完整堆栈'
+                     % (u.path, _err_detail(e))), code=500)
 
     def do_GET(self):
+        try:
+            return self._do_GET()
+        finally:
+            _close_readonly()
+
+    def _do_GET(self):
         # ⚠ 2026-10-04：`_sse_started` 是「本连接已发过 SSE 响应头」的标记（见 except 处）。
         #   HTTP keep-alive 下同一连接会服务多个请求，必须在每个请求开头复位——
         #   否则「SSE 之后同一连接上的下一个请求出错」会被误判成"不能再发响应"而静默挂住。
@@ -1843,7 +2003,7 @@ class H(BaseHTTPRequestHandler):
                               'text/css' if p.endswith('.css') else 'application/octet-stream')
                         with open(p, 'rb') as f:
                             return self._send(f.read(), ct + '; charset=utf-8')
-                return self._send({'error': 'not found: %s' % u.path}, code=404)
+                return self._send(_err('NOT_FOUND', 'not found: %s' % u.path), code=404)
             if u.path == '/api/ask':
                 b = lambda k: g(k).lower() in ('1', 'true', 'yes', 'on')
                 topk = min(10, max(1, _num(g('topk'), int) or 3))
@@ -1892,7 +2052,7 @@ class H(BaseHTTPRequestHandler):
                 try:
                     _pz_glob(params.get('pz'))
                 except ValueError as ve:
-                    return self._send({'error': str(ve), 'code': 'INVALID_QUERY'}, code=400)
+                    return self._send(_err('INVALID_QUERY', str(ve)), code=400)
                 # ⚠ 2026-10-06 修（外部审查 P1，本轮第 5 项）：**去掉该端点上的全局锁**。
                 #   改前 → `with LOCK: return self._send(q_search(get_conn(), params))`。
                 #   依据（先确认再改，不盲动）：
@@ -1921,54 +2081,59 @@ class H(BaseHTTPRequestHandler):
             if u.path == '/api/text_versions':
                 # 文本版本链（功能 15，只读回查；写入走 POST /api/text_versions）。
                 if not g('pid'):
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': 'pid 为必填'}}, code=400)
-                return self._send({'ok': True, 'result': RSRCH.list_text_versions(
-                    get_research_conn(), g('pid'), g('scope') or None)})
+                    return self._send(_err('BAD_PARAM', 'pid 为必填'), code=400)
+                _rc = _ro_or_none()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_text_versions(_rc, g('pid'), g('scope') or None)
+                    if _rc is not None else [])})
             if u.path == '/api/meta_revisions':
                 # 元数据修订史（功能 15，只读回查）。
                 if not g('pid'):
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': 'pid 为必填'}}, code=400)
-                return self._send({'ok': True, 'result': RSRCH.list_meta_revisions(
-                    get_research_conn(), g('pid'), g('scope') or None)})
+                    return self._send(_err('BAD_PARAM', 'pid 为必填'), code=400)
+                _rc = _ro_or_none()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_meta_revisions(_rc, g('pid'), g('scope') or None)
+                    if _rc is not None else [])})
             if u.path == '/api/materials':
                 # 文献摘录列表（功能 6；`all=1` 含已撤回）。
-                return self._send({'ok': True, 'result': RSRCH.list_materials(
-                    get_research_conn(), include_withdrawn=g('all') == '1')})
+                _rc = _ro_or_none()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_materials(_rc, include_withdrawn=g('all') == '1')
+                    if _rc is not None else [])})
             if u.path == '/api/material':
                 # 单个材料 + 全部版本链（功能 6 验收：可完整回溯）。
                 mid = _num(g('material_id'), int)
                 if not mid:
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': 'material_id 为必填'}}, code=400)
-                chain = RSRCH.get_material_chain(get_research_conn(), mid)
+                    return self._send(_err('BAD_PARAM', 'material_id 为必填'), code=400)
+                _rc = _ro_or_none()
+                chain = RSRCH.get_material_chain(_rc, mid) if _rc is not None else None
                 if chain is None:
-                    return self._send({'error': {'code': 'NOT_FOUND',
-                                                 'message': '材料 %s 不存在' % mid}}, code=404)
+                    return self._send(_err('NOT_FOUND', '材料 %s 不存在' % mid), code=404)
                 return self._send({'ok': True, 'result': chain})
             if u.path == '/api/facts':
                 # 研究事实列表（功能 7；可按 poem_pid / material_id 过滤）。
-                return self._send({'ok': True, 'result': RSRCH.list_facts(
-                    get_research_conn(), poem_pid=g('poem_pid') or None,
-                    material_id=_num(g('material_id'), int),
-                    include_withdrawn=g('all') == '1')})
+                _rc = _ro_or_none()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_facts(_rc, poem_pid=g('poem_pid') or None,
+                                     material_id=_num(g('material_id'), int),
+                                     include_withdrawn=g('all') == '1')
+                    if _rc is not None else [])})
             if u.path == '/api/research/summary':
-                # 研究库概况（各表行数）。
-                return self._send({'ok': True, 'result': RSRCH.summary(get_research_conn())})
+                # 研究库概况（各表行数）。★ M13：库不存在时给**空账**，不为读而建库。
+                _rc = _ro_or_none()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.summary(_rc) if _rc is not None else _empty_summary())})
             if u.path == '/api/pronounce/candidates':
                 # 读音候选（功能 8）：多来源候选 + 当前裁定 + 该字位裁定史。
                 try:
                     return self._send({'ok': True, 'result': q_pron_candidates(
                         g('pid'), _num(g('line'), int), _num(g('pos'), int))})
                 except ValueError as e:
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': str(e)}}, code=400)
+                    return self._send(_err('BAD_PARAM', str(e)), code=400)
             if u.path == '/api/pronounce/decisions':
                 # 某篇读音决策全史（select + withdraw；功能 8 验收「完整回溯」）。
                 if not g('pid'):
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': 'pid 为必填'}}, code=400)
+                    return self._send(_err('BAD_PARAM', 'pid 为必填'), code=400)
                 _rc0 = get_research_conn_ro()
                 return self._send({'ok': True, 'result': (
                     RSRCH.list_pron_decisions(_rc0, g('pid')) if _rc0 is not None else [])})
@@ -1982,8 +2147,7 @@ class H(BaseHTTPRequestHandler):
                     return self._send({'ok': True, 'result': RSRCH.list_personal_works(
                         rc1, state=g('state') or None)})
                 except ValueError as e:
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': str(e)}}, code=400)
+                    return self._send(_err('BAD_PARAM', str(e)), code=400)
             if u.path == '/api/import/batches':
                 # 批量导入批次对账（功能 13）。
                 rc2 = get_research_conn_ro()
@@ -2009,8 +2173,7 @@ class H(BaseHTTPRequestHandler):
                 # 某词牌的全部体（含逐句规则与例词）。
                 tune = g('tune')
                 if not tune:
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': 'tune 为必填'}}, code=400)
+                    return self._send(_err('BAD_PARAM', 'tune 为必填'), code=400)
                 canon, cands = CIPU.resolve_tune(tune)
                 if canon is None:
                     return self._send({'ok': True, 'result': {'status': 'no_tune',
@@ -2024,8 +2187,7 @@ class H(BaseHTTPRequestHandler):
             if u.path == '/api/cipu/compare':
                 # **三行对照**（功能 9）：作品原字 / 规范 / 谱书例词。
                 if not g('pid'):
-                    return self._send({'error': {'code': 'BAD_PARAM',
-                                                 'message': 'pid 为必填'}}, code=400)
+                    return self._send(_err('BAD_PARAM', 'pid 为必填'), code=400)
                 # ★ 2026-10-10（词谱修复）：`form` 原样透传（可为 `form_key`，如「钦定词谱|1」）。
                 #   旧版 `_num(..., int)` 会把 form_key 强制成 None，于是"按谱书+体号精确选体"
                 #   这条路根本走不通（前端只能退化成数字体号，撞号时还会选错）。
@@ -2034,14 +2196,12 @@ class H(BaseHTTPRequestHandler):
                 if g('pid').startswith('personal:'):
                     _rc = get_research_conn_ro()
                     if _rc is None:
-                        return self._send({'error': {'code': 'NOT_FOUND',
-                                                     'message': '没有这一篇：%s（研究库不存在）' % g('pid')}},
+                        return self._send(_err('NOT_FOUND', '没有这一篇：%s（研究库不存在）' % g('pid')),
                                           code=404)
                     try:
                         _work = RSRCH.analyze_work(_rc, g('pid')[len('personal:'):])
                     except ValueError:
-                        return self._send({'error': {'code': 'NOT_FOUND',
-                                                     'message': '没有这一篇：%s' % g('pid')}},
+                        return self._send(_err('NOT_FOUND', '没有这一篇：%s' % g('pid')),
                                           code=404)
                     res = CIPU.compare_poem(g('pid'),
                                             {'pid': _work['pid'], 'author': _work['author'],
@@ -2054,8 +2214,7 @@ class H(BaseHTTPRequestHandler):
                                        tune=g('tune') or None,
                                        form=(g('form') or None))
                 if res is None:
-                    return self._send({'error': {'code': 'NOT_FOUND',
-                                                 'message': '没有这一篇：%s' % g('pid')}},
+                    return self._send(_err('NOT_FOUND', '没有这一篇：%s' % g('pid')),
                                       code=404)
                 return self._send({'ok': True, 'result': res})
             if u.path == '/api/intake':
@@ -2071,8 +2230,7 @@ class H(BaseHTTPRequestHandler):
                 # 快照回查（功能 1）：**原文返回、不重算**；附「依赖已陈旧」标注。
                 snap = SNAP.load(u.path[len('/api/snapshots/'):])
                 if snap is None:
-                    return self._send({'error': {'code': 'NOT_FOUND',
-                                                 'message': '快照不存在'}}, code=404)
+                    return self._send(_err('NOT_FOUND', '快照不存在'), code=404)
                 return self._send({'ok': True, 'result': snap})
             if u.path == '/api/llm':
                 c = get_llm()
@@ -2119,7 +2277,7 @@ class H(BaseHTTPRequestHandler):
                         ct = ('application/json' if name.endswith('.json') else 'text/javascript')
                         with open(p, 'rb') as f:
                             return self._send(f.read(), ct + '; charset=utf-8')
-            return self._send({'error': 'not found: %s' % u.path}, code=404)
+            return self._send(_err('NOT_FOUND', 'not found: %s' % u.path), code=404)
         except Exception as exc:                                   # 不让页面白屏
             import traceback
             import uuid as _uuid
@@ -2135,11 +2293,11 @@ class H(BaseHTTPRequestHandler):
                 sys.stderr.write('[sse][%s] 连接中断或写失败：%s\n' % (rid, type(exc).__name__))
                 return
             if os.environ.get('LVC_DEBUG'):
-                return self._send({'error': '%s: %s' % (type(exc).__name__, exc),
-                                   'trace': traceback.format_exc().splitlines()[-4:],
-                                   'request_id': rid}, code=500)
-            return self._send({'error': '内部错误（请把 request_id 提供给维护者以定位日志）',
-                               'request_id': rid}, code=500)
+                return self._send(
+                    _err('INTERNAL', '%s: %s' % (type(exc).__name__, exc),
+                         trace=traceback.format_exc().splitlines()[-4:],
+                         request_id=rid), code=500)
+            return self._send(_err('INTERNAL', '内部错误（请把 request_id 提供给维护者以定位日志）', request_id=rid), code=500)
 
 
 def main():

@@ -204,6 +204,31 @@ def top_groups(conn, group_by, limit=5, metric='count', cat=None, where=None, ar
     return out
 
 
+def display_tie_note(rows, extreme='max'):
+    """★ 2026-10-11（审查 M4）：**排序口径**与**显示口径**不一致的如实披露。
+
+    排序在 SQL 里按**未舍入**表达式（如 `100*SUM(ze)/SUM(han)`），而显示值是
+    `prosody.pct`（Decimal + 银行家舍入一位小数）。舍入是单调的，所以"排第一的显示值
+    一定不比后面的低"，但**舍入会产生并列**：第一名显示 12.2、第二名也显示 12.2，
+    此时"最高的是 X"这句话**只对未舍入值成立**，对读者看到的一位小数并不成立。
+
+    这里不偷偷改成"按显示值排序"（那会让 LIMIT 前 N 组的取样口径再变一次，
+    属于用新的一致性问题替换旧的），而是**把并列如实写出来**。
+    """
+    if not rows:
+        return ''
+    vals = [(r.get('weighted') if r.get('weighted') is not None else r.get('mean'))
+            for r in rows]
+    if vals[0] is None:
+        return ''
+    ties = [str(r['group']) for r, v in zip(rows, vals) if v == vals[0]]
+    if len(ties) <= 1:
+        return ''
+    return ('　　　并列说明：排序按**未舍入**值；显示值（银行家舍入到一位小数）与首位'
+            '并列的有 %d 组：%s——最高/最低仅对未舍入值严格成立。'
+            % (len(ties), '、'.join(ties[:6]) + ('…' if len(ties) > 6 else '')))
+
+
 def render_top(rows, group_by, metric, extreme='max', scope_text='', n_poems=None, n_groups=None):
     """**组内极值**成文：给出「谁最多/最少」+ 前几名 + 篇数占比。
 
@@ -244,6 +269,9 @@ def render_top(rows, group_by, metric, extreme='max', scope_text='', n_poems=Non
             out.append('　　　其后依次：%s。'
                        % '、'.join('%s %.1f（%d 篇）' % (r['group'], r['weighted'], r['n'])
                                   for r in rows[1:]))
+    _tie = display_tie_note(rows, extreme)
+    if _tie:                                   # ★ M4：并列只在**确有**并列时出现，不虚报
+        out.append(_tie)
     out.append('　　　口径说明：占比＝该组篇数 ÷ 命中总篇数；〔占比最多〕与〔篇数最多〕在本语境下同序。')
     return out
 

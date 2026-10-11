@@ -49,7 +49,13 @@
             <tr v-for="m in mList" :key="m.id">
               <td>{{ m.id }}</td>
               <td>{{ m.title }}
-                <a v-if="m.source_url" :href="m.source_url" target="_blank" rel="noopener" class="dim">[来源]</a>
+                <!-- ★ 2026-10-11（审查 H4）：只有 http/https 才渲染成链接；
+                     其余（含 javascript: 伪协议）**只当文本显示**，绝不生成 href。 -->
+                <a v-if="isHttpUrl(m.source_url)" :href="m.source_url" target="_blank"
+                   rel="noopener noreferrer" class="dim">[来源]</a>
+                <span v-else-if="m.source_url || m.url_unsafe" class="dim"
+                      :title="m.url_unsafe ? '该地址不是 http/https，已按文本显示（不作为链接打开）' : ''"
+                      >[来源：{{ m.source_url || '（地址不合规范，已屏蔽）' }}]</span>
                 <div v-if="m.note" class="dim">{{ m.note }}</div></td>
               <td class="dim">{{ KIND_LABEL[m.kind] || m.kind }}</td>
               <td>{{ m.author || '—' }}</td>
@@ -70,7 +76,9 @@
             · 作者：{{ mChain.material.author || '—' }}
             · 年份：{{ mChain.material.year || '—' }}
             <template v-if="mChain.material.source_url">· 来源：
-              <a :href="mChain.material.source_url" target="_blank" rel="noopener">{{ mChain.material.source_url }}</a></template>
+              <a v-if="isHttpUrl(mChain.material.source_url)" :href="mChain.material.source_url"
+                 target="_blank" rel="noopener noreferrer">{{ mChain.material.source_url }}</a>
+              <span v-else>{{ mChain.material.source_url }}</span></template>
             <template v-if="mChain.material.note"><br>备注：{{ mChain.material.note }}</template></p>
           <div v-for="r in mChain.revisions" :key="r.id" class="rs-rev">
             <span class="tag">v{{ r.id }}</span>
@@ -328,6 +336,21 @@ const msg = ref('')
 const err = ref('')
 const isOnline = computed(() =>
   typeof window !== 'undefined' && window.location && window.location.protocol !== 'file:')
+
+/* ★ 2026-10-11（审查 H4）：**只有 http/https 才允许渲染成链接**。
+   研究库的 `source_url` 由用户录入（可被污染），旧写法直接 `:href` →
+   存 `javascript:alert(...)` 一点就执行（点击型存储 XSS；`rel="noopener"` 防不住伪协议）。
+   后端已在写入侧拒绝、出库侧置空，这里是**第三道**——前端不信任任何非 http(s) 地址。
+   ⚠ 自查第 1 遍修：改前用 `new URL(u, window.location.href)` 解析——**带 base** 会把
+     `//evil.com`（协议相对）、`foo/bar`（相对路径）、`\\evil.com`（反斜杠）都解析成
+     当前站点的 http(s) 协议 → 判为「可用链接」，比后端 `safe_url`（**必须显式
+     http(s) 前缀**，无前缀一律拒）**更宽**，与「前后端同一口径」相悖。
+     现改为**只看前缀**（大小写不敏感），且**不解析 base**——显式 `http://` / `https://`
+     才放行，其余（含相对路径 / 协议相对 / 伪协议）一律当文本。 */
+function isHttpUrl(u) {
+  if (!u) { return false; }
+  return /^https?:\/\//i.test(String(u).trim());
+}
 
 function flash(m, e) {
   msg.value = e ? '' : (m || '')

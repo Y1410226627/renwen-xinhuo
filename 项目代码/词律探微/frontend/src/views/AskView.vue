@@ -147,16 +147,38 @@ function slim(t) {
   };
 }
 
+/* ★ 2026-10-11（审查·低）：改前保存失败**完全静默**——用户以为「历史已存好」，
+   刷新后才发现全没了。现在：① 先按更小容量**重试**（少存会话、少存轮次、只存当前会话），
+   真不行才放弃；② 放弃时**如实告知一次**（同一原因不反复弹）。 */
+let _persistWarned = false;
+function _payload(maxSess, maxTurn) {
+  return JSON.stringify({
+    active: activeId.value,
+    sessions: sessions.value.slice(0, maxSess).map((s) => ({
+      id: s.id, sid: s.sid, title: s.title, ts: s.ts,
+      turns: (s.turns || []).slice(-maxTurn).map(slim)
+    }))
+  });
+}
 function persist() {
-  try {
-    localStorage.setItem(SKEY, JSON.stringify({
-      active: activeId.value,
-      sessions: sessions.value.slice(0, S_MAX).map((s) => ({
-        id: s.id, sid: s.sid, title: s.title, ts: s.ts,
-        turns: (s.turns || []).slice(-T_MAX).map(slim)
-      }))
-    }));
-  } catch (e) { /* 配额满 / 隐私模式：静默降级（功能仍可用，只是不持久化） */ }
+  /* 三级降级：全量 → 会话数减半+轮次减半 → 只保当前会话的最近 10 轮 */
+  const tries = [[S_MAX, T_MAX], [Math.max(1, S_MAX >> 1), Math.max(1, T_MAX >> 1)], [1, 10]];
+  let last = null;
+  for (const [ms, mt] of tries) {
+    try {
+      localStorage.setItem(SKEY, _payload(ms, mt));
+      _persistWarned = false;
+      return;
+    } catch (e) { last = e; }
+  }
+  if (!_persistWarned) {
+    _persistWarned = true;
+    try {
+      UI.toast('会话没能存进本机（浏览器存储已满或被禁用）：本次对话照常可用，'
+        + '但刷新后不会保留。可删掉一些旧会话再试。', 6000);
+    } catch (e) { /* 没有 toast 容器也不该让保存逻辑抛错 */ }
+  }
+  void last;
 }
 
 function restore() {
@@ -173,7 +195,15 @@ function restore() {
     activeId.value = sessions.value.some((s) => s.id === o.active) ? o.active : sessions.value[0].id;
     loadActive();
     return true;
-  } catch (e) { return false; /* 存储损坏：当作全新开始 */ }
+  } catch (e) {
+    /* ★ 2026-10-11（审查·低）：存储损坏**不再一声不响地当全新开始**——
+       用户会以为「我从来没问过」。如实说一句，并保留损坏内容由用户自行决定。 */
+    try {
+      UI.toast('本机保存的会话读取失败（数据损坏），已按全新会话开始；'
+        + '原始内容未删除，可在浏览器开发者工具里查看。', 6000);
+    } catch (e2) { /* 同上：提示失败不影响主流程 */ }
+    return false;
+  }
 }
 
 function activeSession() { return sessions.value.find((s) => s.id === activeId.value) || null; }
@@ -581,6 +611,18 @@ async function go() {
   const streaming = !!(useLlm.value || useArg.value) && typeof window.fetch === 'function';
   if (streaming) {
     turn.streaming = true;
+    /* ★ 2026-10-11（审查 M6）：改前只有在收到 `final`/`error` 帧时才 `streaming=false`，
+     * 而 `finishTurn` 不复位——流被**静默关闭**（无 final：服务重启、连接中断、
+     * 后端队列满丢了结束帧，见后端 M5）时 `busy` 恒为真 →
+     * **发送按钮与输入框永久禁用**（一次卡顿即锁死，用户只能刷新页面）。
+     * 改后两道保险：① `finally` 里无条件复位；② 看门狗超时也强制收尾并如实报错。 */
+    let gotFinal = false;
+    const wd = setTimeout(() => {
+      if (gotFinal) { return; }
+      turn.streaming = false; turn.done = true;
+      turn.error = turn.error || '流式响应超过 120 秒仍未结束，已按“结束”处理（可重试；'
+        + '数字与证据不降级，也可关掉大模型改用非流式）';
+    }, 120000);
     try {
       await api.askStream(text, {
         parse: useParse.value ? 1 : '',
@@ -607,13 +649,16 @@ async function go() {
         } else if (type === 'final') {
           afterResult(turn, d, text);
           turn.delta = '';
+          gotFinal = true;
           turn.streaming = false; turn.done = true;
           scrollBottom();
         } else if (type === 'error') {
           turn.error = d.error || '';
+          gotFinal = true;
           turn.streaming = false; turn.done = true;
         }
       });
+      gotFinal = true;      // askStream 正常 resolve（流已走完）—按结束处理
     } catch (e) {
       /* 流式不可用 → 退回普通端点（功能不降级，只少逐字效果） */
       try {
@@ -628,6 +673,10 @@ async function go() {
         turn.error = String(e2);
       }
       turn.streaming = false; turn.done = true;
+    } finally {
+      clearTimeout(wd);
+      turn.streaming = false;      // ★ M6：无论如何都复位（不许出现"永远忙碌"）
+      turn.done = true;
     }
     finishTurn(text);
     return;
@@ -680,8 +729,14 @@ onMounted(async () => {
         <button class="newchat" @click="newSession">＋ 开始新对话</button>
         <div v-for="g in grouped" :key="g.label" class="sgroup">
           <div class="slabel dim">{{ g.label }}</div>
+          <!-- ★ 2026-10-11（审查·a11y）：会话项原本是**纯 div + @click**——
+               键盘完全不可达（不能 Tab 聚焦、回车也不响应）。补齐 role/tabindex/keydown，
+               视觉与点击行为一字不改（门禁的文本断言不受影响）。 -->
           <div v-for="s in g.items" :key="s.id" class="sitem" :class="{ on: s.id === activeId }"
-               :title="s.title" @click="switchSession(s.id)">
+               :title="s.title" role="button" tabindex="0"
+               @click="switchSession(s.id)"
+               @keydown.enter.prevent="switchSession(s.id)"
+               @keydown.space.prevent="switchSession(s.id)">
             <span class="stitle">{{ s.title }}</span>
             <span class="sn dim">{{ (s.turns || []).length }}</span>
             <button class="sdel" title="删除该会话" @click.stop="delSession(s.id)">✕</button>
@@ -717,7 +772,11 @@ onMounted(async () => {
             <p class="dim">可以这样问（点一下就填进输入框）——回答里的每一处数字都带证据块与出处
               （篇号 + 句序），可疑之处会明说，语料覆盖不到的问题会<b>拒答</b>而不是编。</p>
             <div id="chips">
-              <span v-for="(s, i) in chips" :key="i" class="chip" :data-q="s" @click="pickExample(s)">{{ s }}</span>
+              <!-- ★ 2026-10-11（审查·a11y）：示例 chip 同理（原为纯 span + @click）。 -->
+              <span v-for="(s, i) in chips" :key="i" class="chip" :data-q="s" role="button"
+                    tabindex="0" @click="pickExample(s)"
+                    @keydown.enter.prevent="pickExample(s)"
+                    @keydown.space.prevent="pickExample(s)">{{ s }}</span>
             </div>
           </div>
 

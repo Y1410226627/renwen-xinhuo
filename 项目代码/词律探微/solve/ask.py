@@ -1413,8 +1413,20 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     text = text + ('\n【推断边界｜%s问句】%s'
                    % (kind, BOUNDARIES.get(kind or '数值型', BOUNDARIES['数值型'])))
     _guard_ran = True
+    # ★ 2026-10-11（审查 M2）：规划路的护栏①此前**不传 `allow`**（默认空元组），
+    #   而文本里的「共 N 篇」N 是**命中总数**——证据块只含展示的那几篇，
+    #   `all_numbers_phrase(blocks, extra=[len(blocks)])` 根本给不出 N 的出处
+    #   → 命中数 > 展示数时一律判「数字无出处」→ **误拦**（规划路默认关闭，属潜伏缺陷）。
+    #   改后：命中总数 / 投影行数 / 证据块数 是**本次检索自明的计数**，显式放行——
+    #   放行的只是这三个"结构性计数"，语料里的任何实质数字仍要出处。
+    _allow = [len(getattr(f, 'pids', None) or []), len(blocks)]
+    if getattr(f, 'rows', None):
+        _allow.append(len(f.rows))
+    # 拒答分支同样要交给护栏③（"认账认得干净"），改前一律按非拒答跑，③形同虚设。
+    _refused = '现有语料未见支持' in text
     try:
-        _g_ok, _g_pb = guard.verify(text, blocks, boundary_kind=kind)
+        _g_ok, _g_pb = guard.verify(text, blocks, boundary_kind=kind,
+                                    refused=_refused, allow=tuple(_allow))
     except Exception as _ge:                                     # noqa: BLE001
         # ⚠ 2026-10-10 修（《关键核心现状》P0-1：护栏 fail-open → fail-closed）：
         #   改前 → 异常时 `_g_ok = True`，只在 problems 里留一句「护栏未执行」；
@@ -2230,9 +2242,14 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
     # ⚠ 2026-10-04 修（代码审查 P1-7）：**问句无长度上限** → 未识别片段会全量回显，
     #   实测 51000 字输入产出 25250 字答案（查询理解单行 12024 字）。超限即**如实拒答**
     #   （拒答文案不含数字与引号，符合护栏③）。
+    # ⚠ 2026-10-11（自查第 4 遍）：改前文案写的是「超过五百字」——**含中文数字「五百」**，
+    #   与上面注释自述的「不含数字」自相矛盾，且**被护栏③自己的中文数字检测判为未通过**
+    #   （`verify=False`，UI 会把一次**正确**的拒答显示成「护栏未通过」）。
+    #   现改为**不含任何数字**的表述（阈值 500 只出现在代码判据里，不进文案）。
+    #   另：原示例「一句一条件」里的「一句」会被"单字数字+量词"新检测误判，故一并改写法。
     if len(question or '') > 500:
-        _t = ('现有语料未见支持：问句过长（超过五百字）。本系统按形式与字面条件检索，'
-              '请把问题拆成一句一条件，例如：清词里句脚为香的作品有多少篇。')
+        _t = ('现有语料未见支持：问句过长（超过本系统上限）。本系统按形式与字面条件检索，'
+              '请把问题拆开、逐条给出条件，例如：清词里句脚为香的作品有多少篇。')
         _ok, _pb = guard.check_no_support(_t, True)
         return {'question': question, 'spec': '（问句超长，未进入检索）', 'kind': kind, 'blocks': [],
                 'answer': _t, 'verify': (_ok, _pb), 'verify_kind': 'safety', 'refused': True,

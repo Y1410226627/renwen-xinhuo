@@ -112,8 +112,11 @@ onMounted(async () => {
       <p class="dim rv-hint">点表头可排序；按 <b>Enter</b> 即筛选、<b>Esc</b> 清错误提示。
         筛选支持任意字段（如填「长」只看该字）。</p>
       <p id="chips">
+        <!-- ★ 2026-10-11（审查·a11y）：chip 原为纯 span + @click，键盘不可达。 -->
         <span v-for="kv in st.top.slice(0, 14)" :key="kv[0]" class="chip" :data-kw="kv[0]"
-              @click="applyKw(kv[0])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
+              role="button" tabindex="0" @click="applyKw(kv[0])"
+              @keydown.enter.prevent="applyKw(kv[0])"
+              @keydown.space.prevent="applyKw(kv[0])">{{ kv[0] }} <span class="dim">{{ kv[1] }}</span></span>
       </p>
     </div>
 
@@ -148,9 +151,12 @@ onMounted(async () => {
         <div class="scroll">
           <table class="view-table">
             <thead><tr>
+              <!-- ★ 2026-10-11（审查·a11y）：排序表头同理（原为纯 th + @click）。 -->
               <th v-for="c in COLS" :key="c" :data-key="c"
                   class="sortable" :class="{ num: NUM_COLS[c] }"
-                  @click="sortBy(c)">{{ c }}<span class="sort-ind" v-if="sortInd(c)">{{ sortInd(c) }}</span></th>
+                  role="button" tabindex="0" @click="sortBy(c)"
+                  @keydown.enter.prevent="sortBy(c)"
+                  @keydown.space.prevent="sortBy(c)">{{ c }}<span class="sort-ind" v-if="sortInd(c)">{{ sortInd(c) }}</span></th>
             </tr></thead>
             <tbody id="rows">
               <tr v-for="(r, i) in slice" :key="i">

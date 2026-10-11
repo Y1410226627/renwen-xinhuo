@@ -14,7 +14,9 @@
  *   toast / spinner           交互反馈
  *   query()                   取 URL 查询参数
  *   footer(stamp, src, n)     页脚「生成时间」探针（区分旧副本 vs 真出错）
- *   theme toggle: mountTheme()
+ *
+ * 注：主题切换**不在本文件**——唯一状态源是 `src/stores/theme.js`
+ * （2026-10-11 删掉了本文件里那份重复的 `mountTheme`，见文件末尾说明）。
  */
 (function (root, factory) {
   var api = factory();
@@ -227,21 +229,48 @@
     }
     function signed(x) { var v = Number(x); return (v > 0 ? '+' : '') + fmt1(v); }
 
+    /* ★ 2026-10-11（审查·低）：CSV **公式注入**防护。
+       Excel / Google Sheets 会把以 `=` `+` `-` `@`（以及制表符、回车）开头的单元格
+       **当公式执行**——`=cmd|'/c calc'!A1` 这类 DDE 载荷可在打开者本机拉起程序。
+       而导出的工单里「题名 / 校订说明」等字段来自**可录入、可导入**的内容，不可信。
+       处置：这类单元格前置一个单引号（表格里按**文本**显示，不执行）。
+       例外：形如 `-3.5` 的**普通负数**不加引号——否则数值列会被强制转成文本，
+       反而把「数字可信」这条主线弄坏。 */
+    function csvCell(c) {
+      var s = (c === null || c === undefined) ? '' : String(c);
+      if (/^[=+@]/.test(s) || /^[\t\r]/.test(s) || /^-[^0-9.]/.test(s)) { s = "'" + s; }
+      return s;
+    }
+
     function csvText(rows) {
       return rows.map(function (r) {
         return r.map(function (c) {
-          var s = (c === null || c === undefined) ? '' : String(c);
+          var s = csvCell(c);
           return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
         }).join(',');
       }).join('\r\n');
     }
 
+    /* ★ 2026-10-11（审查·低）：`URL.createObjectURL` 出来的 URL 会**一直占住那份 Blob**，
+       改前从不 `revoke` —— 每导出一次泄漏一份（工单表可达数 MB，反复导出即内存上涨）。
+       这里统一走 `_save`，在点击后的下一轮事件循环释放（**立即**释放会让部分浏览器取消下载）。 */
+    function _save(blob, name) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      try {
+        if (document.body) { document.body.appendChild(a); }
+        a.click();
+      } finally {
+        setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) { /* 忽略 */ } }, 0);
+        if (a.parentNode) { a.parentNode.removeChild(a); }
+      }
+    }
+
     function download(name, text, mime) {
       var b = new Blob(['\ufeff' + text], { type: (mime || 'text/csv') + ';charset=utf-8' });
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(b);
-      a.download = name;
-      a.click();
+      _save(b, name);
     }
 
     /* 导出 JSON（2026-10-09 新增）：与 download 分开，因为 **JSON 不能带 BOM**——
@@ -250,10 +279,7 @@
     function downloadJson(name, obj) {
       var text = (typeof obj === 'string') ? obj : JSON.stringify(obj, null, 2);
       var b = new Blob([text], { type: 'application/json;charset=utf-8' });
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(b);
-      a.download = name;
-      a.click();
+      _save(b, name);
     }
 
     function toast(msg, ms) {
@@ -289,26 +315,16 @@
         + '或重新跑 python web/build_views.py。</footer>';
     }
 
-    function mountTheme(doc) {
-      doc = doc || document;
-      var b = doc.getElementById('theme');
-      if (!b) { return; }
-      b.onclick = function () {
-        var cur = doc.documentElement.getAttribute('data-theme');
-        var next = cur === 'dark' ? 'light' : 'dark';
-        doc.documentElement.setAttribute('data-theme', next);
-        b.textContent = next === 'dark' ? '☾ 夜间' : '☀ 日间';
-        try { localStorage.setItem('theme', next); } catch (e) { /* 隐私模式 */ }
-      };
-      try {
-        var saved = localStorage.getItem('theme');
-        if (saved) { doc.documentElement.setAttribute('data-theme', saved); b.textContent = saved === 'dark' ? '☾ 夜间' : '☀ 日间'; }
-      } catch (e) { /* 忽略 */ }
-    }
+    /* ★ 2026-10-11（审查·低）：**删掉 `mountTheme`**——主题逻辑此前写了两份：
+       本文件一份（legacy 静态页 `#theme` 按钮 + localStorage），
+       `stores/theme.js` 一份（Vue 应用的唯一状态源）。两份各自读写同一个 `theme` 键，
+       改一边忘另一边就会漂移（例如新增「跟随系统」只在一边生效）。
+       现状核对：legacy 静态页已不再产出（`web/build_views.py` 里已无 `UI.mountTheme()`），
+       Vue 侧只用 `stores/theme.js`——故本文件的这份是**死代码**，删除之，主题从此单一来源。 */
 
     return { CSS: CSS, inject: inject, esc: esc, attr: attr, hz: hz, badge: badge,
              fmtInt: fmtInt, fmt1: fmt1, signed: signed, csvText: csvText,
              download: download, downloadJson: downloadJson, toast: toast,
              spinner: spinner, query: query,
-             footer: footer, mountTheme: mountTheme };
+             footer: footer };
   }));

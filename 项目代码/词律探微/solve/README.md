@@ -20,13 +20,13 @@
 | 自检 | `python solve/selftest.py` → **235 项 0 失败** | 见 §20/§21（安全与说法层）与 §43（本轮新增） |
 | 交付前体检 | `python solve/preflight.py` → 26/0/0 | 依赖、标定表、语料计数、答案契约、合规扫描 |
 | 库不变式 | `python tools/invariant_check.py` → 1,731,388 项 0 违反 | 从句级平仄串重算篇级指标 |
-| 问答用例 | `python tools/qa_eval.py` → **34/34** | 固定用例集 `tests/qa_cases.jsonl`（Q027–Q034 为 2026-10-01 深夜新增） |
+| 问答用例 | `python tools/qa_eval.py` → **护栏 37/37、用例通过 34/37** | 固定用例集 `tests/qa_cases.jsonl`（37 条；3 例为既有口径分歧，见该脚本输出） |
 | 变异测试 | `python tools/eval_mutation.py` | 逐题逐字段制造变异，0 漏报 |
 | 前端逻辑层一致性 | `node frontend/tools/check-core.cjs` → **213,972 项 0 不符** | `core/` 与冻结基线（`_历史产物/_core_baseline/`）逐字节 |
-| 前端功能门禁 | `node web/test_ui.js` → **130 项 0 不符** | 检索表单／队列／页面／共享文件（`--selftest` 另验护栏自身 4/4） |
+| 前端功能门禁 | `node web/test_ui.js` → **147 项 0 不符** | 检索表单／队列／页面／共享文件（`--selftest` 另验护栏自身） |
 | 前端↔引擎对照 | `node web/verify_views.js --n 3000` | 43,459 项 0 不符 |
 | 逐篇渲染 | `node web/test_render.js` | 26,742 篇 / 522,242 项 0 不符（含深链自检） |
-| 服务端接口 | `python web/test_api.py` | 140 项 0 不符 |
+| 服务端接口 | `python web/test_api.py` | **171 项 0 不符** |
 | 回归门禁 | `python tools/regress.py` → 每套 **28 项 0 失败** | 含「两遍逐字节一致」与期望哈希（公开 `BF863368…`／第二套 `ACEF8B15…`） |
 | 一键复现 | `python reproduce.py` → 全部步骤 PASS | 产出 `复现报告.md` |
 | 文档↔行为一致 | `python tools/doc_check.py` → 9/9 | 命令活性、数字承诺、文件承诺、口径承诺 |
@@ -298,7 +298,7 @@ python reproduce.py --skip-build
 | M8 证据块 | `solve/evidence.py` | `[E1][E2]` 证据块：篇级数字 / 句级平仄串 / **pid 出处**；数字**只从引擎取**，不由模型生成 |
 | M9 护栏 | `solve/guard.py` | 四道：①数字必须有出处（**字段级 + 逐行引用绑定**）②引文必须逐字且为整句 ③拒答不许夹带数字引文 ④**边界声明按问句类型分派**（意图/因果/优劣/数值四类互斥标记） |
 | M0 问答 | `solve/ask.py` | 查询理解 → 召回 → 证据块 → 模板化作答 → 护栏自检；拒答话术「现有语料未见支持」+ 放宽建议 |
-| 评测 | `tools/qa_eval.py` | 固定用例集 `tests/qa_cases.jsonl`（22 条：含 6 条**必须拒答**）→ 一条命令出指标 |
+| 评测 | `tools/qa_eval.py` | 固定用例集 `tests/qa_cases.jsonl`（现行 **37 条**：含必须拒答用例）→ 一条命令出指标 |
 | 不变式 | `tools/invariant_check.py` | 15 类恆等式直接查库；**从句级平仄串重算篇级指标**（另一条路径，不是自证自话） |
 | 视图 | `web/build_views.py` + `web/metrics.js` | **离线自包含**三视图（`data/index.html` 导航 / `parse.html` 逐字解析 / `graph.html` 图谱 / `review.html` 校订队列）；**JS 自己重算数字**，不搬运 Python 结果 |
 | 前端对照 | `web/verify_views.js` | node 跑 JS 前端，与 Python 引擎**逐字段**对照 |
@@ -866,8 +866,8 @@ JS 里 `+` 与 `-` **同优先级、从左到右** ⇒ 先做字符串拼接、�
 | `node web/verify_views.js --all` | 前端 JS ↔ Python 引擎，**全库**逐字段 | 26,742 首 × 13 字段 = **347,646 项，不符 0** |
 | `node web/verify_views.js --n 3000` | 同上（抽样档，跑得快） | 43,459 项，不符 0 |
 | `node web/test_render.js` | 逐字表的渲染结果（含条件命中标记） | 26,742 篇 / **522,242 项，不符 0**；`--selftest` 注回旧 NaN 写法 → 41/41 报错 |
-| `node web/test_ui.js` | 前端功能：检索篇数 ↔ SQL 标尺、校订队列 ↔ 独立 CSV 解析、5 张页面、共享文件一致性、坏写法扫描 | **171 项，不符 0**（坏写法检测器自带自检） |
-| `python web/test_api.py` | 服务端：检索/理解/成文/对比/问答/解析 + 流式「答案先到」契约 + 多轮上下文 | **140 项，不符 0** |
+| `node web/test_ui.js` | 前端功能：检索篇数 ↔ SQL 标尺、校订队列 ↔ 独立 CSV 解析、5 张页面、共享文件一致性、坏写法扫描 | **147 项，不符 0**（坏写法检测器自带自检） |
+| `python web/test_api.py` | 服务端：检索/理解/成文/对比/问答/解析 + 流式「答案先到」契约 + 多轮上下文 | **171 项，不符 0** |
 
 **三条教训**
 

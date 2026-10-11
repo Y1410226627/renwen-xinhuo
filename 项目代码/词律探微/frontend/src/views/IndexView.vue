@@ -10,10 +10,20 @@
       <p class="dim">一句话分工：<b>数字归引擎、文料归检索、说法归大模型、出处归引用</b>。</p>
 
       <div class="kpis" role="list">
-        <div class="kpi" role="listitem"><b>{{ fmt(corpusN) }}</b><span>语料总篇</span></div>
-        <div class="kpi" role="listitem"><b>{{ fmt(qingN) }}</b><span>清词主篇</span></div>
+        <!-- ★ 2026-10-11（审查 M7）：这两个数改前是**写死的默认值**（58852 / 26742），
+             而入口 main-index.js 根本不传 props → 页面上的"体量"是常量，不随语料变化
+             （佐证：`gateCount` 默认值 171 早于本轮，改动前 test_api 实为 165 项——
+              这类硬编码会**静默过期**）。现在在线时一律由 `/api/catalog` **现算**。 -->
+        <div class="kpi" role="listitem"><b>{{ corpusN == null ? '—' : fmt(corpusN) }}</b>
+          <span>语料总篇</span></div>
+        <div class="kpi" role="listitem"><b>{{ qingN == null ? '—' : fmt(qingN) }}</b>
+          <span>清词主篇</span></div>
         <div class="kpi" role="listitem"><b>v{{ rulesV }}</b><span>口径版本</span></div>
-        <div class="kpi" role="listitem"><b>{{ gateCount }}</b><span>门禁项</span></div>
+        <!-- ★ M7：门禁项数**没有实时真源**（各门禁的断言数只在跑的时候才知道），
+             故不再摆一个会过期的常量——显示「—」并说明去哪儿看真实数字。 -->
+        <div class="kpi" role="listitem" :title="gateCount == null
+          ? '门禁项数由各门禁脚本现算（python reproduce.py 的复现报告里有逐项结果）；本页不写死常量。'
+          : ''"><b>{{ gateCount == null ? '—' : gateCount }}</b><span>门禁项</span></div>
         <div class="kpi ok" role="listitem"><b>已锁定</b><span>双集答案哈希</span></div>
       </div>
 
@@ -175,10 +185,12 @@ import AppShell from '../components/AppShell.vue'
 import { api } from '../api.js'
 
 const props = defineProps({
-  corpusN: { type: Number, default: 58852 },
-  qingN: { type: Number, default: 26742 },
+  /* ★ M7：体量类 KPI **不再给写死的默认值**——给了就等于"页面上永远显示这个数"，
+     而入口根本不传 prop。现在：在线时由 `/api/catalog` 现算；取不到就显示「—」。 */
+  corpusN: { type: Number, default: null },
+  qingN: { type: Number, default: null },
   rulesV: { type: String, default: '5.0' },
-  gateCount: { type: Number, default: 171 },
+  gateCount: { type: Number, default: null },
   root: { type: String, default: '/' },
   stamp: { type: String, default: '' },
   dataNote: { type: String, default: 'data/corpus.db' },
@@ -201,10 +213,19 @@ function fmt(n) { return Number(n || 0).toLocaleString('en-US') }
    失败不显示假数据——如实给出错误文案（离线视图永不请求）。 */
 const catalog = ref(null)
 const catErr = ref('')
+/* ★ M7：体量 KPI 的**实时来源**——props 只在构建注入（`web/build_views.py`）时有值，
+   在线时一律以 `/api/catalog`（SQL 现算）为准，避免"页面常量 vs 库里实数"对不上。 */
+const corpusN = ref(props.corpusN)
+const qingN = ref(props.qingN)
 onMounted(() => {
   if (!isOnline.value) { return }
   api.catalog(12).then((j) => {
-    if (j && j.totals) { catalog.value = j } else { catErr.value = '统计接口返回异常（无 totals 字段）。' }
+    if (j && j.totals) {
+      catalog.value = j
+      corpusN.value = Number(j.totals.poems || 0) || null
+      const q = (j.dynasty || []).find((d) => d.name === '清')
+      qingN.value = q ? (Number(q.poems || 0) || null) : qingN.value
+    } else { catErr.value = '统计接口返回异常（无 totals 字段）。' }
   }).catch((e) => { catErr.value = '统计获取失败：' + (e && e.message ? e.message : e) })
 })
 /* 条形宽度：相对基准值的百分比（最小 3%，保证极小值也看得见）。 */

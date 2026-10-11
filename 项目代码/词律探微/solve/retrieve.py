@@ -29,7 +29,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 汉字范围**单一来源**：一律取 corpus.HAN_CLASS（含 CJK 扩展 A）。
 # 审查 C15 指出：此前 retrieve/pronounce/prosody 各写一套，改一处会漏另一处。
 from corpus import HAN_CLASS as _HAN_CLASS          # noqa: E402
+from corpus import LIKE_ESCAPE as _LIKE_ESC, like_escape as _like_esc   # noqa: E402（M1 单一来源）
 _HAN_ONE = re.compile('[%s]' % _HAN_CLASS)
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 数值条件的合理区间（**单一来源**：规则路与大模型路共用；审查 C17 指出此前只有大模型路有）
 RNG_BOUNDS = {'ze_min': (0, 100), 'ze_max': (0, 100), 'len_min': (1, 500),
@@ -1725,7 +1728,10 @@ def _pred_sql(kind, val):
     if kind == 'tail_pz':
         return 'substr(l.pz, -1, 1) = ?', [val]
     if kind == 'pz':
-        return 'l.pz LIKE ?', ['%' + val.replace('?', '_').replace('？', '_') + '%']
+        # ★ M1：先转义用户输入的通配符，**再**把「?」按本项目的约定转成 `_`
+        #   （这是**有意**保留的通配，故必须在转义之后做）。
+        _pat = _like_esc(val).replace('?', '_').replace('？', '_')
+        return 'l.pz LIKE ?' + _LIKE_ESC, ['%' + _pat + '%']
     if kind == 'pz_exact':
         return 'l.pz = ?', [val]
     if kind == 'len':
@@ -1761,7 +1767,7 @@ def _line_q_where(lq):
             else:
                 neg = {'tail': '(l.tail IS NULL OR l.tail <> ?)',
                        'tail_pz': '(l.pz IS NULL OR substr(l.pz, -1, 1) <> ?)',
-                       'pz': '(l.pz IS NULL OR l.pz NOT LIKE ?)',
+                       'pz': '(l.pz IS NULL OR l.pz NOT LIKE ?' + _LIKE_ESC + ')',
                        'pz_exact': '(l.pz IS NULL OR l.pz <> ?)',
                        'len': '(l.han_len IS NULL OR l.han_len < ? OR l.han_len > ?)',
                        'parity': '(l.idx IS NULL OR (l.idx % 2) <> ?)'}[_k]
@@ -1881,21 +1887,66 @@ def _leaf_exists_lines(expr, vals, op='in'):
 _DERIVED_CACHE = {}
 
 
-def _derived_ready(conn):
-    """派生检索索引（题名 FTS / 平仄三字组倒排）是否已建。结果按连接缓存（只查一次）。"""
+def _derived_tables(conn):
+    """派生检索索引（题名 FTS / 平仄三字组倒排）的**定位**，结果按连接缓存（只查一次）。
+
+    返回 `{'title': str|None, 'pz': str|None}`：
+      · `'main_rowid'` —— 旧式：表在语料库本体里（外部内容表，按 `rowid` 关联）；
+      · `'dv.poems_title_fts'` / `'dv.pz_gram'` —— 侧车库（只读 ATTACH 成 `dv`）；
+      · `None` —— 没建 → 调用方**回退到原 LIKE 路径**（结果集与旧实现逐篇相同）。
+
+    ★ 2026-10-11 修（审查 H3）：派生索引**不再写进 `data/corpus.db`**
+      （「语料库绝不改」是硬红线）。`tools/build_indexes.py` 现在把两张表建到侧车库
+      `data/derived_index.db`，这里在**首次需要时**把它 `ATTACH` 进来（惰性）；
+      文件不存在就当"没建"，绝不报错、绝不改变检索语义。
+    ⚠ 2026-10-11（自查第 5 遍）更正措辞：本函数的 ATTACH **不是** SQLite 的只读 URI 模式
+      （语料连接未开 `uri=True`），而是「普通 ATTACH + 本模块**只对它发 SELECT**」——
+      即**靠约定而非引擎**保证不写侧车库。之所以仍可接受：这里的三处用法
+      （`title MATCH` / `SELECT pid FROM dv.pz_gram`）**全是读取**，从无 `INSERT/UPDATE dv.*`；
+      侧车库由 `build_indexes.py` 单独构建，运行期只读。若将来要在引擎层强制只读，
+      需把语料连接改成 `sqlite3.connect('file:...?mode=ro', uri=True)` 再用
+      `ATTACH 'file:<sidecar>?mode=ro'`——那是更大范围的改动，此处如实标注、不冒进。
+    """
     if conn is None:
-        return (False, False)
+        return {'title': None, 'pz': None}
+    # ★ 2026-10-11（审查·中）：`id(conn)` 会被**回收后的新连接复用**（内存地址复用）——
+    #   只按它做键会把「上一个库」的索引定位错配给新库（该库没建索引却以为建了 → 直接报错或漏篇）。
+    #   连同连接对象一起校验；并设上限避免长跑里无限增长。
     key = id(conn)
-    if key in _DERIVED_CACHE:
-        return _DERIVED_CACHE[key]
-    t = g = False
+    v = _DERIVED_CACHE.get(key)
+    if isinstance(v, tuple) and v[0] is conn:
+        return v[1]
+    out = {'title': None, 'pz': None}
     try:
-        t = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='poems_title_fts'").fetchone())
-        g = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='pz_gram'").fetchone())
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='poems_title_fts'").fetchone():
+            out['title'] = 'main_rowid'
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='pz_gram'").fetchone():
+            out['pz'] = 'pz_gram'
     except Exception:                                            # noqa: BLE001
-        t = g = False
-    _DERIVED_CACHE[key] = (t, g)
-    return (t, g)
+        out = {'title': None, 'pz': None}
+    if out['title'] is None or out['pz'] is None:
+        try:
+            p = os.path.join(_ROOT, 'data', 'derived_index.db')
+            if os.path.isfile(p):
+                conn.execute('ATTACH DATABASE ? AS dv', (p,))
+                if out['title'] is None and conn.execute(
+                        "SELECT 1 FROM dv.sqlite_master WHERE name='poems_title_fts'").fetchone():
+                    out['title'] = 'dv.poems_title_fts'
+                if out['pz'] is None and conn.execute(
+                        "SELECT 1 FROM dv.sqlite_master WHERE name='pz_gram'").fetchone():
+                    out['pz'] = 'dv.pz_gram'
+        except Exception:                                        # noqa: BLE001
+            pass          # ATTACH 失败（权限/已附加同名 schema）→ 当作没建，回退 LIKE
+    if len(_DERIVED_CACHE) > 64:
+        _DERIVED_CACHE.clear()
+    _DERIVED_CACHE[key] = (conn, out)
+    return out
+
+
+def _derived_ready(conn):
+    """（兼容旧签名）派生索引是否已建。"""
+    d = _derived_tables(conn)
+    return (bool(d['title']), bool(d['pz']))
 
 
 def _leaf_title(vals, conn=None, op='contains'):
@@ -1923,17 +1974,24 @@ def _leaf_title(vals, conn=None, op='contains'):
         return '(' + ' OR '.join('p.title = ?' for _ in vals) + ')', list(vals)
     if op in ('!=', 'not_in'):
         return '(' + ' AND '.join('p.title != ?' for _ in vals) + ')', list(vals)
-    like = '(' + ' OR '.join('p.title LIKE ?' for _ in vals) + ')'
-    args = ['%' + t + '%' for t in vals]
-    _fts, _ = _derived_ready(conn)
+    # ★ M1：用户输入里的 `%`/`_` 必须转义（否则「题名 _」= 任意单字题名 → 命中集虚胖）
+    like = '(' + ' OR '.join('p.title LIKE ?' + _LIKE_ESC for _ in vals) + ')'
+    args = ['%' + _like_esc(t) + '%' for t in vals]
+    _fts = _derived_tables(conn)['title']
     if not _fts:
         return like, args
     _han = re.compile(r'^[\u4e00-\u9fff\u3400-\u4dbf]{3,}$')
     pre, pa = [], []
     for t in vals:
         if t and _han.match(t):
-            pre.append('p.rowid IN (SELECT rowid FROM poems_title_fts '
-                       'WHERE poems_title_fts MATCH ?)')
+            if _fts == 'main_rowid':            # 旧式（表在语料库本体、外部内容表）
+                pre.append('p.rowid IN (SELECT rowid FROM poems_title_fts '
+                           'WHERE poems_title_fts MATCH ?)')
+            else:                               # 侧车库（自存 pid）
+                # ⚠ FTS5 里 `dv.poems_title_fts MATCH ?` 会被解析成「库名.列名」而报错
+                #   （实测 `no such column: dv.poems_title_fts`）——限定 schema 时
+                #   必须写成**列过滤**形式 `title MATCH ?`（只匹配 title 列，正是要的）。
+                pre.append('p.pid IN (SELECT pid FROM %s WHERE title MATCH ?)' % _fts)
             pa.append('"%s"' % t)
     if not pre:                                   # 没有可用 FTS 项 → 纯 LIKE，行为不变
         return like, args
@@ -1996,11 +2054,12 @@ def _leaf_pz(v, conn=None):
       ★ 结论如实记录在案：**这条派生索引在本 workload 下不成立**（与审查 B8 的推测相反）。
       保留建表工具与开关，供将来换成「单条 EXISTS + 复合索引」或列存方案时复用。
     """
-    pat = v.replace('?', '_').replace('？', '_')
+    # ★ M1：先转义用户输入的通配符，**再**把 `?`→`_`（后者是本项目的有意通配）
+    pat = _like_esc(v).replace('?', '_').replace('？', '_')
     # IN 子查询代替逐篇 EXISTS（实测 1,600+ ms → 800 ms；pz 是 LIKE 通配、主体不可索引）。
-    base_sql = 'p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?)'
+    base_sql = 'p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?' + _LIKE_ESC + ')'
     base_args = ['%' + pat + '%']
-    _, _gram = _derived_ready(conn)
+    _gram = _derived_tables(conn)['pz']
     if not _gram or os.environ.get('LVC_PZ_GRAM', '0') != '1':
         # 默认关闭：见上方实测（本库上倒排路径更慢）。默认行为 = 原实现，逐字不变。
         return base_sql, base_args
@@ -2010,9 +2069,9 @@ def _leaf_pz(v, conn=None):
              if all(c in '平仄' for c in src[i:i + N])]
     if not grams:
         return base_sql, base_args
-    pre = ' AND '.join('l.pid IN (SELECT pid FROM pz_gram WHERE gram=?)' for _ in grams)
-    return (('p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ? AND %s)' % pre),
-            base_args + grams)
+    pre = ' AND '.join('l.pid IN (SELECT pid FROM %s WHERE gram=?)' % _gram for _ in grams)
+    return (('p.pid IN (SELECT l.pid FROM lines l WHERE l.pz LIKE ?' + _LIKE_ESC
+             + ' AND %s)' % pre), base_args + grams)
 
 
 def _leaf_tail_pz(v, op='in'):
@@ -2056,7 +2115,9 @@ def _leaf_lines_text(v):
       · LIKE 子查询语义**直白、确定、可独立复算**（临时验证脚本用同一口径 `text LIKE ?` 复算）。
       故此处取 LIKE；若未来改走 FTS，必须同步更新 `_leaf_lines_text` 与真值复算两端。
     """
-    return 'p.pid IN (SELECT l.pid FROM lines l WHERE l.text LIKE ?)', ['%' + v + '%']
+    # ★ M1：正文子串同样要转义（用户输入 `_` 不该等于「任意单字」）
+    return ('p.pid IN (SELECT l.pid FROM lines l WHERE l.text LIKE ?' + _LIKE_ESC + ')',
+            ['%' + _like_esc(v) + '%'])
 
 
 def _leaf_consist(v):
@@ -2647,8 +2708,8 @@ def rescue_title(conn, spec):
     t_hits = []
     for kw in kws[:6]:
         try:
-            row = conn.execute('SELECT COUNT(*) FROM poems WHERE title LIKE ?',
-                               ('%' + kw + '%',)).fetchone()
+            row = conn.execute('SELECT COUNT(*) FROM poems WHERE title LIKE ?' + _LIKE_ESC,
+                               ('%' + _like_esc(kw) + '%',)).fetchone()
         except sqlite3.OperationalError:
             row = None
         if row and row[0] > 0:
@@ -2694,15 +2755,16 @@ def route_pz(conn, pat):
     为什么按句子长度加权：词学关心的是「某种声律格局是否显著」，全篇句均 2 字的小令
     偶合出一个五字格局，意义远不如长句命中。
     """
-    like = '%' + pat.replace('?', '_').replace('？', '_') + '%'
+    # ★ M1：先转义、再 `?`→`_`（有意通配）
+    like = '%' + _like_esc(pat).replace('?', '_').replace('？', '_') + '%'
     # 「每篇取最高句分」下推到 SQL：原实现把**命中行全部搬进 Python**（实测一次 130,914 行）
     # 再逐行比较；改成 GROUP BY pid + MAX(...) 后只回「每篇一行」，聚合在 C 层做。
     # 数值等价：两边都是 int→double 除法（CAST AS REAL / float()），MAX 是精确比较；
     # 原来 `max(1, sn)` 的兜底在 SQL 里写成标量 MAX(1, p.sent_n)。
     rows = conn.execute(
         'SELECT l.pid, MAX(CAST(l.han_len AS REAL) / MAX(1, p.sent_n)) AS sc '
-        'FROM lines l JOIN poems p ON p.pid = l.pid WHERE l.pz LIKE ? GROUP BY l.pid',
-        (like,)).fetchall()
+        'FROM lines l JOIN poems p ON p.pid = l.pid WHERE l.pz LIKE ?' + _LIKE_ESC
+        + ' GROUP BY l.pid', (like,)).fetchall()
     return {pid: sc for pid, sc in rows}
 
 

@@ -2,8 +2,14 @@
 /* GraphView.vue —— 「知识图谱」视图：清代词人 ↔ 词牌 二部图。
  *
  * 数据来自 data/graph.json（build_views.py 用 SQL 聚合：词人 TOP45 / 词牌 TOP45 / 边）。
- * 布局算法与 build_views.py 的 Python 版**逐式对应**（行高 24px、字号 15px、两列 XA/XC），
- * 因为它已解决「同心圆标签挤成一团」的老毛病，且**无随机数**、任何机器上排版一致。
+ *
+ * ⚠ 2026-10-11 更正（审查·低）：这里原写「布局算法与 build_views.py 的 Python 版**逐式对应**」，
+ *   **与事实不符**——`build_views.py` 自 2026-10-05 重构（D15）起**只造数据、不拼页面**，
+ *   里头根本没有布局代码（本页的布局是 Vue 侧 `layout` 一份）。注释说谎比没注释更糟：
+ *   后来者会去 Python 里找「另一份布局」并对齐，白跑一趟。
+ *   布局参数（行高 24px、字号 15px、两列 XA/XC）之所以这么定，理由仍是当初在
+ *   build_views.py 里验过的那条：**两列布局解决「同心圆标签挤成一团」**（内圈标签间距
+ *   只有 21px，看不清），且**无随机数**、任何机器上排版一致。
  * 交互：关键词筛选（高亮匹配节点与连线）、悬停节点高亮其连线并显示共有篇数。
  *
  * ⚠ 2026-10-08 精修（本轮交付）：
@@ -45,13 +51,19 @@ const layout = computed(() => {
              w: 0.5 + 3.2 * n / mx };
   });
   const nodes = [];
+  /* ★ 自查第 7 遍修（暗色可读性）：圆点**填充色**是门禁契约（`web/test_ui.js` 断言
+     `#1f6fb2` / `#c2691a` 存在），保留原样；但**标签文字色**（原 `tfill:#1b4f80` 深蓝 /
+     `#8a4a10` 深棕）在 `prefers-color-scheme:dark`（或 `data-theme=dark`）下是**深字描深边**
+     （核心样式的 `.nd text` 有 `stroke:var(--panel)` 光晕，暗色 panel 也是深色）→ 对比度约 1.9:1，
+     近乎不可读。改为**只输出 kind 类名**，颜色走下方 `.t-author` / `.t-cipai` 的 CSS 变量，
+     亮/暗两套各得其色（亮色值与原 `#1b4f80`/`#8a4a10` 等价观感）。 */
   au.forEach(([a, cnt]) => {
     const [x, y] = pos['a|' + a];
-    nodes.push({ k: a, kind: '词人', cnt, x, y, r: rOf(cnt), tx: x - 10, anchor: 'end', fill: '#1f6fb2', tfill: '#1b4f80' });
+    nodes.push({ k: a, kind: '词人', cnt, x, y, r: rOf(cnt), tx: x - 10, anchor: 'end', fill: '#1f6fb2', tclass: 't-author' });
   });
   cp.forEach(([c, cnt]) => {
     const [x, y] = pos['c|' + c];
-    nodes.push({ k: c, kind: '词牌', cnt, x, y, r: rOf(cnt), tx: x + 10, anchor: 'start', fill: '#c2691a', tfill: '#8a4a10' });
+    nodes.push({ k: c, kind: '词牌', cnt, x, y, r: rOf(cnt), tx: x + 10, anchor: 'start', fill: '#c2691a', tclass: 't-cipai' });
   });
   return { W, H, nodes, paths, nAu: au.length, nCp: cp.length, nEdge: edges.length };
 });
@@ -152,18 +164,18 @@ onUnmounted(() => { tip.value.on = false; });
            font-family="Microsoft YaHei,serif">
         <path v-for="(e, i) in layout.paths" :key="'e' + i" class="ed"
               :data-a="e.a" :data-c="e.c" :data-n="e.n" :d="e.d" fill="none"
-              stroke="#5b86b8" stroke-opacity="0.35" :stroke-width="e.w"
+              :stroke-width="e.w"
               :style="{ opacity: edgeOpacity(e) }" />
         <g v-for="(n, i) in layout.nodes" :key="'n' + i" class="nd"
            :data-k="n.k" :data-kind="n.kind" :data-n="n.cnt"
            :style="{ opacity: nodeOpacity(n), fontWeight: nodeWeight(n), cursor: 'pointer' }"
            @mouseover="onEnter(n, $event)" @mousemove="onMove($event)" @mouseout="onLeave">
           <circle :cx="n.x" :cy="n.y" :r="n.r" :fill="n.fill" />
-          <text :x="n.tx" :y="n.y + 5" :text-anchor="n.anchor" :fill="n.tfill">{{ n.k }}
-            <tspan fill="#7a8b9a">{{ n.cnt }}</tspan></text>
+          <text :x="n.tx" :y="n.y + 5" :text-anchor="n.anchor" :class="n.tclass">{{ n.k }}
+            <tspan class="t-cnt">{{ n.cnt }}</tspan></text>
         </g>
-        <text :x="XA" y="30" text-anchor="middle" font-size="16">词律探微 · 清代词人 ↔ 词牌 二部图（作数前 {{ layout.nAu }}）</text>
-        <text :x="XA" y="52" text-anchor="middle" font-size="13" fill="#6b7a88">左：词人　右：词牌　线：二者共有的篇数（越粗越多）</text>
+        <text :x="XA" y="30" text-anchor="middle" font-size="16" class="gv-title">词律探微 · 清代词人 ↔ 词牌 二部图（作数前 {{ layout.nAu }}）</text>
+        <text :x="XA" y="52" text-anchor="middle" font-size="13" class="gv-sub">左：词人　右：词牌　线：二者共有的篇数（越粗越多）</text>
       </svg>
       <div v-else class="empty">
         <p><b>图谱里没有可显示的节点。</b></p>
@@ -190,4 +202,15 @@ onUnmounted(() => { tip.value.on = false; });
 .empty p { margin: 4px 0; }
 
 .legend { margin: 6px 0; }
+
+/* ★ 自查第 7 遍修（暗色可读性）：图谱标签/连线改用**主题变量**，随亮/暗两套自动切换。
+   圆点填充仍由模板内联（门禁断言 `#1f6fb2`/`#c2691a`，不动）。
+   `--ping`（亮 #2f5d7c / 暗 #8fb6d4）本就是「词人蓝」，`--accent2`（亮 #8a6a53 / 暗 #c9ab8c）
+   是「词牌棕」，`--ink2` 作计数灰——与核心变量一一对应，无需再写两套媒体查询。 */
+.nd text.t-author { fill: var(--ping); }
+.nd text.t-cipai { fill: var(--accent2); }
+.nd text .t-cnt { fill: var(--ink2); }
+.chart .ed { stroke: color-mix(in srgb, var(--ping) 55%, transparent); stroke-opacity: 0.5; }
+.gv-title { fill: var(--ink); }
+.gv-sub { fill: var(--ink2); }
 </style>

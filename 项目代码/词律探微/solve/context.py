@@ -31,6 +31,7 @@ import os
 import re
 import threading
 import time
+import uuid
 
 # ─────────────────────────── 上限（外部审查 A 项给定） ───────────────────────────
 MAX_SESSIONS = 50            # 最多保留 50 个会话（超出按最近使用淘汰）
@@ -418,10 +419,26 @@ class ContextStore:
         try:
             os.makedirs(self.dirpath, exist_ok=True)
             p = self._path(session.sid)
-            tmp = p + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(session.to_dict(), f, ensure_ascii=False)
-            os.replace(tmp, p)
+            # ★ 2026-10-11（审查·中）：临时文件名原来是**固定的** `p + '.tmp'`。
+            #   同一 sid 的两次保存并发时（重发 / 双击 / 多线程）会**写同一个临时文件**：
+            #   两份内容交错写进去，最后 `os.replace` 上去的是一份**混合的坏 JSON**，
+            #   下次载入该会话直接失败（且失败路径是 `except: return 0`，用户只看到「会话没了」）。
+            #   改成**带进程号与随机数**的唯一名，写完后原子替换——并发各写各的，互不影响；
+            #   失败时清理自己的临时文件，不留垃圾。
+            tmp = '%s.%d.%s.tmp' % (p, os.getpid(), uuid.uuid4().hex[:8])
+            try:
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(session.to_dict(), f, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, p)
+            except Exception:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                raise
             return True
         except Exception:
             return False

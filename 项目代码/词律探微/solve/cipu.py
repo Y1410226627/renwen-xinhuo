@@ -30,6 +30,16 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CIPU_DIR = os.path.join(_ROOT, 'data', 'cipu')
 _HAN_RE = re.compile('[%s]' % _HAN_CLASS)
 
+#: ★ 2026-10-11（词谱逻辑修复）——**句读口径对齐**。
+#:   语料 `lines` 是**句号级**（实测 20 万行里 61% 的行内含「，」，一行常含两个小句，
+#:   如「上将于今数老张，飞扬世界不寻常。」14 字）；而谱书 `rules`/`sentences` 是**韵句级**
+#:   （长相思一体为 3/3/7/5/3/3/7/5 —— 以「，」「、」「；」「：」为界）。
+#:   改前直接拿句号级行去对 7 字规则 → 一行 14 字硬塞进 7 字规则，
+#:   多出的 7 个字被判成「多字/不符」，**把口径不一致渲染成了大量假「异」**。
+#:   故：对照前先把作品行按句读细分，`pz` 按汉字序同步切片（实测 20 万行 `pz` 长度与汉字数
+#:   **全部相等**，切片安全），并保留 `origin`（原行号）供界面回指。
+_SUB_RE = re.compile('[，、；：]')
+
 #: 界面与返回体必须携带的来源声明（红线；改了要连 `web/test_cipu.py` 的断言一起改）。
 SOURCE_NOTE = ('参照来源：搜韵公开转写（未核原书）· 上游 hulbji/couyun（MIT License）'
                '@1744e87f850c2205bc231bfdd858256036c0e4db')
@@ -268,6 +278,54 @@ def ending_label(ending):
     return ENDING_LABEL.get(e, e)
 
 
+def explode_lines(lines):
+    """把**句号级**的作品行细分为谱书口径的**小句**（见 `_SUB_RE` 处的修复说明）。
+
+    返回 `(小句列表, meta)`：
+      · 小句沿用原行的 `idx`（细分出的第二句起 `idx` 顺延），并带 `origin`=细分前的行号；
+      · 未被细分的行 `origin` 保持与自己 `idx` 相同（界面据此判断是否拆过）；
+      · `meta = {'n_raw','n_used','split':bool,'note':str}`——如实告诉界面「拆了几行」。
+
+    不做任何猜测：行内没有句读符号就**原样保留**；`pz` 长度与汉字数不等时（理论上不该发生）
+    该行整行保留并把不等情况留给 `compare` 的 `align_warn` 去报警。
+    """
+    src = list(lines or [])
+    out, n_split = [], 0
+    for ln in src:
+        text = (ln or {}).get('text') or ''
+        pz = (ln or {}).get('pz') or ''
+        parts = [p for p in _SUB_RE.split(text) if p]
+        if len(parts) <= 1:
+            d = dict(ln)
+            d['origin'] = d.get('idx')
+            out.append(d)
+            continue
+        n_chars = len(_HAN_RE.findall(text))
+        if n_chars != len(pz):                      # 平仄串与汉字数对不上 → 不细分，交上游报警
+            d = dict(ln)
+            d['origin'] = d.get('idx')
+            out.append(d)
+            continue
+        n_split += 1
+        k = 0
+        for j, p in enumerate(parts):
+            nh = len(_HAN_RE.findall(p))
+            d = dict(ln)
+            d['text'] = p
+            d['pz'] = pz[k:k + nh]
+            d['origin'] = ln.get('idx')
+            d['idx'] = '%s.%d' % (ln.get('idx'), j + 1) if j else ln.get('idx')
+            k += nh
+            out.append(d)
+    note = ''
+    if n_split:
+        note = ('对照按谱书句读口径进行：原 %d 行（句号级）中 %d 行含句读，'
+                '已细分为 %d 个小句后再与谱式逐句对齐。'
+                % (len(src), n_split, len(out)))
+    return out, {'n_raw': len(src), 'n_used': len(out), 'split': bool(n_split),
+                 'n_split_lines': n_split, 'note': note}
+
+
 def compare(poem, form):
     """**三行对照**核心：`poem`（作品） vs `form`（谱式体）。
 
@@ -328,6 +386,7 @@ def compare(poem, form):
             n_unaligned += 1
         rows.append({
             'line': i,
+            'origin': (L[i].get('origin') if i < len(L) else None),
             'poem_text': text, 'poem_pz': pz,
             'rule_tones': tones or None,
             'ending': ending,
@@ -392,7 +451,9 @@ def compare_poem(pid, poem, tune=None, form=None):
     对照逻辑**只有一份**。返回体一律带 `source_note`（红线）。词牌未收录 / 有歧义时
     如实返回 `status` 与候选。
     """
-    lines = poem.get('lines') or []
+    raw_lines = poem.get('lines') or []
+    # ★ 句读口径对齐：谱书按小句计句，作品行是句号级 → 先细分（细分与否都如实记在 meta 里）
+    lines, gran = explode_lines(raw_lines)
     n_chars = sum(len(_HAN_RE.findall(x.get('text') or '')) for x in lines)
     cipai = poem.get('cipai') or ''
     name = (tune or cipai).strip()
@@ -410,6 +471,7 @@ def compare_poem(pid, poem, tune=None, form=None):
     f, why = _match_form(forms_of(canon), form)
     form_note = ''
     if f is None:
+        # ★ 句数一律按**细分后的小句数**比（与谱书 `n_lines` 同一口径）
         _auto, _awhy = pick_form(canon, len(lines), n_chars)
         if str(form or '').strip() != '':
             form_note = '指定的体未能采用（%s）——本次按自动匹配给出：%s' % (why, _awhy)
@@ -418,7 +480,7 @@ def compare_poem(pid, poem, tune=None, form=None):
                    'cipai': cipai, 'lines': lines}, f)
     res.update({'status': 'ok', 'pid': pid, 'cipai': cipai, 'tune': canon,
                 'form': form_brief(f), 'form_why': why, 'form_note': form_note,
-                'source_note': SOURCE_NOTE})
+                'granularity': gran, 'source_note': SOURCE_NOTE})
     return res
 
 

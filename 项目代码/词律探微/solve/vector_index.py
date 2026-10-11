@@ -410,6 +410,14 @@ def search(query, topk=10, conn=None, allow=None, level='auto'):
 
 _MAX_LINES_SCAN = 50000       # 句级召回单次请求的**扫描上限**（超出即如实报告"未穷尽"）
 
+# ★ 2026-10-11（审查·低）：「本次调用是否未穷尽」是**每请求**状态，不是全局状态
+#   ——多线程服务里放全局会被并发互相覆盖（见 `lines_scan_truncated` 的说明）。
+_TLS = threading.local()
+
+
+def _set_truncated(v):
+    _TLS.lines_scan_truncated = bool(v)
+
 
 def search_lines(query, topk=10, conn=None, allow=None):
     """语义查询 → [(pid, idx, text, score)]（句级，带句序号与原文；用于「某句出自哪首」）。
@@ -424,7 +432,7 @@ def search_lines(query, topk=10, conn=None, allow=None):
     """
     if not available() or _STATE['line_index'] is None:
         return []
-    _STATE['lines_scan_truncated'] = False
+    _set_truncated(False)
     try:
         q = _query_vec(query)
         if q is None:
@@ -455,7 +463,7 @@ def search_lines(query, topk=10, conn=None, allow=None):
             if len(out) >= topk or k >= n:
                 break
             if k >= _MAX_LINES_SCAN:
-                _STATE['lines_scan_truncated'] = True
+                _set_truncated(True)
                 break
         return out
     except Exception as e:                                       # noqa: BLE001
@@ -464,8 +472,15 @@ def search_lines(query, topk=10, conn=None, allow=None):
 
 
 def lines_scan_truncated():
-    """上一次 `search_lines` 是否因**扫描上限**而未穷尽（P1-3：不许把截断伪装成"没找到"）。"""
-    return bool(_STATE.get('lines_scan_truncated'))
+    """上一次 `search_lines` 是否因**扫描上限**而未穷尽（P1-3：不许把截断伪装成"没找到"）。
+
+    ★ 2026-10-11（审查·低）：这个标志改成**线程本地**。
+      改前存在全局 `_STATE` 里：服务是多线程的，A 请求触顶置 True 后，
+      B 请求（可能根本没触顶）一读就拿到 True → **把「未穷尽」误报给没触顶的请求**；
+      反过来 A 也可能读到 B 的 False 而漏报。这是「并发互相覆盖」，与 `search_lines`
+      的调用方（同一线程内 `search_lines` → `lines_scan_truncated`）语义一致，零回归。
+    """
+    return bool(getattr(_TLS, 'lines_scan_truncated', False))
 
 
 def similar(pid, topk=10, conn=None, allow=None, exclude_self=True):
