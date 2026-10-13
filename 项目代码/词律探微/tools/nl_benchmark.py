@@ -53,7 +53,7 @@ def load_cases(path):
     return out
 
 
-def _fields_of(spec, plan=None):
+def _fields_of(spec, plan=None, mode='rule'):
     """解析结果里**实际表达了哪些条件字段**（供 Coverage 比对）。"""
     got = set()
     import retrieve as R
@@ -123,7 +123,7 @@ def run_case(conn, case, mode='rule', llm=None, verbose=False):
             plan = PL.plan(conn, llm, q)
         except Exception:                                        # noqa: BLE001
             plan = None
-    got = _fields_of(spec, plan)
+    got = _fields_of(spec, plan, mode)
     res['plan_ok'] = bool(plan)
     # ★ 2026-10-09（第三轮审查 P1-18）：plan 模式但**没真跑出计划**（大模型不可用等）时，
     #   该用例**不计入 plan 成绩**（标 skipped_plan=True），绝不并入「规划路」汇总。

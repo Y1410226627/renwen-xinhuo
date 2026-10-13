@@ -147,11 +147,14 @@ def system_prompt():
     return _SYSTEM_HEAD + mid + _SYSTEM_TAIL
 
 
-# 兼容旧引用（`planner.SYSTEM`）：module 级即生成，queryplan 不可用则退化为「无字段说明书」版本
-try:
-    SYSTEM = system_prompt()
-except Exception:                                                # noqa: BLE001
-    SYSTEM = _SYSTEM_HEAD + _SYSTEM_TAIL
+# 兼容旧引用（`planner.SYSTEM`）：先放**退化版占位**，完整版在 `_load_queryplan` 定义**之后**生成。
+# ⚠ 2026-10-13 修复（实测驱动）：原先在此处直接 `SYSTEM = system_prompt()`——但 `system_prompt()`
+#   函数体内引用的 `_load_queryplan` 定义在**本文件更下方**，模块导入执行到这里时它尚未绑定
+#   → `NameError` 被 except 静默吞掉 → SYSTEM 在**正常导入路径下永远**退化为「无字段说明书」版
+#   （3389 字符；完整版 8328 字符）。LLM 拿不到字段全表，只能按示例猜字段名
+#   （实测把 `han_len` 猜成 `char_count`）→ 开放措辞基准 9/40 条「专门字段」句规划全数失败
+#   （NL019/020/021/026/027/028/031/035/037）。详见 DECISIONS D54。
+SYSTEM = _SYSTEM_HEAD + _SYSTEM_TAIL                             # 占位兜底；正常导入会被下文完整版覆盖
 
 # field 的族归类（落地校验与 filters 剪枝共用；**宽松**匹配多种写法）
 _AUTHOR_FIELD = ('author', 'authors', 'poet', 'writer')
@@ -167,6 +170,14 @@ def _load_queryplan():
         return queryplan
     except Exception:
         return None
+
+
+# 完整提示词（头部 + **IR 现场生成的字段说明书** + 尾部）：此时 `_load_queryplan` 已定义，可安全生成。
+# ⚠ 生成必须放在**这里**（而不是文件中部）——见上方 SYSTEM 占位处的修复说明（2026-10-13）。
+try:
+    SYSTEM = system_prompt()
+except Exception:                                                # noqa: BLE001
+    pass                                                          # 保留占位（最终兜底；与修复前外部行为一致）
 
 
 # --------------------------------------------------------------------------- filters 遍历/剪枝

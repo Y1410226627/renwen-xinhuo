@@ -143,6 +143,20 @@ def check_numbers(answer_text, blocks, allow=()):
         for k in ('sent_n', 'han_len', 'ping', 'ze', 'ze_ratio', 'longest_len', 'threshold'):
             if b.get(k) is not None:
                 _legal_anywhere |= evidence.num_variants(b[k])
+        # ★ 2026-10-13 修（跨块误伤 · test_e2e 实测驱动）：「篇级」续行无 [E#]，按未引用行统一
+        #   剥 `_union - _legal_anywhere`——而 `_union`（abs_only 并集）里若因**另一块**的负
+        #   change 混进了某正数字（实测：E1 change=-2.4 → '2.4' 进 abs_only），会把**正 change
+        #   块的正当无符号写法**（E2/E3 change=+2.4 渲染「变化 2.4」）一并剥掉 → 整篇答案被判
+        #   「数字无出处」（实测 test_e2e「清词里字数最多的是哪一首」，本行三块 -2.4/+2.4/+2.4）。
+        #   修法：change **非负**块的形态本就是正当写法，计入「全库合法值」。
+        #   ⚠ 保守边界：负 change 不补——它的无符号形态**就是**「绝对值专属写法」，仍应可剥；
+        #   引用行（[E#]）的 `abs_only[eid]` 剥除逻辑**完全不变**，不放松任何引用行判定。
+        try:
+            _c = b.get('change')
+            if _c is not None and float(_c) >= 0:
+                _legal_anywhere |= evidence.num_variants(_c)
+        except (TypeError, ValueError, OverflowError):
+            pass
         for L in b.get('lines', []):
             for k in ('han_len', 'ping', 'ze'):
                 if L.get(k) is not None:
