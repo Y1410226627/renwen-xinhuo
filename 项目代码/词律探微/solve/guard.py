@@ -248,7 +248,7 @@ def check_numbers(answer_text, blocks, allow=()):
 
 
 def audit_number_traceability(answer_text, blocks, allow=()):
-    """数字**可追溯性审计**（吸收 cilyutanwei 对「数字出现 ≠ 支持当前论断」的批评）。
+    """数字**可追溯性审计**（回应「数字出现 ≠ 支持当前论断」这一真问题）。
 
     与 `check_numbers` 的分工（**两者互补，不改彼此判定**）：
       · `check_numbers` 是**门禁**——判「放不放行」；其放行集合含「全库合法值」，

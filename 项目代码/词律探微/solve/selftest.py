@@ -370,7 +370,7 @@ def main():
         _good = _gen.produce(_FakeLLM('这一批词作以形式层的声调配置为主[E1]。'), _r3, _kind, _bd)
         ok('说法层：合法叙述 → 采纳', _good['ok'] is True, _good['problems'])
 
-        # ── 2026-10-13 新增（吸收 cilyutanwei 的 Claim 结构 + 输出契约）──
+        # ── 2026-10-13 新增（论证稿结构化 + 输出契约）──
         #    对方在《功能三参考仓库实现阅读》里指出：我们的 selftest **从未测 `argument=True`
         #    路径**，论证辅助「只是切换任务提示」。这里把结构化论证的**结构校验**逐条测到。
         import json as _json
@@ -910,7 +910,7 @@ def main():
     _c13c.close()
 
     # ------------------------------------------------------------------
-    # 23) 论证稿库 / 依赖状态 / 锚点 / 失败码（2026-10-13 吸收 cilyutanwei）
+    # 23) 论证稿库 / 依赖状态 / 锚点 / 失败码（2026-10-13 新增）
     #     对方指出我们「论证辅助没有独立可编辑的论证稿实体」；本轮把它落成**实体**并测到。
     print('\n=== 23 论证稿库 / 依赖状态 / 锚点 / 失败码 ===')
     import tempfile as _tf
@@ -993,6 +993,27 @@ def main():
          'limitations': ['z']}, ensure_ascii=False), [])
     ok('失败码：缺 bridge 归入 missing_bridge',
        'missing_bridge' in _cdx2, _cdx2)
+
+    # ---- 声律双口径（评测口径 vs 广韵历史口径；**默认口径一字不改**）----
+    import tone_policy as _TP
+    if not _TP.historical_available():
+        ok('双口径：跳过（未导出广韵数据）', True)
+    else:
+        _hp, _hs, _he = _TP.historical_pz('白')
+        ok('双口径：广韵口径可用（「白」为入声 → 仄）',
+           _hs == 'ok' and _hp == {'仄'}, (_hp, _hs))
+        _c4 = _sq10.connect(_db10)
+        _row = _c4.execute('SELECT pid FROM lines LIMIT 1').fetchone()
+        _vp = _row[0] if _row else None
+        _v = _TP.dual_view(_c4, _vp) if _vp else None
+        _c4.close()
+        ok('双口径：逐字位返回四态计数',
+           bool(_v) and set(_v['summary']) == {'match', 'differ', 'hist_missing',
+                                               'hist_ambiguous'}
+           and _v['n_positions'] > 0, _v['summary'] if _v else None)
+        ok('双口径：附口径声明（不判谁对）',
+           bool(_v) and ('不判定谁对' in _v['note']) and ('不是清代实际读音' in _v['note']))
+        ok('双口径：不存在的篇返回 None', _TP.dual_view(_sq10.connect(_db10), 'no.such#0') is None)
 
     print('\n================ 自检汇总 ================')
     print('检查项 %d，失败 %d' % (N, len(FAIL)))

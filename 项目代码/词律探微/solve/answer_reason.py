@@ -9,7 +9,7 @@
     （已拒答 / 未拒答）。可「答不出」其实有**好几种不同的原因**，混作一团时，
     用户（和评委）追问「为什么答不出」只能去读整段文案猜。
 
-    朋友的 `ProviderResult.status` 把这层拆开：
+    外部接口的 `ProviderResult.status` 把这层拆开：
         ok / partial / not_found / unavailable / unsupported / ambiguous /
         conflict / insufficient_evidence
     最值得学的是**把「没有数据」和「不好」拆开**：

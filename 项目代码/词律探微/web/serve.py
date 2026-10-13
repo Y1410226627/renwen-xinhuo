@@ -822,7 +822,7 @@ def q_compare(conn, group_by, values, metric):
 
 
 def q_catalog(conn, top=20):
-    """语料总览统计（`/api/catalog`）。2026-10-09 新增（对齐竞品 `cilyutanwei` 的 `/api/catalog`）。
+    """语料总览统计（`/api/catalog`）。2026-10-09 新增。
 
     设计口径：**所有数字都由本库 SQL 现算**，不读任何预生成缓存——
     这样「网页上看到的数」永远等于「数据库里的数」，不存在构建产物过期导致的对不上。
@@ -1414,7 +1414,7 @@ def q_research_write(path, data):
         return RSRCH.rollback_import_batch(
             conn, data.get('batch_id'), why=str(data.get('why') or ''),
             actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
-    # ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions）：**论证稿**写接口。
+    # ★ 2026-10-13 新增：**论证稿**写接口（新建=一篇稿，编辑=追加修订）。
     #   与材料/事实/版本链同一纪律：新建=一篇稿，编辑=**追加修订**（旧版永不覆盖），撤回=标记。
     if path == '/api/arguments':
         d = data.get('data')
@@ -1523,9 +1523,9 @@ def q_pron_candidates(pid, line_idx, char_pos):
                     if (h.get('subject') or '') == _subj]
         except Exception:                                      # noqa: BLE001
             cur, hist = None, []
-    # ★ 2026-10-10（竞品对照）：**《广韵》候选**（vendor/tshet-uinh，MIT · Project NK2028）——
+    # ★ 2026-10-10：**《广韵》候选**（vendor/tshet-uinh，MIT · Project NK2028）——
     #   反切/韵目/声调/释义的历史音韵参考。**只展示、不参与平仄计算**：本系统平仄按
-    #   **普通话四声**（题库口径），人工裁定也只收普通话读音——这条红线照抄竞品同款表述
+    #   **普通话四声**（题库口径），人工裁定也只收普通话读音——这条红线常驻展示
     #   （「广韵候选是历史音韵参考，候选不等于此处已确定读音」）且更明确。
     _gy = _guangyun_of(ch)
     return {'pid': pid, 'line': int(line_idx), 'pos': int(char_pos), 'char': ch,
@@ -2230,7 +2230,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send({'ok': True, 'result': CIPU.list_tunes(),
                                    'source_note': CIPU.SOURCE_NOTE})
             if u.path == '/api/cipu/coverage':
-                # ★ 2026-10-11（P2-4）：**谱库覆盖范围**——逐词牌逐体对照上游（竞品转写源），
+                # ★ 2026-10-11（P2-4）：**谱库覆盖范围**——逐词牌逐体对照上游转写源，
                 #   并明写「N 词牌 / M 体 · 未核原书」。
                 return self._send({'ok': True, 'result': CIPU.coverage()})
             if u.path == '/api/cipu':
@@ -2307,6 +2307,17 @@ class H(BaseHTTPRequestHandler):
                 return self._send({'ok': True, 'result': q_llm_options()})
             if u.path == '/api/parse':
                 return self._send(q_parse(g('pid')))
+            if u.path == '/api/tone_policy':
+                # ★ 2026-10-13 新增：**声律双口径对照**（评测口径 vs 《广韵》历史口径）。
+                #   默认口径（普通话四声）**一字不改**——这里只把历史视角**并列**出来，
+                #   不覆盖、不判谁对、不用普通话顶替广韵缺收的字（见 GLOSSARY「口径」条）。
+                if not g('pid'):
+                    return self._send(_err('BAD_PARAM', 'pid 为必填'), code=400)
+                import tone_policy as _TP
+                _tv = _TP.dual_view(get_conn(), g('pid'))
+                if _tv is None:
+                    return self._send(_err('NOT_FOUND', '找不到该篇：%s' % g('pid')), code=404)
+                return self._send({'ok': True, 'result': _tv})
             if u.path == '/api/rand':
                 return self._send(q_rand(g('dyn')))
             if u.path == '/api/examples':

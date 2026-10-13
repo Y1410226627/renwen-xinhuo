@@ -1,0 +1,51 @@
+# 词律探微引擎 · systemd 服务单元
+#
+# 放置：/etc/systemd/system/cilv-engine.service
+# 启用：
+#   sudo cp deploy/cilv-engine.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cilv-engine
+#   systemctl status cilv-engine
+#
+# ⚠ 三处要按实际环境改：
+#   WorkingDirectory / ExecStart 的路径、User。
+# 通用性：openEuler / 麒麟 / Ubuntu / CentOS 的 systemd 均可直接用（不依赖发行版特性）。
+
+[Unit]
+Description=CiLv TanWei engine (Python stdlib + SQLite)
+Documentation=file:///opt/cilvtanwei/项目代码/词律探微/部署方案.md
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=cilv
+Group=cilv
+WorkingDirectory=/opt/cilvtanwei/项目代码/词律探微
+
+# 主从式：只绑回环，交给反向代理（见 deploy/nginx-cilv.conf）
+# 若要走「局域网直连」形态，把 127.0.0.1 换成 0.0.0.0 并放行防火墙端口。
+ExecStart=/usr/bin/python3 web/serve.py --host 127.0.0.1 --port 8010 --no-open
+
+# 中文环境（日志与路径）
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=PYTHONIOENCODING=utf-8
+# 需要调试时打开（会把完整异常回吐给客户端，**生产勿开**）
+# Environment=LVC_DEBUG=1
+
+Restart=always
+RestartSec=3
+# 优雅停止：SIGTERM 后给 15 秒
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# 资源与安全加固（可选但建议）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/cilvtanwei/项目代码/词律探微/data
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

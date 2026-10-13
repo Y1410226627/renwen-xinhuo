@@ -564,17 +564,29 @@ def main():
         _did = _r1['draft_id']
         _r2 = S.q_research_write('/api/arguments/revisions', {
             'draft_id': _did, 'expected_revision': 1,
-            'data': {'thesis': 't2', 'claims': [{'claim': 'c', 'bridge': 'b'}],
+            'data': {'thesis': 't2', 'claims': [{'claim': 'c', 'bridge': 'b',
+                                                 'assessment': 'supported'}],
                      'limitations': ['l']}})
         ok('论证稿接口：修订号 +1（追加，不覆盖）', _r2.get('revision') == 2, _r2)
         _stale = False
         try:
             S.q_research_write('/api/arguments/revisions', {
                 'draft_id': _did, 'expected_revision': 1,
-                'data': {'thesis': 'x', 'claims': [{'claim': 'y', 'bridge': 'z'}]}})
+                'data': {'thesis': 'x', 'claims': [{'claim': 'y', 'bridge': 'z',
+                                                    'assessment': 'supported'}]}})
         except ValueError:
             _stale = True
         ok('论证稿接口：过期修订被拒（乐观锁）', _stale)
+        # 缺 bridge → 拒（与 gen.parse_argument 同一条纪律）
+        _nob = False
+        try:
+            S.q_research_write('/api/arguments/revisions', {
+                'draft_id': _did, 'expected_revision': 2,
+                'data': {'thesis': 'x', 'claims': [{'claim': 'y',
+                                                    'assessment': 'supported'}]}})
+        except ValueError:
+            _nob = True
+        ok('论证稿接口：缺 bridge 被拒（与生成侧同一纪律）', _nob)
         _w = S.q_research_write('/api/arguments/withdraw', {'draft_id': _did, 'why': 't'})
         ok('论证稿接口：撤回（行保留）', _w.get('withdrawn') is True, _w)
     finally:

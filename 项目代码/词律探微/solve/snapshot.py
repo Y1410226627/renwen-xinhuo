@@ -207,7 +207,7 @@ def load(snapshot_id):
                               '另有指纹取不到：%s——**无法确认是否陈旧**，按「可能已陈旧」处理'
                               '（不敢把「不知道」说成「未陈旧」）。'
                               % '、'.join(names.get(k, k) for k in unknown))
-    # ★ 2026-10-13 新增（吸收 cilyutanwei 的 `dependency_state`）：除上面的**快照级**
+    # ★ 2026-10-13 新增：除上面的**快照级**
     #   粗粒度标注外，再给一份**逐依赖项**的实时状态（每项各自「快照值 / 当前值 / 变没变 / 说明」）。
     snap['dependency_state'] = dependency_state(snap, conn=None)
     return snap
@@ -233,7 +233,7 @@ def _file_fp(path):
 
 
 def dependency_state(snap, conn=None):
-    """**逐依赖项**的实时状态（吸收 cilyutanwei 的 `dependency_state`）。
+    """**逐依赖项**的实时状态。
 
     与 `load()['stale']` 的分工：
       · `stale` 是**快照级**粗标注（口径指纹三项，一句话说「陈旧了没」）；
@@ -259,6 +259,17 @@ def dependency_state(snap, conn=None):
     for key in ('corpus', 'overrides', 'golden', 'research', 'vector'):
         c = cur.get(key)
         o = old.get(key)
+        if c in (None, '') and o in (None, ''):
+            # ⚠ 2026-10-13 修：**两侧都取不到** ≠ 不知道是否陈旧。多见于
+            #   ① 该依赖本就不存在（如从未建过 `research.db`）② 旧快照没记这项。
+            #   此时**没有可比对的证据**，报 `unknown` 会让「全新安装」每次都说
+            #   「可能已陈旧」（噪声），反而掩盖真正的变化。按「无可比对」处理：
+            #   标 `unknown=False / changed=False`，note 说明「无此项记录」。
+            items.append({'key': key, 'label': _DEP_LABELS.get(key, key),
+                          'snapshot': o or None, 'current': c or None,
+                          'changed': False, 'unknown': False,
+                          'note': '两侧都没有该依赖的记录（无此项 / 旧快照未记）——无可比对'})
+            continue
         if c in (None, ''):
             items.append({'key': key, 'label': _DEP_LABELS.get(key, key),
                           'snapshot': o, 'current': None, 'changed': False, 'unknown': True,

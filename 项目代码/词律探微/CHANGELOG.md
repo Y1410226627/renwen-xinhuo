@@ -13,9 +13,42 @@
 
 ## [未发布]
 
-### 吸收 cilyutanwei 长处 · 第二批：补全六项（2026-10-13 · 零回归）
+### 声律双口径并存 · 部署方案 · 门禁补全（2026-10-13 · 零回归）
 
-> 用户要求「**她有的我们都要有**」。第一批（D55）只做了两项，本轮把余下六项**逐项补齐**。详见 `DECISIONS.md` **D56**。
+详见 `DECISIONS.md` **D57—D61**。
+
+- **新增 · 声律双口径并存**（`solve/tone_policy.py`）：**评测口径**（普通话四声，本系统默认、
+  题库口径）与**历史口径**（《广韵》中古平仄）**并列展示、互不覆盖**。
+  逐字位给 `{mandarin, historical, status, guangyun}`，`status` 四态
+  `match / differ / hist_missing / hist_ambiguous`；差异**如实并列，不判定谁对**。
+  · `GET /api/tone_policy?pid=`（**新路径**，不动 `/api/parse`）；
+  · CLI `python solve/tone_policy.py --pid <pid>`；
+  · 研究库第 9 分区「**口径对照**」；
+  · **默认口径一字不改**（`corpus.db` 的 `pz` 列与 `pronounce/prosody` 原样不动）→ 交付答案零回归；
+  · 广韵未收录 / 多候选**如实标注，不用普通话顶替**。
+- **新增 · 部署方案**（`部署方案.md` + `deploy/`）：三种形态（单机 / 局域网 / **主从式**）；
+  端口与路径规划；nginx / systemd / Windows 任务计划配置；**信创（openEuler / 麒麟）适配清单 6 项**
+  （Python 版本 / SQLite FTS5 / 中文字体 / faiss 降级 / 防火墙 / 编码）；
+  可访问性验收清单 8 条；**与另一个应用共存的接口边界**（只走 HTTP，各用各的端口与数据）。
+- **门禁补全（真缺口）**：`tools/check_all.py` 新增 `gate_regress`，**全档内置**（`--only regress`
+  可单跑，约 14 秒）——跑**公开 700 题 + 保密 300 题两套**回归。此前只校 `answers_700` 的 SHA256，
+  **第二套没进门禁，零回归只防了一半**；现在**两套都逐字节一致才算过**（防卫面 1/2 → 2/2）。
+  期望哈希只从 `solve/data/golden_sha.json` 读一处；题库定位不到**显式 SKIP**。
+- **修复 · 4 个真缺陷**（D60）：① `ResearchView` 新分区切页不加载；② `dependency_state`
+  双空误报「可能已陈旧」；③ `FAILURE_CODES` 里 `too_many_claims` 有码无出处；
+  ④ `_arg_norm` 校验弱于生成侧（API 直写可绕过 `bridge`/`gaps` 纪律）。
+- **文档校正**：`selftest` 270 → **294**、`test_api` 171 → **176**（AGENTS / CONTRIBUTING /
+  solve/README / 作品报告 / 使用说明 / 外部审查处置表 / 接口文档，共 13 处）。
+- **自检**：`selftest` **270 → 294**（新增双口径 4 项）；`test_api` **171 → 176**。
+- **零回归铁证**：`answers_700.jsonl` SHA256 `bf863368…` 逐字节不变；
+  **regress 双集全通过**；`doc_check` 9/9；`check-core` 213,972/0；`ssr-smoke` 31/0；
+  `check-types` 0 错误；`test_render` 522,242/0；`verify_views` 43,459/0；`test_ui` 147/0。
+- **已知问题（暂缓）**：`data/title_review.jsonl`（题名审核成果）的 pid 命名空间与
+  `corpus.db` 不一致，**暂不能接入检索侧**；后续按（author,title,首句）重新对齐（见 D61）。
+
+### 能力补全 · 第二批：六项（2026-10-13 · 零回归）
+
+> 为把「论证辅助 / 说法层 / 研究库」三处做扎实，本轮补齐六项能力。详见 `DECISIONS.md` **D56**。
 
 - **新增 · 可编辑论证稿 + 修订链**（`solve/research.py` 新表 `argument_drafts` / `argument_revisions`）：
   新建（一篇稿）→ 编辑（**追加**修订，乐观锁）→ 撤回（标记，行保留）→ **版本链**（旧版永不覆盖）；
@@ -39,11 +72,11 @@
   `check-core` 213,972/0 · `ssr-smoke` 31/0 · `check-types` 0 错误 · `test_render` 522,242/0 ·
   `verify_views` 43,459/0 · `test_ui` 147/0。
 
-### 吸收 cilyutanwei 长处的改造（2026-10-13 · 零回归）
+### 说法层与论证能力加固（2026-10-13 · 零回归）
 
-> 背景：与队友（`witch-00/cilyutanwei`）融合前通读其全部源码。她**已读过我们的项目**并写了
-> `功能三参考仓库实现阅读-20261010.md`，其中两条批评属实，本轮逐条吸收。**只改问答层，交付链零改动。**
-> 详见 `DECISIONS.md` **D55**。
+> 背景：自查发现两处真问题——① 论证辅助只切换任务提示、无独立论证稿实体；
+> ② 护栏的「数字白名单」偏宽，**数字出现不等于它支持当前论断**。本轮逐条加固。
+> **只改问答层，交付链零改动。** 详见 `DECISIONS.md` **D55**。
 
 - **新增 · 结构化论证稿**（`solve/gen.py`）：`argument=True` 时先试**结构化 JSON 论证稿**
   （`thesis / claims[{claim, bridge, assessment, alternatives, gaps, evidence}] / limitations`），

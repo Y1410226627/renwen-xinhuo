@@ -209,6 +209,35 @@
       </section>
 
       <!-- ④ 词谱对照 -->
+      <section v-if="tab === 'policy'" class="rs-pane">
+        <h3>口径对照 <small class="dim">（评测口径＝普通话四声；历史口径＝《广韵》历史音韵。两口径**并列**，互不覆盖、不判谁对）</small></h3>
+        <label class="rs-field">篇号 pid
+          <input v-model="pPid" type="text" placeholder="如 ci.清.0000.base.json#0" @keyup.enter="loadPolicy" />
+        </label>
+        <p><button type="button" class="mini" @click="loadPolicy">对照</button></p>
+        <div v-if="pView" class="rs-detail">
+          <p>逐字位 {{ pView.n_positions }}：一致 {{ pView.summary.match }} ｜ 不一致 {{ pView.summary.differ }}
+             ｜ 广韵未收录 {{ pView.summary.hist_missing }} ｜ 广韵多候选 {{ pView.summary.hist_ambiguous }}</p>
+          <p class="dim">{{ pView.note }}</p>
+          <table class="rs-table">
+            <thead><tr><th>句</th><th>字</th><th>位</th><th>评测口径</th><th>历史口径</th><th>对照</th><th>广韵音韵地位</th></tr></thead>
+            <tbody>
+              <template v-for="ln in pView.lines" :key="ln.idx">
+                <tr v-for="c in ln.cells" :key="ln.idx + '-' + c.pos">
+                  <td class="num">{{ ln.idx + 1 }}</td>
+                  <td><b>{{ c.glyph }}</b></td>
+                  <td class="num">{{ c.pos + 1 }}</td>
+                  <td>{{ c.mandarin || '—' }}</td>
+                  <td>{{ c.historical || '—' }}</td>
+                  <td>{{ policyLabel(c.status) }}</td>
+                  <td class="dim">{{ c.guangyun }}</td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section v-if="tab === 'cipu'" class="rs-pane">
         <h3>词谱三行对照 <small class="dim">（作品原字 / 规范 / 谱书例词）</small></h3>
         <p class="rs-warn">参照来源：搜韵公开转写（<b>未核原书</b>）· 上游 hulbji/couyun（MIT License）。
@@ -378,6 +407,7 @@ const TABS = [
   { key: 'facts', label: '研究事实' },
   { key: 'arguments', label: '论证稿' },
   { key: 'pron', label: '读音裁定' },
+  { key: 'policy', label: '口径对照' },
   { key: 'cipu', label: '词谱对照' },
   { key: 'works', label: '我的录入' },
   { key: 'imports', label: '批量导入' },
@@ -414,6 +444,7 @@ function switchTab(k) {
   err.value = ''
   if (k === 'materials' && isOnline.value) { loadMaterials() }
   if (k === 'facts' && isOnline.value) { loadFacts() }
+  if (k === 'arguments' && isOnline.value) { loadArgs() }
   if (k === 'works' && isOnline.value) { loadWorks(); loadCatalog() }
   if (k === 'imports' && isOnline.value) { loadBatches() }
   if (k === 'snapshots' && isOnline.value) { loadSnaps() }
@@ -680,7 +711,7 @@ function viewSnap(id) {
   })
 }
 
-/* ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions）：论证稿——列表 / 查看 /
+/* ★ 2026-10-13 新增：论证稿——列表 / 查看 /
  *   编辑（**追加修订**、乐观锁）/ 导出（Markdown / Word）/ 撤回。
  *   与「文献摘录」同一纪律：写操作带 `client_token` 幂等；旧修订**永不覆盖**。 */
 const aList = ref([])
@@ -778,6 +809,25 @@ async function exportArg(id, fmt) {
       _blobDownload(new Blob([r.text], { type: 'text/markdown;charset=utf-8' }), r.filename)
     }
     flash('已导出 ' + r.filename, '')
+  } catch (e) { flash('', e.message) }
+}
+
+/* ★ 2026-10-13 新增：**声律双口径对照**（评测口径 vs 《广韵》历史口径）。
+ *   只读展示——默认口径一字不改，这里只把历史视角**并列**出来，不判谁对。 */
+const pPid = ref('')
+const pView = ref(null)
+const POLICY_LABEL = {
+  match: '一致', differ: '不一致', hist_missing: '广韵未收录', hist_ambiguous: '广韵多候选',
+}
+function policyLabel(s) { return POLICY_LABEL[s] || s }
+
+async function loadPolicy() {
+  const pid = (pPid.value || '').trim()
+  if (!pid) { flash('', '请填篇号 pid'); return }
+  try {
+    const j = await api.tonePolicy(pid)
+    pView.value = (j && j.result) || null
+    if (!pView.value) { flash('', '找不到该篇') }
   } catch (e) { flash('', e.message) }
 }
 

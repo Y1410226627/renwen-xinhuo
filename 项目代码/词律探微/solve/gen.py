@@ -85,7 +85,7 @@ TASK_READ_PARTS = (
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 结构化论证（2026-10-13 吸收 cilyutanwei 的 Claim 结构 + 输出契约）
+# 结构化论证（2026-10-13：论证稿结构化 + 输出契约）
 # --------------------------------------------------------------------------------
 # 由来：对方在 docs/功能三参考仓库实现阅读-20261010.md 中指出我们的「论证辅助」
 #   ① 「本质是切换任务提示，生成短篇四层草稿」——**没有独立可编辑的论证稿实体**；
@@ -102,7 +102,7 @@ TASK_READ_PARTS = (
 ASSESSMENTS = ('supported', 'mixed', 'insufficient', 'unresolved')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 输出失败码（2026-10-13 吸收 cilyutanwei 的 `OUTPUT_FAILURE_CODES`）
+# 输出失败码（2026-10-13：把「为什么被拒」变成机器可判的枚举）
 # --------------------------------------------------------------------------------
 # 她那边有约 30 个固定失败码，把「模型输出为什么被拒」变成**机器可判、可统计、可回查**的枚举，
 # 而不是一句自由文本。我们此前只回 `problems`（人话列表），无法聚合诊断。
@@ -140,6 +140,7 @@ _PROBLEM_CODE_RULES = (
     ('顶层不是 JSON 对象', 'output_not_object'),
     ('缺少 thesis', 'missing_thesis'),
     ('claims 必须是非空数组', 'missing_claims'),
+    ('claims 超过上限', 'too_many_claims'),
     ('不是对象', 'claim_not_object'),
     ('缺少 claim', 'missing_claim'),
     ('缺少 bridge', 'missing_bridge'),
@@ -174,7 +175,7 @@ def classify_failures(problems):
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 锚点机制（2026-10-13 吸收 cilyutanwei 的 `@facts` / `@evidence`）
+# 锚点机制（2026-10-13：模型只写锚点，程序填回冻结内容）
 # --------------------------------------------------------------------------------
 # 她那边让模型**不逐字复述固定内容**（易出错），只写锚点 `@facts` / `@evidence`，
 # 由**程序**把冻结的事实/证据填回去——「模型转述出错」这一类问题从根上消失。
@@ -307,6 +308,7 @@ def parse_argument_ex(raw, blocks):
         problems.append('claims 必须是非空数组')
         raw_claims = []
     if len(raw_claims) > _ARG_MAX_CLAIMS:
+        problems.append('claims 超过上限（%d 条），已截断' % _ARG_MAX_CLAIMS)
         raw_claims = raw_claims[:_ARG_MAX_CLAIMS]
 
     valid_eids = {b['eid'] for b in (blocks or [])}
@@ -541,7 +543,7 @@ def produce(llm, res, kind, boundary, argument=False, max_tokens=700, temperatur
     """生成「说法层」文本并过护栏。返回 dict（ok=False 时调用方必须回落到模板）。
 
     ⭐ 2026-10-13：`argument=True` 时**先试结构化论证稿**（`produce_argument`，吸收
-    cilyutanwei 的 Claim 结构）；结构或护栏不过，**回落既有散文四层草稿**（`_produce_plain`，
+    Claim 结构）；结构或护栏不过，**回落既有散文四层草稿**（`_produce_plain`，
     逐字未改）；仍不过才由调用方回落模板。**narrate 路径完全不受影响**。
     """
     if argument:

@@ -68,8 +68,8 @@ PY="C:/Users/湮貉/.workbuddy-ai/binaries/python/envs/default/Scripts/python.ex
 | 门禁 | 命令 | 管什么 | 当前值 |
 | --- | --- | --- | --- |
 | **A 零回归锚点** | （内建于 `check_all.py`） | `answers_700.jsonl` SHA256 恒等 | `bf863368…f7d1e` |
-| **B 自检** | `python solve/selftest.py` | 结构 / 安全 / 说法层断言 | **270 项 0 失败** |
-| **C 服务端** | `python web/test_api.py` | `/api/*` 接口（不起服务、不联网） | **171 项** |
+| **B 自检** | `python solve/selftest.py` | 结构 / 安全 / 说法层断言 | **294 项 0 失败** |
+| **C 服务端** | `python web/test_api.py` | `/api/*` 接口（不起服务、不联网） | **176 项** |
 | **D 前端逻辑层** | `node frontend/tools/check-core.cjs` | core 真源 vs 冻结基线（全库逐字节） | **213,972 项** |
 | **E 逐题复核** | `python tools/verify_1000.py` | 1000 题答非所问 + 准确性 | **1000 题** |
 

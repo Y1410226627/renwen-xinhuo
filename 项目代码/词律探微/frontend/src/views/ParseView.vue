@@ -68,7 +68,7 @@ const facets = ref(null);
 const metaHtml = ref('');
 const pagerHtml = ref('');
 const detailHtml = ref('');
-/* 字位候选（竞品「逐字研读」对应能力，2026-10-10）：
+/* 字位候选（逐字研读能力，2026-10-10）：
    点详情区任一汉字 → 取它的（句序, 字位）→ 拉候选 → 可人工选读 / 撤回。
    选读走**决策事件**（研究库），可回溯、可撤回，不改字级基线表。 */
 const cand = ref(null);
@@ -396,7 +396,7 @@ async function understand() {
   }
 }
 
-/* 实体身份判定（2026-10-09 新增，对齐竞品 `cilyutanwei` 的 exact→ambiguous→unavailable 三态）：
+/* 实体身份判定（2026-10-09 新增，exact→ambiguous→unavailable 三态）：
    命中为 0 且填了词牌/词人时，问一次 /api/identify —— 若库里**没有完全同名**，把候选如实提示出来。
    三态里只有 exact 不提示（名字本身是对的，命中 0 是别的条件太严，不该误导用户改名）。
    判定失败**静默**：它只是提示，绝不能因为提示失败而影响检索本身。 */
@@ -486,7 +486,7 @@ async function showDetail(pid) {
   detailHtml.value = `<span class="bad">没有这一篇：${UI.esc(pid)}</span>`;
 }
 
-/* ── 字位候选 + 人工选读（2026-10-10 竞品对照）──
+/* ── 字位候选 + 人工选读（2026-10-10）──
    坐标口径：`data-li` = 第几句（0 起）、`data-pos` = 该句第几个**汉字**（跳过标点），
    与后端 `/api/pronounce/candidates` 的 line/pos **同口径**（引擎与裁定共用一份坐标）。 */
 async function onCharClick(ev) {
@@ -583,7 +583,7 @@ function exportCsv() {
   UI.toast(`已导出 ${csvScope.value} ${nRows} 篇（含条件摘要）`);
 }
 
-/* 分析级 JSON 导出（2026-10-09 新增，对齐竞品 `cilyutanwei` 的 analysis JSON 导出）。
+/* 分析级 JSON 导出（2026-10-09 新增）。
    与 CSV 的分工：CSV 给人看（带 BOM、表格友好）；JSON 给**脚本/二次分析**用（键值明确、
    不带 BOM——带 BOM 会让 `json.load` / `JSON.parse` 直接报错，见 core/ui.js 的 downloadJson）。
    口径不变：数字仍全部来自引擎，本函数只负责「打包 + 标注口径」。 */
@@ -825,7 +825,7 @@ onMounted(() => {
       <p class="dim">（点<b>任一汉字</b>可查看它的读音候选并人工选读——选读会写进研究库的
         决策事件，可撤回，绝不改动字级基线表）</p>
 
-      <!-- 字位候选 + 人工选读（竞品「逐字研读」的对应能力，2026-10-10） -->
+      <!-- 字位候选 + 人工选读（2026-10-10） -->
       <div v-if="cand" class="pv-cand">
         <h3>字位 {{ cand.line + 1 }} 句 · 第 {{ cand.pos + 1 }} 字「{{ cand.char }}」
           <small class="dim">基线平仄 {{ cand.base_pz || '—' }}（普通话口径）</small></h3>
@@ -900,7 +900,7 @@ onMounted(() => {
 .pv-form { margin-top: 6px; }
 .pv-hint { margin: 10px 0 0; }
 .pv-sorthint { margin: 0 0 6px; }
-/* 字位候选面板（竞品「逐字研读」对应能力，2026-10-10） */
+/* 字位候选面板（2026-10-10） */
 .pv-cand { border-top: 1px solid var(--bd, #ddd); margin-top: 10px; padding-top: 8px; }
 .pv-cand h3 { margin: 4px 0; }
 .pv-cand h4 { margin: 10px 0 4px; font-size: 14px; }

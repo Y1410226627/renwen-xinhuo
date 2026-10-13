@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS import_rows (
   UNIQUE(file, row_key)                         -- ★ 幂等的落点：同一文件同一行只存一次
 );
 
--- ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions 设计）：
+-- ★ 2026-10-13 新增：论证稿实体 + 修订链。
 --   **可编辑论证稿 + 修订链**。旧实现里论证草稿只是一段随答案返回的文本，**不是实体**，
 --   既不能编辑、也不能留版本、更不能导出。这里把它落成实体：一篇稿 = 一行 draft，
 --   每次编辑**追加**一条 revision（旧版永不覆盖），与「材料/事实/版本链」同一纪律。
@@ -393,7 +393,7 @@ def record_decision(conn, kind, subject, action, payload=None, basis='', why='',
     """写一条**决策事件**：「谁 / 何时 / 对什么 / 做了什么 / 依据 / 为什么」。
 
     · `actor` 至少记录来源类别（`human` 人工 / `import` 导入 / `derived` 派生），
-      与竞品「硬编码 local_researcher」区分——来源是**可核对的字段**，不是装饰；
+      与「硬编码 local_researcher」的做法区分——来源是**可核对的字段**，不是装饰；
     · 撤回也是一个动作（`action='withdraw'`，`prev_id` 指向被撤回的决策），
       **撤回本身留痕**（功能 8 验收：决策事件可完整回溯，含撤回本身）。
     """
@@ -1305,7 +1305,7 @@ def rollback_import_batch(conn, batch_id, why='', actor='human', client_token=No
 
 
 # ---------------------------------------------------------------- 论证稿（2026-10-13 新增）
-# 吸收 cilyutanwei 的 `argument_revisions`：论证稿是**实体**（可编辑、留修订链、可导出），
+# 论证稿是**实体**（可编辑、留修订链、可导出），
 # 不是「随答案返回的一段文本」。与材料/事实/版本链同一纪律：**追加，不覆盖**。
 ARG_ORIGINS = ('answer_organized', 'user_edited')
 _ARG_MAX_CLAIMS = 12
@@ -1329,17 +1329,27 @@ def _arg_norm(data):
         claim = str(c.get('claim') or '').strip()
         if not claim:
             raise ValueError('claims[%d] 缺少 claim' % i)
+        bridge = str(c.get('bridge') or '').strip()
+        # ⚠ 2026-10-13：与 `gen.parse_argument` 的纪律**保持一致**——bridge（形式→解释的桥梁）
+        #   是硬要求。此前 `_arg_norm` 只查 claim，于是**经 API 直接写入**（前端编辑保存）
+        #   的稿可以没有桥梁，绕过了生成侧的校验。这里补上，两条入口同一条纪律。
+        if not bridge:
+            raise ValueError('claims[%d] 缺少 bridge（形式→解释的桥梁，必填）' % i)
+        ass = (str(c.get('assessment') or 'insufficient').strip().lower()
+               if str(c.get('assessment') or '').strip().lower() in
+               ('supported', 'mixed', 'insufficient', 'unresolved')
+               else 'insufficient')
+        gaps = [str(x).strip()[:400] for x in (c.get('gaps') or [])
+                if str(x).strip()][:_ARG_MAX_LIST]
+        if ass in ('insufficient', 'unresolved') and not gaps:
+            raise ValueError('claims[%d] assessment=%s 时 gaps 不得为空' % (i, ass))
         claims.append({
             'claim': claim[:1200],
-            'bridge': str(c.get('bridge') or '').strip()[:1200],
-            'assessment': (str(c.get('assessment') or 'insufficient').strip().lower()
-                           if str(c.get('assessment') or '').strip().lower() in
-                           ('supported', 'mixed', 'insufficient', 'unresolved')
-                           else 'insufficient'),
+            'bridge': bridge[:1200],
+            'assessment': ass,
             'alternatives': [str(x).strip()[:400] for x in (c.get('alternatives') or [])
                              if str(x).strip()][:_ARG_MAX_LIST],
-            'gaps': [str(x).strip()[:400] for x in (c.get('gaps') or [])
-                     if str(x).strip()][:_ARG_MAX_LIST],
+            'gaps': gaps,
             'evidence': [str(x).strip()[:32] for x in (c.get('evidence') or [])
                          if str(x).strip()][:_ARG_MAX_LIST],
         })

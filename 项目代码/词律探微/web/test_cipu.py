@@ -233,7 +233,7 @@ def main():
        '%d vs %d' % (sum(t['n_forms'] for t in cov['tunes']), cov['n_forms']))
     ok('D9 每个词牌体数与 forms_of 一致',
        all(t['n_forms'] == len(C.forms_of(t['tune'])) for t in cov['tunes']))
-    ok('D9 逐词牌带上游标称体数（对照竞品转写源）',
+    ok('D9 逐词牌带上游标称体数（对照上游转写源）',
        all(isinstance(t['upstream_raw_forms'], int) for t in cov['tunes'])
        and cov['n_upstream_forms'] > 0,
        'upstream=%s ours=%s' % (cov['n_upstream_forms'], cov['n_forms']))

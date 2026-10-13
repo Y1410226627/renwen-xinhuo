@@ -146,7 +146,9 @@ export const api = {
   /* 冻结快照（功能 1）：列表 / 回查（回查**原文返回、不重算**，附「依赖已陈旧」标注）。 */
   snapshots: (n) => getJson('/api/snapshots', { n }),
   snapshot: (id) => getJson('/api/snapshots/' + encodeURIComponent(id)),
-  /* ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions）：论证稿读接口。 */
+  /* ★ 2026-10-13 新增：声律双口径对照（评测口径 vs 广韵历史口径）。 */
+  tonePolicy: (pid) => getJson('/api/tone_policy', { pid }),
+  /* ★ 2026-10-13 新增：论证稿读接口。 */
   arguments: (all) => getJson('/api/arguments', all ? { all: '1' } : {}),
   argument: (id, revision) => getJson('/api/arguments/' + encodeURIComponent(id),
     revision ? { revision } : {}),

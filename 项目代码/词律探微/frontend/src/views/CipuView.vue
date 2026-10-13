@@ -82,7 +82,7 @@
       <h3>② 谱书体式 <small class="dim">（谱库共 {{ tuneCount }} 个词牌；当前作品词牌：{{ res.cipai }}）</small></h3>
       <p v-if="res.status !== 'ok'" class="cp-err">该词牌未在谱库中（可换一篇，或看下方候选）。</p>
       <template v-else>
-        <!-- ★ 2026-10-10（竞品图2 对齐）：体式分「句数相合 / 其它」两组，各带来源头；
+        <!-- ★ 2026-10-10（对齐参考图 2）：体式分「句数相合 / 其它」两组，各带来源头；
              体的唯一标识用 **form_key**（谱书|体号）——`form` 会跨谱书撞号。 -->
         <h4 v-if="formsMatched.length" class="dim">匹配的词谱（句数相合）</h4>
         <div class="cp-forms">
@@ -132,7 +132,7 @@
       <div v-for="row in rows" :key="row.line" class="cp-line">
         <div class="cp-no">第 {{ row.line + 1 }} 句<span v-if="row.ending_label" class="tag">{{ row.ending_label }}</span>
           <small class="dim">例：{{ row.example || '—' }}</small></div>
-        <!-- ★ 2026-10-10（竞品图2 对齐）：**逐字竖排三行**——原字 / 谱书规范 / 作品实际，
+        <!-- ★ 2026-10-10（对齐参考图 2）：**逐字竖排三行**——原字 / 谱书规范 / 作品实际，
              每列一字上下对齐；实际行与规范不符的字标红。 -->
         <div class="cp-grid">
           <div v-for="c in row.cells" :key="c.pos" class="cp-col">
@@ -160,9 +160,9 @@
 </template>
 
 <script setup>
-/* CipuView.vue —— **词谱对照**（2026-10-10 竞品对照实现）。
+/* CipuView.vue —— **词谱对照**（2026-10-10）。
  *
- * 与竞品「词谱比较」对齐的三件事，我们做得更实的三处：
+ * 与通行「词谱比较」交互对齐的三件事，我们做得更实的三处：
  *   ① 逐字三分账（对/异/中）由后端 `cipu.compare` **一次算清**（引擎与谱书同一份预计算 pz），
  *      前端只做着色、不重算——不存在"显示与计算两套"；
  *   ② 体式可切换（`form` 参数），并给出**自动选中理由**（`form_why`）与**来源头**（header）；
@@ -207,7 +207,7 @@ function isHttpUrl(u) {
   if (!u) { return false; }
   return /^https?:\/\//i.test(String(u).trim());
 }
-/* 体式分组：句数与作品相合的排前（竞品「匹配的词谱 / 其它词谱」） */
+/* 体式分组：句数与作品相合的排前（「匹配的词谱 / 其它词谱」） */
 const formsMatched = computed(() => {
   const n = res.value && res.value.summary ? res.value.summary.n_lines_poem : null;
   return (n == null) ? [] : forms.value.filter(f => f.n_lines === n);
@@ -238,7 +238,7 @@ async function loadTunes() {
 }
 loadTunes();
 
-/* ★ 2026-10-11（P2-4）：谱库覆盖范围——逐词牌对照上游（竞品转写源），明写「未核原书」。
+/* ★ 2026-10-11（P2-4）：谱库覆盖范围——逐词牌对照上游转写源，明写「未核原书」。
  *   离线（file:）不请求；失败只记录、不阻断词谱对照主链。 */
 const cov = ref(null);
 const covErr = ref('');

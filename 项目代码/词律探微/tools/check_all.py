@@ -9,15 +9,16 @@
 「改完忘了验就提交」的缺口。
 
 本脚本把**关键门禁**收成一个入口，分两档：
-  · `--fast`（约 10–20 秒）：语法 + 交付答案 SHA256 零回归 + selftest。
+  · `--fast`（约 10–20 秒）：交付答案 SHA256 零回归 + selftest。
     ——**pre-commit 钩子与「改完随手验」用这一档**。
-  · 默认（全档，约 2–4 分钟）：fast 全部 + test_api + check-core + verify_1000。
+  · 默认（全档，约 3–6 分钟）：fast 全部 + **双集零回归（regress）** + test_api
+    + check-core + verify_1000。
     ——**提交前 / 答辩前 / CI 用这一档**。
 
 设计红线（与项目纪律一致）
 --------------------------
-1. **不重复造轮子**：每一档都只是**调用**既有脚本（selftest / test_api / check-core /
-   verify_1000），不重写任何判据——单一来源口径。
+1. **不重复造轮子**：每一档都只是**调用**既有脚本（regress / selftest / test_api /
+   check-core / verify_1000），不重写任何判据——单一来源口径。
 2. **失败即停**（默认）：任一门禁非零退出 → 立即停并打印**失败要点**（尾部若干行），
    不把「没跑」伪装成「通过」。
 3. **零回归锚点内建**：交付答案 `answers_700.jsonl` 的 SHA256 必须等于
@@ -104,6 +105,72 @@ def gate_sha256(py):
     return ('交付答案 SHA256 零回归', _run)
 
 
+def gate_regress(py):
+    """门禁 · **双集零回归**（regress.py；期望哈希**只从 golden_sha.json 读一处**）。
+
+    ⚠ 2026-10-13 补（真缺口）：此前统一门禁只校验 `answers_700.jsonl` 的 SHA256，
+    **没有跑双集回归**——公开集哈希一致，只说明「 engines 对公开 700 题没变」，
+    **不等于** 300 题保密集也没变（两个是独立哈希）。
+    现在按 skill 的「门禁四件套」口径补齐：**公开 + 第二套都跑，都逐字节一致才算过**。
+    题库不在项目内 → 定位不到时**显式 SKIP**（不算通过，也不误报失败）。
+    """
+    def _qbase():
+        env = os.environ.get('LVC_QUESTIONS_DIR')
+        cands = []
+        if env:
+            cands.append(env)
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cands += [
+            os.path.join(here, '..', '..', '数据', '初赛数据',
+                         '薪火人文-清词-1000题库-V5版本'),
+            os.path.join(here, '..', '..', '数据', '初赛数据'),
+        ]
+        for c in cands:
+            if os.path.isdir(c):
+                return c
+        return None
+
+    def _expect(tag):
+        try:
+            import json as _json
+            with open(os.path.join(ROOT, 'solve', 'data', 'golden_sha.json'),
+                      encoding='utf-8') as f:
+                return (_json.load(f) or {}).get(tag)
+        except Exception:                                      # noqa: BLE001
+            return None
+
+    def _run():
+        base = _qbase()
+        if base is None:
+            return 'SKIP', '未找到题库目录（设 LVC_QUESTIONS_DIR 指向题库版本目录）', None
+        pub_q = os.path.join(base, '公开测试集_700题.jsonl')
+        sec_q = os.path.join(base, '保密验证集_300题_题面.jsonl')
+        sec_g = os.path.join(base, '保密验证集_300题_答案.jsonl')
+        if not os.path.exists(pub_q):
+            return 'SKIP', '题库目录下没有公开测试集_700题.jsonl', None
+        runs = [(pub_q, pub_q, '公开', _expect('公开'))]
+        if os.path.exists(sec_q) and os.path.exists(sec_g):
+            runs.append((sec_q, sec_g, '第二套', _expect('第二套')))
+        else:
+            return 'SKIP', '缺保密验证集题面/答案（第二套回归无法执行）', None
+        problems, briefs = [], []
+        for q, g, tag, exp in runs:
+            args = [py, 'tools/regress.py', '--questions', q]
+            if g:
+                args += ['--gold', g]
+            if exp:
+                args += ['--expect', exp]
+            args += ['--tag', tag, '--sample', '120']
+            status, brief, detail = _cmd(args, tail=8)()
+            briefs.append('%s:%s' % (tag, brief[:40]))
+            if status != 'PASS':
+                problems.append('[%s] %s' % (tag, brief))
+        if problems:
+            return 'FAIL', '；'.join(problems)[:200], None
+        return 'PASS', '｜'.join(briefs), None
+    return ('双集零回归（regress 公开+第二套）', _run)
+
+
 def gate_selftest(py):
     """门禁 B：程序化断言自检（selftest.py）。"""
     return ('自检（selftest.py）', _cmd([py, 'solve/selftest.py'], tail=6))
@@ -161,6 +228,9 @@ def build_gates(py, node, fast):
     """按档位组装门禁列表（顺序：最快的、最能挡住低级错误的排前面）。"""
     gates = [gate_sha256(py), gate_selftest(py)]
     if not fast:
+        # ★ 2026-10-13：双集回归提到最前——它比 SHA256 更强（不只比哈希，
+        #   还做「确定性 + 复算一致率 + 泛化抽样 + 引文原样性」），且覆盖第二套。
+        gates.insert(1, gate_regress(py))
         gates.append(gate_test_api(py))
         gates.append(gate_check_core(node))
         gates.append(gate_verify_1000(py))
@@ -172,7 +242,8 @@ def main():
     ap.add_argument('--fast', action='store_true',
                     help='快速档：语法类 + SHA256 + selftest（pre-commit 用；约 10–20 秒）')
     ap.add_argument('--only', default=None,
-                    help='只跑指定门禁（逗号分隔：sha256,selftest,test_api,check_core,verify_1000）')
+                    help='只跑指定门禁（逗号分隔：sha256,selftest,regress,test_api,'
+                         'check_core,verify_1000）')
     ap.add_argument('--python', default=None, help='指定解释器（默认自动挑）')
     ap.add_argument('--list', action='store_true', help='只列出将要跑的门禁，不执行')
     args = ap.parse_args()
@@ -183,8 +254,8 @@ def main():
     gates = build_gates(py, node, args.fast)
     if args.only:
         want = {s.strip() for s in args.only.split(',') if s.strip()}
-        keymap = {'sha256': '交付答案', 'selftest': '自检', 'test_api': '服务端',
-                  'check_core': '逻辑层', 'verify_1000': '1000 题'}
+        keymap = {'sha256': '交付答案', 'selftest': '自检', 'regress': '双集零回归',
+                  'test_api': '服务端', 'check_core': '逻辑层', 'verify_1000': '1000 题'}
         gates = [g for g in gates
                  if any(k in g[0] for kk, k in keymap.items() if kk in want)]
 

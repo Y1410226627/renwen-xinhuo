@@ -1,7 +1,6 @@
 # AGENTS.md —— 接手入口（先读什么、再读什么）
 
 > 本文件给**下一位接手者**（人或 AI 协作者）一条**最短理解路径**。
-> borrowed from 朋友的 `cilyutanwei/AGENTS.md`（我们的入口原先散在 README 与审查报告里）。
 > **一句话**：本项目把清代词作的声律做成**可复算的数字**，用检索端**证据与原文**，
 > 大模型只负责**说得通顺**——每处数字都要能被引擎追认。
 > **一句口令**：**数字归引擎、文料归检索、说法归生成、出处归引用。**
@@ -118,15 +117,18 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 
 ## 三、改完先跑什么（门禁四件套 + 快照）
 
-> **★ 一键入口（最常用）**：`python tools/check_all.py --fast`（10–20 秒）／全档 `python tools/check_all.py`（2–4 分钟）。
-> 后者跑齐：交付答案 SHA256 + `selftest` + `test_api` + `check-core` + `verify_1000`。
+> **★ 一键入口（最常用）**：`python tools/check_all.py --fast`（10–20 秒）／全档 `python tools/check_all.py`（3–6 分钟）。
+> 全档跑齐：交付答案 SHA256 + **双集零回归（regress）** + `selftest` + `test_api` + `check-core` + `verify_1000`。
 > 失败**即停**，缺环境**显式 SKIP**（不算通过）。`--list` 只看要跑哪些，`--only` 只跑指定门禁。
+> ★ **2026-10-13 补**：双集回归（`--only regress`，约 14 秒）进全档——此前只校 `answers_700` 的
+> SHA256，**300 题保密集没有进统一门禁**，零回归只防了一半；现在公开 + 第二套**都逐字节一致才算过**。
 
 | 命令 | 管什么 |
 | --- | --- |
 | `python tools/check_all.py [--fast]` | **★ 统一门禁入口**（推荐；见上） |
-| `python solve/selftest.py` | 结构/安全/说法层自检（当前 **270 项 0 失败**） |
-| `python tools/regress.py --questions <题面> --gold <答案> --tag 公开` | **双集零回归**（逐字节哈希；公开 `BF863368…`、第二套 `ACEF8B15…`） |
+| `python solve/selftest.py` | 结构/安全/说法层自检（当前 **294 项 0 失败**） |
+| `python tools/regress.py --questions <题面> --gold <答案> --tag 公开` | **双集零回归**（逐字节哈希；公开 `BF863368…`、第二套 `ACEF8B15…`）——全档已内置，也可单独 `--only regress` |
+| `python solve/tone_policy.py --pid <pid>` | **声律双口径对照**（评测口径 vs 《广韵》历史口径；逐字位四态，见 `GLOSSARY` 第六节） |
 | `python tools/verify_1000.py` | **逐题复核：答非所问 + 准确性**（条件理解一致性 + 形态 + 真值） |
 | `python tools/loop_check.py` | N 遍自检 + 代码树冻结 |
 | `python tools/snapshot_answers.py --snapshot <answers.jsonl> --tag <标签>` | 答案产物**版本留痕**（可 bisect 定位回归） |
@@ -140,7 +142,7 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 | `node web/test_render.js` | 逐篇渲染（**26,742 篇 / 522,242 项**） |
 | `node web/verify_views.js --n 3000` | 前端 JS ↔ Python 引擎逐字段（**43,459 项**） |
 | `node web/test_ui.js` | 前端功能（含检索标尺、页面审计、**147 项**） |
-| `python web/test_api.py` | 服务端接口（**171 项**） |
+| `python web/test_api.py` | 服务端接口（**176 项**） |
 | `python web/test_e2e.py` | **端到端回归集**（真实问句 + 失败场景 + 多轮上下文 + 流式，**37 项**；会话/快照/研究库全隔离，可重复跑） |
 
 > 构建顺序：**先 `node frontend/tools/build-all.mjs`（Vite 出页面 → Python 出数据）**，
