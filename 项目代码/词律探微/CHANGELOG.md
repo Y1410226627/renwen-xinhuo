@@ -13,6 +13,33 @@
 
 ## [未发布]
 
+### 吸收 cilyutanwei 长处的改造（2026-10-13 · 零回归）
+
+> 背景：与队友（`witch-00/cilyutanwei`）融合前通读其全部源码。她**已读过我们的项目**并写了
+> `功能三参考仓库实现阅读-20261010.md`，其中两条批评属实，本轮逐条吸收。**只改问答层，交付链零改动。**
+> 详见 `DECISIONS.md` **D55**。
+
+- **新增 · 结构化论证稿**（`solve/gen.py`）：`argument=True` 时先试**结构化 JSON 论证稿**
+  （`thesis / claims[{claim, bridge, assessment, alternatives, gaps, evidence}] / limitations`），
+  逐项校验：`bridge` **必填**（形式→解释的桥梁）、`assessment` ∈
+  `supported|mixed|insufficient|unresolved`、`insufficient/unresolved` 必须给 `gaps`、
+  `[E#]` 必须真实存在。**任一不过即整稿丢弃**，回落既有散文四层草稿（逐字未改）→ 再不过回落模板。
+  新增 `parse_argument` / `render_argument` / `produce_argument`；CLI `gen.py --argument --show-struct`。
+  ★ **`narrate` 路径完全不受影响**。
+- **新增 · 数字可追溯性审计**（`solve/guard.py` `audit_number_traceability`）：
+  逐行把每个数字分级为 `cited`（可追到本行 `[E#]`，强）/ `global`（仅凭全库合法值，**弱**）/
+  `allowed` / `none`，并列出只拿到 `global` 级的行。**`check_numbers` 判定完全不变**（纯附加）。
+  —— 直接回应对方批评「数字出现 ≠ 支持当前论断」。
+- **修复 · 相似问答静默降级成错误答案**（`solve/similar_ask.py`）：向量无返回时旧行为回落主链 →
+  把「与《X》类似的词」**当成「定位 X」**答（实测嵌入端点瞬时不可达时复现）。
+  现改为**接管并如实说明「语义检索当前未返回结果」**（列可能原因 + 建议改结构化条件），**不答非所问**。
+- **自检**：`solve/selftest.py` **270 → 278 项**（新增结构化论证 6 项 + 审计分级 1 项 + 相似问答诚实分支 1 项）；
+  相似问答两项改为**环境感知**（不再因嵌入端点瞬时不可达而误报 FAIL）。
+- **文档**：`GLOSSARY.md` 新增「五、论证与判断的分层」（主张/桥梁/评估态/替代解释/缺证/数字可追溯性，
+  含 `_Avoid_` 禁忌）；`DECISIONS.md` 新增 **D55**。
+- **零回归铁证**：`answers_700.jsonl` SHA256 `bf863368…` 逐字节不变；`selftest` **278/0**。
+- **未做（如实记录）**：可编辑论证稿的**持久化与修订链**（对方的 `argument_revisions`）未做，属研究库层表结构变更。
+
 ### 工程机制（2026-10-11）
 
 为「以后方便修改 / 优化 / 维护」补五个缺口（不重建已有体系）：

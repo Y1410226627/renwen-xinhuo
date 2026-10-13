@@ -1,0 +1,16 @@
+# Git LFS：仅对「大文件 + 必须随仓库分发」的资产生效
+# 口径：能从别处重建的一律不入仓（见 .gitignore）；必须入仓的大文件走 LFS
+
+data/corpus.db filter=lfs diff=lfs merge=lfs -text
+data/vector/*.index filter=lfs diff=lfs merge=lfs -text
+data/vector/*.npy filter=lfs diff=lfs merge=lfs -text
+data/vector/*_meta.jsonl filter=lfs diff=lfs merge=lfs -text
+
+# 文本文件统一换行策略（跨平台协作）
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.bat  text eol=crlf

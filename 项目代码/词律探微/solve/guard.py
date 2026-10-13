@@ -247,6 +247,64 @@ def check_numbers(answer_text, blocks, allow=()):
     return (not problems), problems
 
 
+def audit_number_traceability(answer_text, blocks, allow=()):
+    """数字**可追溯性审计**（吸收 cilyutanwei 对「数字出现 ≠ 支持当前论断」的批评）。
+
+    与 `check_numbers` 的分工（**两者互补，不改彼此判定**）：
+      · `check_numbers` 是**门禁**——判「放不放行」；其放行集合含「全库合法值」，
+        所以**数字出现不等于它支持当前这句话**（这正是对方指出的软肋）；
+      · 本函数是**审计**——逐行判定每个数字的**来源等级**，纯附加信息，**不拦不放过**。
+
+    来源等级（自弱到强）：
+      · `none`    无任何出处（`check_numbers` 已会判 FAIL）；
+      · `allowed` 来自查询条件 / pid 等**非论断性**来源（用户自己给的阈值、可点回的定位串）；
+      · `global`  仅凭「全库证据块合法值」放行（**弱**——可能出自另一篇/另一字段，需人工复核）；
+      · `cited`   可追到**本行 [E#] 引用块**的字段（**强**——数字确实来自被引证据）。
+
+    返回 `{'total','cited','global','allowed','none','loose':[行摘要…]}`；
+    `loose` 列出「有数字却只拿到 global 级出处」的行，供人工/模型自问「它真支持这句吗」。
+    """
+    per_block = {b['eid']: evidence.numbers_of(b) for b in blocks}
+    global_ok = evidence.all_numbers_phrase(blocks, extra=[len(blocks)])
+    extra = set()
+    for v in allow:
+        extra.add(str(v))
+        try:
+            extra.add('%.1f' % float(v))
+        except (TypeError, ValueError):
+            pass
+    stat = {'total': 0, 'cited': 0, 'global': 0, 'allowed': 0, 'none': 0, 'loose': []}
+    for raw_line in answer_text.splitlines():
+        line = EID_RE.sub(' ', raw_line)
+        cited = {'E' + m for m in EID_RE.findall(raw_line)}
+        line_cited, line_global, line_allowed, line_none = 0, 0, 0, 0
+        for m in NUM_RE.finditer(line):
+            tok = m.group(0)
+            stat['total'] += 1
+            cands = {tok}
+            try:
+                f = float(tok)
+                cands |= {'%.1f' % f, str(int(f)) if f == int(f) else '%.1f' % f}
+            except ValueError:
+                pass
+            cited_hit = any(cands & per_block.get(e, set()) for e in cited) if cited else False
+            if cited_hit:
+                stat['cited'] += 1
+                line_cited += 1
+            elif cands & extra:
+                stat['allowed'] += 1
+                line_allowed += 1
+            elif cands & global_ok:
+                stat['global'] += 1
+                line_global += 1
+            else:
+                stat['none'] += 1
+                line_none += 1
+        if line_global and not line_cited and not line_none:
+            stat['loose'].append(raw_line.strip()[:60])
+    return stat
+
+
 def _isnum(x):
     try:
         float(x)

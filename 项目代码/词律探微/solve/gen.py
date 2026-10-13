@@ -15,6 +15,7 @@
     python solve/gen.py --db data/corpus.db --question "清 临江仙 仄声比例高于45%" --argument
 """
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -81,6 +82,228 @@ TASK_READ_PARTS = (
     '请判断其中**哪些是对上述词作或声律数据的真问题**，基于材料逐一回应；'
     '无法回应的部分略过即可；若全部都无法回应，只输出：NO_READ'
 )
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 结构化论证（2026-10-13 吸收 cilyutanwei 的 Claim 结构 + 输出契约）
+# --------------------------------------------------------------------------------
+# 由来：对方在 docs/功能三参考仓库实现阅读-20261010.md 中指出我们的「论证辅助」
+#   ① 「本质是切换任务提示，生成短篇四层草稿」——**没有独立可编辑的论证稿实体**；
+#   ② 「数字曾出现，不等于它支持当前句子的具体论断」——护栏的软肋。
+# 吸收：把论证从「一段散文」升级为**结构化 JSON**，并对每条分论点强制要求
+#   · bridge（从形式到解释的**桥梁**——防止把形式事实直接说成情感结论）；
+#   · assessment（评估态四值——**明说自己有多确信**）；
+#   · alternatives（替代解释）与 gaps（缺证）——**承认不确定性**。
+# 纪律不变：仍只依据 FACTS；仍过四道护栏；**结构校验或护栏任一不过即整段丢弃**，
+#   调用方回落既有模板。本模块默认路径（narrate）**逐字未改**，故对既有行为零影响。
+# ════════════════════════════════════════════════════════════════════════════════
+
+# 评估态四值（吸收对方的 assessment 枚举）：支持 / 混合 / 证据不足 / 未决
+ASSESSMENTS = ('supported', 'mixed', 'insufficient', 'unresolved')
+
+ARGUMENT_SYSTEM = (
+    '你是「词律探微」的**论证层**：把给定事实（FACTS）组织成**结构化论证稿**。\n'
+    '硬规则（违反任何一条，稿件都会被程序丢弃）：\n'
+    '1) 只能使用 FACTS 里出现过的数字，**一个都不许自己算、四舍五入或补充**；\n'
+    '2) 引用篇目必须写 [E1]、[E2] 这样的标记，且**只能引用 FACTS 里给出的编号**；\n'
+    '3) 要引词句时，必须**逐字照抄** FACTS 中「原文：」后面的整句，用中文引号「」括起；\n'
+    '4) 不得引入 FACTS 之外的任何史实、生平、版本或他人评价；不得判断优劣、推测作者心理；\n'
+    '5) **每一条分论点都必须写 bridge（桥梁）**：说明「这个形式事实」为什么能推出「这个判断」'
+    '——**不得把形式事实直接当成情感结论**（如不得由「仄声比例高」直接说「情感悲壮」）；\n'
+    '6) assessment 只能取四个值之一：\n'
+    '   · supported    证据直接支持该主张；\n'
+    '   · mixed        部分支持、部分相悖；\n'
+    '   · insufficient 证据不足（**此时 gaps 必须非空**）；\n'
+    '   · unresolved   现有材料无法判定（**此时 gaps 必须非空**）。\n'
+    '7) alternatives 列出**替代解释**（至少在想当然的单一解释之外，给一种别的读法）；\n'
+    '8) gaps 列出**缺什么证据**才能让这个主张更可靠；\n'
+    '9) 只输出一个 JSON 对象，**不要 Markdown 代码围栏、不要多余文字**。\n'
+)
+TASK_ARGUMENT_JSON = (
+    '请输出如下 JSON（字段名不可改）：\n'
+    '{"thesis":"总论点（一句话，限定在声律形式层面）",'
+    '"claims":[{"claim":"分论点","bridge":"从形式事实到该判断的桥梁",'
+    '"assessment":"supported|mixed|insufficient|unresolved",'
+    '"alternatives":["替代解释…"],"gaps":["缺证…"],"evidence":["E1","E2"]}],'
+    '"limitations":["本系统只提供形式层证据…"]}\n'
+    'claims 给 1—4 条；evidence 只填 FACTS 里真实存在的 [E#] 编号。'
+)
+
+_ARG_MAX_CLAIMS = 6
+_ARG_MAX_ALT = 5
+_ARG_MAX_GAPS = 5
+_ARG_MAX_LIMITS = 6
+_ARG_TEXT_CAP = 1200
+
+
+def _s(v):
+    """把任意值安全转成去空白字符串（非字符串一律空串）。"""
+    return v.strip() if isinstance(v, str) else ''
+
+
+def _slist(v, cap):
+    """把任意值转成「非空字符串」列表（最多 cap 条）。"""
+    if not isinstance(v, list):
+        return []
+    out = []
+    for x in v:
+        t = _s(x)
+        if t:
+            out.append(t[:400])
+        if len(out) >= cap:
+            break
+    return out
+
+
+def parse_argument(raw, blocks):
+    """解析并**校验**模型返回的结构化论证稿。返回 `(结构 or None, 问题列表)`。
+
+    校验规则（吸收对方 `validate_answer` 的逐项思路，落到论证稿）：
+      1) 必须是 JSON 对象，且 `thesis` 非空；
+      2) `claims` 为 1—`_ARG_MAX_CLAIMS` 条；
+      3) 每条 `claim`、`bridge` 非空——**bridge 是硬要求**（形式→解释的桥梁）；
+      4) `assessment` ∈ `ASSESSMENTS`；
+      5) `assessment ∈ {insufficient, unresolved}` → `gaps` 非空；
+      6) `evidence` 里每个 [E#] 都必须**真实存在**于本轮 blocks；
+      7) `limitations` 至少一条。
+    **任一条不过即返回 None**，调用方回落（绝不把不合格结构当成结果）。
+    """
+    problems = []
+    txt = (raw or '').strip()
+    # 容忍模型偶尔套 Markdown 代码围栏
+    if txt.startswith('```'):
+        txt = re.sub(r'^```[a-zA-Z]*\s*', '', txt)
+        txt = re.sub(r'\s*```$', '', txt).strip()
+    try:
+        data = json.loads(txt)
+    except (ValueError, TypeError):
+        return None, ['论证稿不是合法 JSON']
+    if not isinstance(data, dict):
+        return None, ['论证稿顶层不是 JSON 对象']
+
+    thesis = _s(data.get('thesis'))
+    if not thesis:
+        problems.append('缺少 thesis（总论点）')
+
+    raw_claims = data.get('claims')
+    if not isinstance(raw_claims, list) or not raw_claims:
+        problems.append('claims 必须是非空数组')
+        raw_claims = []
+    if len(raw_claims) > _ARG_MAX_CLAIMS:
+        raw_claims = raw_claims[:_ARG_MAX_CLAIMS]
+
+    valid_eids = {b['eid'] for b in (blocks or [])}
+    claims = []
+    for i, c in enumerate(raw_claims):
+        if not isinstance(c, dict):
+            problems.append('claims[%d] 不是对象' % i)
+            continue
+        claim = _s(c.get('claim'))
+        bridge = _s(c.get('bridge'))
+        ass = _s(c.get('assessment')).lower()
+        alts = _slist(c.get('alternatives'), _ARG_MAX_ALT)
+        gaps = _slist(c.get('gaps'), _ARG_MAX_GAPS)
+        ev = _slist(c.get('evidence'), 8)
+        if not claim:
+            problems.append('claims[%d] 缺少 claim' % i)
+            continue
+        if not bridge:
+            problems.append('claims[%d] 缺少 bridge（形式→解释的桥梁，硬要求）' % i)
+        if ass not in ASSESSMENTS:
+            problems.append('claims[%d] assessment 非法（%s）' % (i, ass or '空'))
+            ass = 'insufficient'
+        if ass in ('insufficient', 'unresolved') and not gaps:
+            problems.append('claims[%d] assessment=%s 时 gaps 不得为空' % (i, ass))
+        # 证据编号存在性（吸收对方「锚点必须真实存在」）
+        eids = []
+        for e in ev:
+            e_norm = e if e.startswith('E') else ('E' + e.lstrip('Ee'))
+            if e_norm not in valid_eids:
+                problems.append('claims[%d] 引用了不存在的证据 %s' % (i, e))
+            else:
+                eids.append(e_norm)
+        claims.append({'claim': claim[:_ARG_TEXT_CAP], 'bridge': bridge[:_ARG_TEXT_CAP],
+                       'assessment': ass, 'alternatives': alts, 'gaps': gaps,
+                       'evidence': eids})
+
+    limitations = _slist(data.get('limitations'), _ARG_MAX_LIMITS)
+    if not limitations:
+        problems.append('缺少 limitations（局限声明，至少一条）')
+
+    if problems:
+        return None, problems
+    return {'thesis': thesis[:_ARG_TEXT_CAP], 'claims': claims,
+            'limitations': limitations}, []
+
+
+_ASSESS_CN = {'supported': '支持', 'mixed': '部分支持',
+              'insufficient': '证据不足', 'unresolved': '未决'}
+
+
+def render_argument(struct):
+    """把结构化论证稿渲染成**人话文本**（供既有文本消费方与网页展示）。"""
+    out = ['【论证辅助草稿（结构化 · 已过护栏）】', '主张：%s' % struct['thesis']]
+    for i, c in enumerate(struct['claims'], 1):
+        out.append('')
+        out.append('分论点 %d：%s' % (i, c['claim']))
+        out.append('  · 桥梁：%s' % c['bridge'])
+        out.append('  · 评估：%s（%s）' % (c['assessment'], _ASSESS_CN.get(c['assessment'], c['assessment'])))
+        if c['evidence']:
+            out.append('  · 证据：%s' % '、'.join('[%s]' % e for e in c['evidence']))
+        if c['alternatives']:
+            out.append('  · 替代解释：%s' % '；'.join(c['alternatives']))
+        if c['gaps']:
+            out.append('  · 缺证：%s' % '；'.join(c['gaps']))
+    if struct['limitations']:
+        out.append('')
+        out.append('局限：%s' % '；'.join(struct['limitations']))
+    return '\n'.join(out)
+
+
+def produce_argument(llm, res, kind, boundary, max_tokens=900, temperature=0.2,
+                     on_delta=None):
+    """生成**结构化论证稿**（吸收对方 Claim 结构）。失败一律 `ok=False`，调用方回落。
+
+    返回体比 `produce()` 多两个字段：
+      · `struct`：结构化论证稿（ok=True 时非 None）；
+      · `trace` ：`guard.audit_number_traceability()` 的数字可追溯性审计。
+    """
+    model = getattr(llm, 'name', None) or '未知模型'
+    if not (llm and llm.available()):
+        return {'ok': False, 'model': model, 'text': '', 'raw': '', 'struct': None,
+                'trace': None, 'problems': ['大模型不可用（无密钥或未联网），回落到模板作答']}
+    user = ('【问句】%s\n【查询理解】%s\n【问句类型】%s\n【FACTS】\n%s\n【任务】%s'
+            % (res.get('question', ''), res.get('spec', ''), kind, facts(res),
+               TASK_ARGUMENT_JSON))
+    kw = {'temperature': temperature, 'max_tokens': max_tokens}
+    if on_delta is not None:
+        kw['on_delta'] = on_delta
+    raw = llm.chat([{'role': 'system', 'content': ARGUMENT_SYSTEM},
+                    {'role': 'user', 'content': user}], **kw)
+    if not raw:
+        return {'ok': False, 'model': model, 'text': '', 'raw': '', 'struct': None,
+                'trace': None,
+                'problems': ['大模型无返回：%s' % (getattr(llm, 'last_error', '') or '未知原因')]}
+    struct, probs = parse_argument(raw, res.get('blocks') or [])
+    if struct is None:
+        return {'ok': False, 'model': model, 'text': '', 'raw': raw.strip(),
+                'struct': None, 'trace': None,
+                'problems': ['论证稿结构校验未通过：' + '；'.join(probs[:4])]}
+    text = render_argument(struct)
+    # 护栏：结构化稿仍须过四道（数字/引文/边界），并附数字可追溯性审计
+    check_body = text + ('\n【推断边界｜%s问句】%s' % (kind, boundary))
+    problems = []
+    sf = safety.check(text, 'out')
+    if not sf['ok']:
+        problems.append('生成文本命中内容安全规则（%s）' % sf['category'])
+    ok_g, gprobs = guard.verify(check_body, res.get('blocks') or [], boundary_kind=kind,
+                                allow=_allow(res))
+    if not ok_g:
+        problems += gprobs[:4]
+    trace = guard.audit_number_traceability(text, res.get('blocks') or [], allow=_allow(res))
+    ok = (not problems) and ok_g
+    return {'ok': ok, 'model': model, 'text': text if ok else '', 'raw': text,
+            'struct': struct if ok else None, 'trace': trace, 'problems': problems}
 
 
 def read_content(llm, res, kind, boundary, parts=None, content_full=False,
@@ -185,7 +408,34 @@ def _allow(res):
 
 def produce(llm, res, kind, boundary, argument=False, max_tokens=700, temperature=0.2,
             on_delta=None):
-    """生成「说法层」文本并过护栏。返回 dict（ok=False 时调用方必须回落到模板）。"""
+    """生成「说法层」文本并过护栏。返回 dict（ok=False 时调用方必须回落到模板）。
+
+    ⭐ 2026-10-13：`argument=True` 时**先试结构化论证稿**（`produce_argument`，吸收
+    cilyutanwei 的 Claim 结构）；结构或护栏不过，**回落既有散文四层草稿**（`_produce_plain`，
+    逐字未改）；仍不过才由调用方回落模板。**narrate 路径完全不受影响**。
+    """
+    if argument:
+        r = produce_argument(llm, res, kind, boundary, temperature=temperature,
+                             on_delta=on_delta)
+        if r.get('ok'):
+            return r
+        fb = _produce_plain(llm, res, kind, boundary, argument=True,
+                            max_tokens=max_tokens, temperature=temperature,
+                            on_delta=on_delta)
+        fb.setdefault('struct', None)
+        fb.setdefault('trace', None)
+        fb['struct_fallback'] = r.get('problems') or []
+        if not fb.get('ok'):
+            fb['problems'] = (r.get('problems') or []) + (fb.get('problems') or [])
+        return fb
+    return _produce_plain(llm, res, kind, boundary, argument=False,
+                          max_tokens=max_tokens, temperature=temperature,
+                          on_delta=on_delta)
+
+
+def _produce_plain(llm, res, kind, boundary, argument=False, max_tokens=700, temperature=0.2,
+                   on_delta=None):
+    """既有散文说法层（叙述 / 四层论证草稿）。返回 dict（ok=False 时调用方必须回落到模板）。"""
     model = getattr(llm, 'name', None) or '未知模型'
     if not (llm and llm.available()):
         return {'ok': False, 'model': model, 'text': '', 'raw': '',
@@ -225,6 +475,8 @@ def main():
     ap.add_argument('--question', required=True)
     ap.add_argument('--topk', type=int, default=3)
     ap.add_argument('--argument', action='store_true')
+    ap.add_argument('--show-struct', action='store_true',
+                    help='打印结构化论证稿（JSON）与数字可追溯性审计')
     ap.add_argument('--provider', default=None)
     args = ap.parse_args()
     import ask as ASK
