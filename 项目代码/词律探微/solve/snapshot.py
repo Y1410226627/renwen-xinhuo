@@ -121,7 +121,12 @@ def capture(out, question, result_pids, spec=None, sid=None, turn_no=None, conn=
         'verify': _jsonable(out.get('verify')),
         'set_check': _jsonable(out.get('set_check')),
         'understanding_status': out.get('understanding_status'),
-        'fingerprint': fingerprint(conn),
+        # ★ 2026-10-13：除口径三项外，再记「研究库」「向量索引」两项指纹——
+        #   供 `dependency_state()` 逐项比对（旧快照无这两项 → 记 unknown，不误判「未陈旧」）。
+        'fingerprint': dict(fingerprint(conn),
+                            research=_file_fp(os.path.join(_ROOT, 'data', 'research.db')),
+                            vector=_read_sha16(os.path.join(_ROOT, 'data', 'vector',
+                                                            'manifest.json'))),
     }
     sid_id = 'snap-%s-%s' % (time.strftime('%Y%m%d-%H%M%S'), uuid.uuid4().hex[:6])
     snap['snapshot_id'] = sid_id
@@ -202,4 +207,73 @@ def load(snapshot_id):
                               '另有指纹取不到：%s——**无法确认是否陈旧**，按「可能已陈旧」处理'
                               '（不敢把「不知道」说成「未陈旧」）。'
                               % '、'.join(names.get(k, k) for k in unknown))
+    # ★ 2026-10-13 新增（吸收 cilyutanwei 的 `dependency_state`）：除上面的**快照级**
+    #   粗粒度标注外，再给一份**逐依赖项**的实时状态（每项各自「快照值 / 当前值 / 变没变 / 说明」）。
+    snap['dependency_state'] = dependency_state(snap, conn=None)
     return snap
+
+
+# ---------------------------------------------------------------- 逐依赖项实时状态
+_DEP_LABELS = {
+    'corpus': '语料内容指纹',
+    'overrides': '读音标定表',
+    'golden': '答案基线',
+    'research': '研究库（摘录/事实/裁定/版本/论证）',
+    'vector': '向量索引 manifest',
+}
+
+
+def _file_fp(path):
+    """文件的 (size, mtime) 指纹（16 位十六进制）。取不到返回空串。"""
+    try:
+        st = os.stat(path)
+        return _sha16('%d|%d' % (st.st_size, int(st.st_mtime)))
+    except OSError:
+        return ''
+
+
+def dependency_state(snap, conn=None):
+    """**逐依赖项**的实时状态（吸收 cilyutanwei 的 `dependency_state`）。
+
+    与 `load()['stale']` 的分工：
+      · `stale` 是**快照级**粗标注（口径指纹三项，一句话说「陈旧了没」）；
+      · 本函数是**逐项**细状态——每一路依赖各自 `snapshot / current / changed / unknown / note`，
+        便于界面**逐条**告诉用户「是哪一路变了」。
+
+    检查的依赖项：
+      · `corpus`   语料内容指纹（与 `vector_index` 同式）；
+      · `overrides` 读音标定表 sha16；
+      · `golden`   答案基线 sha16；
+      · `research` 研究库文件 (size, mtime) 指纹——研究库是**可变**的，摘录/裁定/论证一改即变；
+      · `vector`   向量索引 `manifest.json` sha16。
+
+    **纯读取 + 报告**：绝不改写历史、绝不重算旧答案。
+    取不到当前值 → 记 `unknown=True`（**按「可能已陈旧」处理**，不把「不知道」说成「没问题」）。
+    """
+    old = (snap or {}).get('fingerprint') or {}
+    cur = fingerprint(conn)
+    cur['research'] = _file_fp(os.path.join(_ROOT, 'data', 'research.db'))
+    cur['vector'] = _read_sha16(os.path.join(_ROOT, 'data', 'vector', 'manifest.json'))
+    # 快照里的 research/vector 若无记录（旧快照），视为 unknown 而非 changed
+    items, stale = [], False
+    for key in ('corpus', 'overrides', 'golden', 'research', 'vector'):
+        c = cur.get(key)
+        o = old.get(key)
+        if c in (None, ''):
+            items.append({'key': key, 'label': _DEP_LABELS.get(key, key),
+                          'snapshot': o, 'current': None, 'changed': False, 'unknown': True,
+                          'note': '当前值取不到——**无法确认是否陈旧**，按「可能已陈旧」处理'})
+            stale = True
+            continue
+        if o in (None, ''):
+            items.append({'key': key, 'label': _DEP_LABELS.get(key, key),
+                          'snapshot': None, 'current': c, 'changed': False, 'unknown': True,
+                          'note': '本快照未记录该项——**无法比对**（多见于旧版快照）'})
+            continue
+        changed = (o != c)
+        if changed:
+            stale = True
+        items.append({'key': key, 'label': _DEP_LABELS.get(key, key),
+                      'snapshot': o, 'current': c, 'changed': changed, 'unknown': False,
+                      'note': ('该依赖在本快照之后发生了变化' if changed else '与本快照一致')})
+    return {'stale': stale, 'items': items}

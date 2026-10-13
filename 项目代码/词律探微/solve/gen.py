@@ -101,6 +101,122 @@ TASK_READ_PARTS = (
 # 评估态四值（吸收对方的 assessment 枚举）：支持 / 混合 / 证据不足 / 未决
 ASSESSMENTS = ('supported', 'mixed', 'insufficient', 'unresolved')
 
+# ════════════════════════════════════════════════════════════════════════════════
+# 输出失败码（2026-10-13 吸收 cilyutanwei 的 `OUTPUT_FAILURE_CODES`）
+# --------------------------------------------------------------------------------
+# 她那边有约 30 个固定失败码，把「模型输出为什么被拒」变成**机器可判、可统计、可回查**的枚举，
+# 而不是一句自由文本。我们此前只回 `problems`（人话列表），无法聚合诊断。
+# 这里补齐同一层：`problems` 仍是人话（界面用），`codes` 是枚举（审计/统计用）。
+# ════════════════════════════════════════════════════════════════════════════════
+FAILURE_CODES = frozenset({
+    # —— 结构化解析 ——
+    'output_not_json',          # 不是合法 JSON
+    'output_not_object',        # 顶层不是 JSON 对象
+    'missing_thesis',           # 缺总论点
+    'missing_claims',           # claims 缺失或为空
+    'too_many_claims',          # 分论点超上限
+    'claim_not_object',         # 分论点不是对象
+    'missing_claim',            # 分论点缺 claim
+    'missing_bridge',           # 缺桥梁（形式→解释）
+    'invalid_assessment',       # 评估态不在四值内
+    'gaps_required',            # 证据不足/未决却未给缺证
+    'unknown_evidence_anchor',  # 引用了不存在的 [E#]
+    'missing_limitations',      # 缺局限声明
+    # —— 护栏 ——
+    'unsafe_content',           # 内容安全规则命中
+    'number_without_source',    # 数字无出处
+    'citation_not_verbatim',    # 引文未逐字落地
+    'boundary_missing',         # 缺类型化边界声明
+    'unsupported_claim',        # 无据认账
+    # —— 运行时 ——
+    'model_unavailable',        # 无密钥 / 未联网
+    'generation_incomplete',    # 模型无返回 / 截断
+    'output_validation',        # 兜底（未归类的校验失败）
+})
+
+# `problems` 文案 → 失败码 的归类规则（按关键词，最长匹配优先）
+_PROBLEM_CODE_RULES = (
+    ('不是合法 JSON', 'output_not_json'),
+    ('顶层不是 JSON 对象', 'output_not_object'),
+    ('缺少 thesis', 'missing_thesis'),
+    ('claims 必须是非空数组', 'missing_claims'),
+    ('不是对象', 'claim_not_object'),
+    ('缺少 claim', 'missing_claim'),
+    ('缺少 bridge', 'missing_bridge'),
+    ('assessment 非法', 'invalid_assessment'),
+    ('gaps 不得为空', 'gaps_required'),
+    ('引用了不存在的证据', 'unknown_evidence_anchor'),
+    ('缺少 limitations', 'missing_limitations'),
+    ('内容安全规则', 'unsafe_content'),
+    ('数字无出处', 'number_without_source'),
+    ('引文', 'citation_not_verbatim'),
+    ('边界', 'boundary_missing'),
+    ('中文数字无出处', 'number_without_source'),
+    ('比例与证据块数字不自洽', 'number_without_source'),
+    ('大模型不可用', 'model_unavailable'),
+    ('大模型无返回', 'generation_incomplete'),
+)
+
+
+def classify_failures(problems):
+    """把人话 `problems` 归类成**失败码**（去重、保序）。未归类者记 `output_validation`。"""
+    codes = []
+    for p in (problems or []):
+        hit = None
+        for kw, code in _PROBLEM_CODE_RULES:
+            if kw in p:
+                hit = code
+                break
+        code = hit or 'output_validation'
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 锚点机制（2026-10-13 吸收 cilyutanwei 的 `@facts` / `@evidence`）
+# --------------------------------------------------------------------------------
+# 她那边让模型**不逐字复述固定内容**（易出错），只写锚点 `@facts` / `@evidence`，
+# 由**程序**把冻结的事实/证据填回去——「模型转述出错」这一类问题从根上消失。
+# 我们这里补同一机制：正文里出现锚点即被替换为程序冻结的内容，并记录替换了哪些。
+# ════════════════════════════════════════════════════════════════════════════════
+ANCHOR_FACTS = '@facts'
+ANCHOR_EVIDENCE = '@evidence'
+
+
+def _evidence_text(res):
+    """把证据块渲染成**程序冻结**的清单（锚点 `@evidence` 展开用）。"""
+    out = []
+    for b in (res.get('blocks') or []):
+        out.append('[%s] %s·%s《%s》：%d 句 / %d 字，平 %d、仄 %d，仄声比例 %s%%，声情 %s'
+                   % (b['eid'], b.get('dynasty') or '', b.get('author') or '',
+                      b.get('title') or b.get('cipai') or '', b.get('sent_n') or 0,
+                      b.get('han_len') or 0, b.get('ping') or 0, b.get('ze') or 0,
+                      _num(b.get('ze_ratio')), b.get('scene') or '—'))
+        for L in (b.get('lines') or []):
+            out.append('    [%s] 第 %d 句 原文：%s' % (b['eid'], L.get('seq', L['idx'] + 1),
+                                                     L['text']))
+    return '\n'.join(out) if out else '（本轮没有召回到任何篇目）'
+
+
+def expand_anchors(text, res):
+    """把正文里的 `@facts` / `@evidence` 锚点**展开为程序冻结的内容**。
+
+    返回 `(展开后的文本, 展开了哪些锚点)`。**没有任何锚点时原样返回**（逐字节不变）。
+    —— 这是「模型只写锚点、程序填内容」的落点：模型不可能把事实写错，因为它根本没写。
+    """
+    if not text:
+        return text, []
+    used = []
+    if ANCHOR_FACTS in text:
+        text = text.replace(ANCHOR_FACTS, facts(res))
+        used.append('facts')
+    if ANCHOR_EVIDENCE in text:
+        text = text.replace(ANCHOR_EVIDENCE, _evidence_text(res))
+        used.append('evidence')
+    return text, used
+
+
 ARGUMENT_SYSTEM = (
     '你是「词律探微」的**论证层**：把给定事实（FACTS）组织成**结构化论证稿**。\n'
     '硬规则（违反任何一条，稿件都会被程序丢弃）：\n'
@@ -155,8 +271,8 @@ def _slist(v, cap):
     return out
 
 
-def parse_argument(raw, blocks):
-    """解析并**校验**模型返回的结构化论证稿。返回 `(结构 or None, 问题列表)`。
+def parse_argument_ex(raw, blocks):
+    """解析并**校验**模型返回的结构化论证稿。返回 `(结构 or None, 问题列表, 失败码列表)`。
 
     校验规则（吸收对方 `validate_answer` 的逐项思路，落到论证稿）：
       1) 必须是 JSON 对象，且 `thesis` 非空；
@@ -167,6 +283,7 @@ def parse_argument(raw, blocks):
       6) `evidence` 里每个 [E#] 都必须**真实存在**于本轮 blocks；
       7) `limitations` 至少一条。
     **任一条不过即返回 None**，调用方回落（绝不把不合格结构当成结果）。
+    `codes` 为 `FAILURE_CODES` 里的枚举（机器可判、可统计），`problems` 仍是人话（界面用）。
     """
     problems = []
     txt = (raw or '').strip()
@@ -177,9 +294,9 @@ def parse_argument(raw, blocks):
     try:
         data = json.loads(txt)
     except (ValueError, TypeError):
-        return None, ['论证稿不是合法 JSON']
+        return None, ['论证稿不是合法 JSON'], ['output_not_json']
     if not isinstance(data, dict):
-        return None, ['论证稿顶层不是 JSON 对象']
+        return None, ['论证稿顶层不是 JSON 对象'], ['output_not_object']
 
     thesis = _s(data.get('thesis'))
     if not thesis:
@@ -231,9 +348,15 @@ def parse_argument(raw, blocks):
         problems.append('缺少 limitations（局限声明，至少一条）')
 
     if problems:
-        return None, problems
+        return None, problems, classify_failures(problems)
     return {'thesis': thesis[:_ARG_TEXT_CAP], 'claims': claims,
-            'limitations': limitations}, []
+            'limitations': limitations}, [], []
+
+
+def parse_argument(raw, blocks):
+    """`parse_argument_ex` 的**向后兼容**包装（只回 `(结构, 问题列表)`）。"""
+    struct, problems, _codes = parse_argument_ex(raw, blocks)
+    return struct, problems
 
 
 _ASSESS_CN = {'supported': '支持', 'mixed': '部分支持',
@@ -271,7 +394,8 @@ def produce_argument(llm, res, kind, boundary, max_tokens=900, temperature=0.2,
     model = getattr(llm, 'name', None) or '未知模型'
     if not (llm and llm.available()):
         return {'ok': False, 'model': model, 'text': '', 'raw': '', 'struct': None,
-                'trace': None, 'problems': ['大模型不可用（无密钥或未联网），回落到模板作答']}
+                'trace': None, 'codes': ['model_unavailable'],
+                'problems': ['大模型不可用（无密钥或未联网），回落到模板作答']}
     user = ('【问句】%s\n【查询理解】%s\n【问句类型】%s\n【FACTS】\n%s\n【任务】%s'
             % (res.get('question', ''), res.get('spec', ''), kind, facts(res),
                TASK_ARGUMENT_JSON))
@@ -282,14 +406,16 @@ def produce_argument(llm, res, kind, boundary, max_tokens=900, temperature=0.2,
                     {'role': 'user', 'content': user}], **kw)
     if not raw:
         return {'ok': False, 'model': model, 'text': '', 'raw': '', 'struct': None,
-                'trace': None,
+                'trace': None, 'codes': ['generation_incomplete'],
                 'problems': ['大模型无返回：%s' % (getattr(llm, 'last_error', '') or '未知原因')]}
-    struct, probs = parse_argument(raw, res.get('blocks') or [])
+    struct, probs, codes = parse_argument_ex(raw, res.get('blocks') or [])
     if struct is None:
         return {'ok': False, 'model': model, 'text': '', 'raw': raw.strip(),
-                'struct': None, 'trace': None,
+                'struct': None, 'trace': None, 'codes': codes,
                 'problems': ['论证稿结构校验未通过：' + '；'.join(probs[:4])]}
     text = render_argument(struct)
+    # 锚点展开（吸收对方 @facts/@evidence）：模型只写锚点，**程序**把冻结内容填回
+    text, anchors = expand_anchors(text, res)
     # 护栏：结构化稿仍须过四道（数字/引文/边界），并附数字可追溯性审计
     check_body = text + ('\n【推断边界｜%s问句】%s' % (kind, boundary))
     problems = []
@@ -303,7 +429,9 @@ def produce_argument(llm, res, kind, boundary, max_tokens=900, temperature=0.2,
     trace = guard.audit_number_traceability(text, res.get('blocks') or [], allow=_allow(res))
     ok = (not problems) and ok_g
     return {'ok': ok, 'model': model, 'text': text if ok else '', 'raw': text,
-            'struct': struct if ok else None, 'trace': trace, 'problems': problems}
+            'struct': struct if ok else None, 'trace': trace,
+            'codes': classify_failures(problems), 'anchors': anchors,
+            'problems': problems}
 
 
 def read_content(llm, res, kind, boundary, parts=None, content_full=False,
@@ -336,6 +464,7 @@ def read_content(llm, res, kind, boundary, parts=None, content_full=False,
                     {'role': 'user', 'content': user}], **kw)
     if not raw:
         return {'ok': False, 'model': model, 'text': '', 'raw': '',
+                'codes': ['generation_incomplete'],
                 'problems': ['大模型无返回：%s' % (getattr(llm, 'last_error', '') or '未知原因')]}
     txt = raw.strip()
     if 'NO_READ' in txt[:40]:
@@ -351,7 +480,8 @@ def read_content(llm, res, kind, boundary, parts=None, content_full=False,
     if not ok_g:
         problems += probs[:4]
     ok = (not problems) and ok_g
-    return {'ok': ok, 'model': model, 'text': txt, 'raw': txt, 'problems': problems}
+    return {'ok': ok, 'model': model, 'text': txt, 'raw': txt,
+            'codes': classify_failures(problems), 'problems': problems}
 
 
 def _num(x, fmt='%.1f'):
@@ -427,6 +557,7 @@ def produce(llm, res, kind, boundary, argument=False, max_tokens=700, temperatur
         fb['struct_fallback'] = r.get('problems') or []
         if not fb.get('ok'):
             fb['problems'] = (r.get('problems') or []) + (fb.get('problems') or [])
+            fb['codes'] = list(dict.fromkeys((r.get('codes') or []) + (fb.get('codes') or [])))
         return fb
     return _produce_plain(llm, res, kind, boundary, argument=False,
                           max_tokens=max_tokens, temperature=temperature,
@@ -439,6 +570,7 @@ def _produce_plain(llm, res, kind, boundary, argument=False, max_tokens=700, tem
     model = getattr(llm, 'name', None) or '未知模型'
     if not (llm and llm.available()):
         return {'ok': False, 'model': model, 'text': '', 'raw': '',
+                'codes': ['model_unavailable'],
                 'problems': ['大模型不可用（无密钥或未联网），回落到模板作答']}
     user = ('【问句】%s\n【查询理解】%s\n【问句类型】%s\n【FACTS】\n%s\n【任务】%s'
             % (res.get('question', ''), res.get('spec', ''), kind, facts(res),
@@ -450,6 +582,7 @@ def _produce_plain(llm, res, kind, boundary, argument=False, max_tokens=700, tem
                    **kw)
     if not raw:
         return {'ok': False, 'model': model, 'text': '', 'raw': '',
+                'codes': ['generation_incomplete'],
                 'problems': ['大模型无返回：%s' % (getattr(llm, 'last_error', '') or '未知原因')]}
     # ⚠ 2026-10-04 修（代码审查 P2-13）：护栏④（类型化边界）要求叙述文本自身**含边界声明**，
     #   所以校验用的文本要补一行；但**返回给调用方的 text 不能再带这一行**——
@@ -466,7 +599,7 @@ def _produce_plain(llm, res, kind, boundary, argument=False, max_tokens=700, tem
         problems += probs[:4]
     ok = (not problems) and ok_g
     return {'ok': ok, 'model': model, 'text': raw.strip(), 'raw': raw.strip(),
-            'problems': problems}
+            'codes': classify_failures(problems), 'problems': problems}
 
 
 def main():

@@ -1414,6 +1414,32 @@ def q_research_write(path, data):
         return RSRCH.rollback_import_batch(
             conn, data.get('batch_id'), why=str(data.get('why') or ''),
             actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    # ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions）：**论证稿**写接口。
+    #   与材料/事实/版本链同一纪律：新建=一篇稿，编辑=**追加修订**（旧版永不覆盖），撤回=标记。
+    if path == '/api/arguments':
+        d = data.get('data')
+        if not isinstance(d, dict):
+            raise ValueError('data 为必填（论证稿 JSON：{thesis, claims[], limitations[]}）')
+        return RSRCH.add_argument(
+            conn, d, snapshot_id=str(data.get('snapshot_id') or '') or None,
+            question=str(data.get('question') or ''), title=str(data.get('title') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
+    if path == '/api/arguments/revisions':
+        if data.get('draft_id') is None or data.get('expected_revision') is None:
+            raise ValueError('draft_id 与 expected_revision 为必填（乐观锁）')
+        d = data.get('data')
+        if not isinstance(d, dict):
+            raise ValueError('data 为必填（论证稿 JSON）')
+        return RSRCH.revise_argument(
+            conn, data.get('draft_id'), d, data.get('expected_revision'),
+            note=str(data.get('note') or ''), actor=str(data.get('actor') or 'human'),
+            client_token=data.get('client_token'))
+    if path == '/api/arguments/withdraw':
+        if data.get('draft_id') is None:
+            raise ValueError('draft_id 为必填')
+        return RSRCH.withdraw_argument(
+            conn, data.get('draft_id'), why=str(data.get('why') or ''),
+            actor=str(data.get('actor') or 'human'), client_token=data.get('client_token'))
     raise LookupError('未知写接口：%s' % path)
 
 
@@ -2118,6 +2144,44 @@ class H(BaseHTTPRequestHandler):
                                      material_id=_num(g('material_id'), int),
                                      include_withdrawn=g('all') == '1')
                     if _rc is not None else [])})
+            # ★ 2026-10-13 新增：论证稿读接口（列表 / 单篇 / 导出 md|docx）。
+            if u.path == '/api/arguments':
+                _rc = _ro_or_none()
+                return self._send({'ok': True, 'result': (
+                    RSRCH.list_arguments(_rc, include_withdrawn=g('all') == '1')
+                    if _rc is not None else [])})
+            if u.path.startswith('/api/arguments/'):
+                _parts = [x for x in u.path[len('/api/arguments/'):].split('/') if x]
+                if not _parts:
+                    return self._send(_err('BAD_PARAM', 'draft_id 为必填'), code=400)
+                try:
+                    _did = int(_parts[0])
+                except ValueError:
+                    return self._send(_err('BAD_PARAM', 'draft_id 必须是整数'), code=400)
+                _rc = _ro_or_none()
+                if _rc is None:
+                    return self._send(_err('NOT_FOUND', '研究库不存在'), code=404)
+                _rev = _num(g('revision'), int)
+                _row = RSRCH.get_argument(_rc, _did, _rev)
+                if _row is None:
+                    return self._send(_err('NOT_FOUND', '论证稿 %s 不存在' % _did), code=404)
+                if len(_parts) >= 2 and _parts[1] == 'export':
+                    # 导出：md 回文本，docx 回 base64（前端解码下载；避免二进制管线）。
+                    _data = _row['revision']['data']
+                    _title = _row['draft'].get('title') or ('论证稿%d' % _did)
+                    _meta = {'来源问句': _row['draft'].get('question') or '（无）',
+                             '修订号': _row['revision']['revision'],
+                             '整理时间': _row['revision']['created_at']}
+                    if (g('format') or 'md').lower() == 'docx':
+                        import base64 as _b64
+                        _blob = RSRCH.render_argument_docx(_data, title=_title, meta=_meta)
+                        return self._send({'ok': True, 'result': {
+                            'filename': '%s.docx' % _title,
+                            'base64': _b64.b64encode(_blob).decode('ascii')}})
+                    return self._send({'ok': True, 'result': {
+                        'filename': '%s.md' % _title,
+                        'text': RSRCH.render_argument_md(_data, title=_title, meta=_meta)}})
+                return self._send({'ok': True, 'result': _row})
             if u.path == '/api/research/summary':
                 # 研究库概况（各表行数）。★ M13：库不存在时给**空账**，不为读而建库。
                 _rc = _ro_or_none()

@@ -13,6 +13,32 @@
 
 ## [未发布]
 
+### 吸收 cilyutanwei 长处 · 第二批：补全六项（2026-10-13 · 零回归）
+
+> 用户要求「**她有的我们都要有**」。第一批（D55）只做了两项，本轮把余下六项**逐项补齐**。详见 `DECISIONS.md` **D56**。
+
+- **新增 · 可编辑论证稿 + 修订链**（`solve/research.py` 新表 `argument_drafts` / `argument_revisions`）：
+  新建（一篇稿）→ 编辑（**追加**修订，乐观锁）→ 撤回（标记，行保留）→ **版本链**（旧版永不覆盖）；
+  **Markdown / Word 导出**（Word 为**手写最小 OOXML**，纯标准库 zipfile，5 个 part，中文与码点不丢）；
+  每次动作写**决策事件**（`kind='argument'`）。配套 **4 个写接口 + 3 个读接口**（`web/serve.py`）
+  与**研究库第 8 分区「论证稿」**（`ResearchView.vue`：列表 / 查看 / 编辑 / 导出 / 撤回）。
+- **新增 · 锚点机制**（`solve/gen.py` `expand_anchors`）：正文写 `@facts` / `@evidence`，
+  由**程序**把冻结的事实/证据填回——模型不逐字复述固定内容，**转述出错**从根上消失。
+  **无锚点时逐字节不变**。
+- **新增 · 输出失败码**（`solve/gen.py` `FAILURE_CODES` **20 个** + `classify_failures`）：
+  `problems` 仍是人话（界面用），`codes` 是**机器可判的枚举**（审计/统计用）；说法层各返回体均带 `codes`。
+- **新增 · 逐依赖项实时状态**（`solve/snapshot.py` `dependency_state`）：除快照级 `stale` 外，
+  再给 **corpus / overrides / golden / research / vector** 五项的「快照值 / 当前值 / 变没变 / 说明」；
+  `capture()` 起同时记录 research+vector 指纹。取不到当前值 → `unknown`（**按可能已陈旧处理**）。
+- **核实 · CSV 公式注入防护**：`frontend/src/core/ui.js` 的 `csvCell()` **早已**对
+  `^[=+@]` / `^\t\r` / `^-[^0-9.]` 前缀加 `'`（与对方的 `safe_cell` 同法）。本轮**只核实、未改动**。
+- **文档 · 核验深度分层**：`GLOSSARY.md` 新增「六、核验深度分层」（转录一致 / 来源准入 / 底本校勘 /
+  语境裁定 / 单篇年代 / 四层分离，逐条 `_Avoid_`）。
+- **自检**：`solve/selftest.py` **278 → 290 项**；`web/test_api.py` **171 → 175 项**。
+- **零回归铁证**：`answers_700.jsonl` SHA256 `bf863368…` 逐字节不变；
+  `check-core` 213,972/0 · `ssr-smoke` 31/0 · `check-types` 0 错误 · `test_render` 522,242/0 ·
+  `verify_views` 43,459/0 · `test_ui` 147/0。
+
 ### 吸收 cilyutanwei 长处的改造（2026-10-13 · 零回归）
 
 > 背景：与队友（`witch-00/cilyutanwei`）融合前通读其全部源码。她**已读过我们的项目**并写了

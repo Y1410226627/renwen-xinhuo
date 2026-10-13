@@ -177,6 +177,36 @@ CREATE TABLE IF NOT EXISTS import_rows (
   work_ref INTEGER,                             -- 落到 personal_works.id（回滚据此连带撤下）
   UNIQUE(file, row_key)                         -- ★ 幂等的落点：同一文件同一行只存一次
 );
+
+-- ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions 设计）：
+--   **可编辑论证稿 + 修订链**。旧实现里论证草稿只是一段随答案返回的文本，**不是实体**，
+--   既不能编辑、也不能留版本、更不能导出。这里把它落成实体：一篇稿 = 一行 draft，
+--   每次编辑**追加**一条 revision（旧版永不覆盖），与「材料/事实/版本链」同一纪律。
+CREATE TABLE IF NOT EXISTS argument_drafts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at   TEXT NOT NULL,
+  origin       TEXT NOT NULL DEFAULT 'answer_organized',  -- answer_organized / user_edited
+  snapshot_id  TEXT,                                       -- 来源快照 id（可空；从快照整理时填）
+  question     TEXT,                                       -- 来源问句（人可读）
+  title        TEXT,                                       -- 稿题（人给或从问句生成）
+  withdrawn    INTEGER NOT NULL DEFAULT 0,                 -- 删除=撤回标记（行保留）
+  withdrawn_at TEXT,
+  withdrawn_why TEXT
+);
+
+CREATE TABLE IF NOT EXISTS argument_revisions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  draft_id   INTEGER NOT NULL,
+  revision   INTEGER NOT NULL,                  -- 从 1 起递增
+  parent_id  INTEGER,                           -- 父修订；首版为 NULL，成链
+  created_at TEXT NOT NULL,
+  actor      TEXT NOT NULL DEFAULT 'human',
+  data       TEXT NOT NULL,                     -- JSON：{thesis, claims[], limitations[], note}
+  note       TEXT,
+  data_sha   TEXT NOT NULL,                     -- 该修订内容的哈希（对账/去重）
+  UNIQUE(draft_id, revision)
+);
+CREATE INDEX IF NOT EXISTS ix_argrev_draft ON argument_revisions(draft_id, revision);
 """
 
 
@@ -1272,6 +1302,311 @@ def rollback_import_batch(conn, batch_id, why='', actor='human', client_token=No
                 'removed_works': len(wids)}
 
     return run_idempotent(conn, client_token, 'import/rollback', fn)
+
+
+# ---------------------------------------------------------------- 论证稿（2026-10-13 新增）
+# 吸收 cilyutanwei 的 `argument_revisions`：论证稿是**实体**（可编辑、留修订链、可导出），
+# 不是「随答案返回的一段文本」。与材料/事实/版本链同一纪律：**追加，不覆盖**。
+ARG_ORIGINS = ('answer_organized', 'user_edited')
+_ARG_MAX_CLAIMS = 12
+_ARG_MAX_LIST = 8
+
+
+def _arg_norm(data):
+    """规整论证稿数据：**只保留已知字段**（防任意注入），并做长度与条数上限。"""
+    if not isinstance(data, dict):
+        raise ValueError('论证稿必须是 JSON 对象')
+    thesis = str(data.get('thesis') or '').strip()
+    if not thesis:
+        raise ValueError('论证稿缺少 thesis（总论点）')
+    claims_in = data.get('claims')
+    if not isinstance(claims_in, list) or not claims_in:
+        raise ValueError('论证稿缺少 claims（分论点，至少一条）')
+    claims = []
+    for i, c in enumerate(claims_in[:_ARG_MAX_CLAIMS]):
+        if not isinstance(c, dict):
+            raise ValueError('claims[%d] 不是对象' % i)
+        claim = str(c.get('claim') or '').strip()
+        if not claim:
+            raise ValueError('claims[%d] 缺少 claim' % i)
+        claims.append({
+            'claim': claim[:1200],
+            'bridge': str(c.get('bridge') or '').strip()[:1200],
+            'assessment': (str(c.get('assessment') or 'insufficient').strip().lower()
+                           if str(c.get('assessment') or '').strip().lower() in
+                           ('supported', 'mixed', 'insufficient', 'unresolved')
+                           else 'insufficient'),
+            'alternatives': [str(x).strip()[:400] for x in (c.get('alternatives') or [])
+                             if str(x).strip()][:_ARG_MAX_LIST],
+            'gaps': [str(x).strip()[:400] for x in (c.get('gaps') or [])
+                     if str(x).strip()][:_ARG_MAX_LIST],
+            'evidence': [str(x).strip()[:32] for x in (c.get('evidence') or [])
+                         if str(x).strip()][:_ARG_MAX_LIST],
+        })
+    limits = [str(x).strip()[:400] for x in (data.get('limitations') or [])
+              if str(x).strip()][:_ARG_MAX_LIST]
+    return {'thesis': thesis[:2000], 'claims': claims, 'limitations': limits,
+            'note': str(data.get('note') or '').strip()[:1000]}
+
+
+def _insert_arg_revision(c, draft_id, data, note, actor, parent_id):
+    """在**已有事务**里追加一条论证修订，返回 revision 号。"""
+    row = c.execute('SELECT COALESCE(MAX(revision), 0) AS r FROM argument_revisions '
+                    'WHERE draft_id=?', (draft_id,)).fetchone()
+    rev = (row['r'] if row is not None else 0) + 1
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    c.execute('INSERT INTO argument_revisions'
+              '(draft_id, revision, parent_id, created_at, actor, data, note, data_sha) '
+              'VALUES(?,?,?,?,?,?,?,?)',
+              (draft_id, rev, parent_id, _now(), actor, payload, note or '',
+               content_sha(payload)))
+    return rev
+
+
+def add_argument(conn, data, snapshot_id=None, question='', title='', actor='human',
+                 client_token=None):
+    """**新建**论证稿（通常由「把回答整理成论证」触发），返回 `{draft_id, revision}`。"""
+    norm = _arg_norm(data)
+
+    def fn(c):
+        cur = c.execute('INSERT INTO argument_drafts'
+                        '(created_at, origin, snapshot_id, question, title) VALUES(?,?,?,?,?)',
+                        (_now(), 'answer_organized', snapshot_id, (question or '')[:500],
+                         (title or '')[:200]))
+        did = cur.lastrowid
+        rev = _insert_arg_revision(c, did, norm, norm.get('note', ''), actor, None)
+        c.execute('INSERT INTO decisions(ts, actor, kind, subject, action, payload, basis, why) '
+                  'VALUES(?,?,?,?,?,?,?,?)',
+                  (_now(), actor, 'argument', str(did), 'create',
+                   json.dumps({'draft_id': did, 'revision': rev,
+                               'snapshot_id': snapshot_id}, ensure_ascii=False),
+                   '人工整理', '从回答整理为论证稿'))
+        return {'draft_id': did, 'revision': rev}
+
+    return run_idempotent(conn, client_token, 'argument/create', fn)
+
+
+def revise_argument(conn, draft_id, data, expected_revision, note='', actor='human',
+                    client_token=None):
+    """**追加**一条修订（乐观锁：`expected_revision` 不符即 409 语义的 ValueError）。"""
+    norm = _arg_norm(data)
+
+    def fn(c):
+        row = c.execute('SELECT id, withdrawn FROM argument_drafts WHERE id=?',
+                        (draft_id,)).fetchone()
+        if row is None:
+            raise KeyError('论证稿不存在：%s' % draft_id)
+        if row['withdrawn']:
+            raise ValueError('论证稿已撤回，不能修订')
+        cur = c.execute('SELECT COALESCE(MAX(revision), 0) AS r FROM argument_revisions '
+                        'WHERE draft_id=?', (draft_id,)).fetchone()
+        latest = cur['r'] if cur is not None else 0
+        if int(expected_revision) != latest:
+            raise ValueError('修订号不符（当前 %d，请求基于 %s）——请刷新后重试'
+                             % (latest, expected_revision))
+        pid = c.execute('SELECT id FROM argument_revisions WHERE draft_id=? AND revision=?',
+                        (draft_id, latest)).fetchone()
+        parent = pid['id'] if pid is not None else None
+        rev = _insert_arg_revision(c, draft_id, norm, note or norm.get('note', ''), actor, parent)
+        c.execute('INSERT INTO decisions(ts, actor, kind, subject, action, payload, basis, why) '
+                  'VALUES(?,?,?,?,?,?,?,?)',
+                  (_now(), actor, 'argument', str(draft_id), 'revise',
+                   json.dumps({'draft_id': draft_id, 'revision': rev}, ensure_ascii=False),
+                   '人工编辑', note or '编辑论证稿'))
+        return {'draft_id': draft_id, 'revision': rev}
+
+    return run_idempotent(conn, client_token, 'argument/revise', fn)
+
+
+def get_argument(conn, draft_id, revision=None):
+    """取论证稿（指定修订或**最新**修订）。返回 dict 或 None（不存在/已撤回）。"""
+    d = conn.execute('SELECT * FROM argument_drafts WHERE id=?', (draft_id,)).fetchone()
+    if d is None:
+        return None
+    dr = dict(d)
+    if dr.get('withdrawn'):
+        return None
+    if revision is None:
+        r = conn.execute('SELECT * FROM argument_revisions WHERE draft_id=? '
+                         'ORDER BY revision DESC LIMIT 1', (draft_id,)).fetchone()
+    else:
+        r = conn.execute('SELECT * FROM argument_revisions WHERE draft_id=? AND revision=?',
+                         (draft_id, revision)).fetchone()
+    if r is None:
+        return None
+    rv = dict(r)
+    try:
+        rv['data'] = json.loads(rv.get('data') or '{}')
+    except (ValueError, TypeError):
+        rv['data'] = {}
+    return {'draft': {'id': dr['id'], 'created_at': dr['created_at'], 'origin': dr['origin'],
+                      'snapshot_id': dr['snapshot_id'], 'question': dr['question'],
+                      'title': dr['title'], 'withdrawn': bool(dr['withdrawn'])},
+            'revision': {'revision': rv['revision'], 'parent_id': rv['parent_id'],
+                         'created_at': rv['created_at'], 'actor': rv['actor'],
+                         'note': rv['note'], 'data': rv['data'], 'data_sha': rv['data_sha']}}
+
+
+def list_arguments(conn, include_withdrawn=False):
+    """列论证稿（每篇附最新修订号）。"""
+    sql = ('SELECT d.id, d.created_at, d.origin, d.snapshot_id, d.question, d.title, '
+           'd.withdrawn, (SELECT MAX(revision) FROM argument_revisions r WHERE r.draft_id=d.id) '
+           'AS revision FROM argument_drafts d')
+    if not include_withdrawn:
+        sql += ' WHERE d.withdrawn=0'
+    sql += ' ORDER BY d.id DESC LIMIT 500'
+    out = []
+    for r in conn.execute(sql):
+        d = dict(r)
+        d['withdrawn'] = bool(d.get('withdrawn'))
+        out.append(d)
+    return out
+
+
+def withdraw_argument(conn, draft_id, why='', actor='human', client_token=None):
+    """撤回论证稿（**行保留**，与材料/事实/作品同一纪律）。"""
+    def fn(c):
+        row = c.execute('SELECT id FROM argument_drafts WHERE id=?', (draft_id,)).fetchone()
+        if row is None:
+            raise KeyError('论证稿不存在：%s' % draft_id)
+        c.execute('UPDATE argument_drafts SET withdrawn=1, withdrawn_at=?, withdrawn_why=? '
+                  'WHERE id=?', (_now(), why or '', draft_id))
+        c.execute('INSERT INTO decisions(ts, actor, kind, subject, action, payload, basis, why) '
+                  'VALUES(?,?,?,?,?,?,?,?)',
+                  (_now(), actor, 'argument', str(draft_id), 'withdraw',
+                   json.dumps({'draft_id': draft_id}, ensure_ascii=False), '人工撤回', why or ''))
+        return {'draft_id': draft_id, 'withdrawn': True}
+
+    return run_idempotent(conn, client_token, 'argument/withdraw', fn)
+
+
+_ASSESS_CN = {'supported': '支持', 'mixed': '部分支持',
+              'insufficient': '证据不足', 'unresolved': '未决'}
+
+
+def render_argument_md(data, title='', meta=None):
+    """把论证稿渲染成 **Markdown**（导出用；与网页展示同一份内容）。"""
+    d = _arg_norm(data)
+    lines = ['# %s' % (title or '论证稿'), '']
+    if meta:
+        for k, v in meta.items():
+            lines.append('- %s：%s' % (k, v))
+        lines.append('')
+    lines.append('**主张**：%s' % d['thesis'])
+    lines.append('')
+    for i, c in enumerate(d['claims'], 1):
+        lines.append('## 分论点 %d：%s' % (i, c['claim']))
+        lines.append('')
+        lines.append('- **桥梁**：%s' % (c['bridge'] or '（未填写）'))
+        lines.append('- **评估**：%s（%s）' % (c['assessment'], _ASSESS_CN.get(c['assessment'], '')))
+        if c['evidence']:
+            lines.append('- **证据**：%s' % '、'.join('[%s]' % e for e in c['evidence']))
+        if c['alternatives']:
+            lines.append('- **替代解释**：%s' % '；'.join(c['alternatives']))
+        if c['gaps']:
+            lines.append('- **缺证**：%s' % '；'.join(c['gaps']))
+        lines.append('')
+    if d['limitations']:
+        lines.append('## 局限')
+        lines.append('')
+        for x in d['limitations']:
+            lines.append('- %s' % x)
+        lines.append('')
+    if d.get('note'):
+        lines.append('> 备注：%s' % d['note'])
+    return '\n'.join(lines)
+
+
+def _xml_esc(s):
+    return (str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;'))
+
+
+def render_argument_docx(data, title='', meta=None):
+    """生成 **最小 OOXML** 的 `.docx` 字节（**纯标准库 zipfile**，不引第三方库）。
+
+    结构：`[Content_Types].xml` + `_rels/.rels` + `word/document.xml`
+    + `word/_rels/document.xml.rels` + `docProps/core.xml`（5 个 part）。
+    只做「标题 / 小标题 / 段落 / 项目符号」四类，够用且**不丢中文与码点**。
+    """
+    import zipfile
+    import io as _io
+    d = _arg_norm(data)
+    paras = []
+    paras.append(('Title', title or '论证稿'))
+    if meta:
+        for k, v in meta.items():
+            paras.append(('Meta', '%s：%s' % (k, v)))
+    paras.append(('H1', '主张'))
+    paras.append(('Body', d['thesis']))
+    for i, c in enumerate(d['claims'], 1):
+        paras.append(('H1', '分论点 %d：%s' % (i, c['claim'])))
+        paras.append(('Body', '桥梁：%s' % (c['bridge'] or '（未填写）')))
+        paras.append(('Body', '评估：%s（%s）' % (c['assessment'],
+                                                 _ASSESS_CN.get(c['assessment'], ''))))
+        if c['evidence']:
+            paras.append(('Body', '证据：%s' % '、'.join('[%s]' % e for e in c['evidence'])))
+        if c['alternatives']:
+            paras.append(('Body', '替代解释：%s' % '；'.join(c['alternatives'])))
+        if c['gaps']:
+            paras.append(('Body', '缺证：%s' % '；'.join(c['gaps'])))
+    if d['limitations']:
+        paras.append(('H1', '局限'))
+        for x in d['limitations']:
+            paras.append(('Bullet', x))
+    if d.get('note'):
+        paras.append(('Body', '备注：%s' % d['note']))
+
+    def _p(style, text):
+        if style == 'Title':
+            rpr = '<w:rPr><w:rFonts w:eastAsia="楷体"/><w:b/><w:sz w:val="36"/></w:rPr>'
+            ppr = '<w:pPr><w:jc w:val="center"/></w:pPr>'
+        elif style == 'H1':
+            rpr = '<w:rPr><w:rFonts w:eastAsia="楷体"/><w:b/><w:sz w:val="28"/></w:rPr>'
+            ppr = ''
+        elif style == 'Meta':
+            rpr = '<w:rPr><w:sz w:val="20"/><w:color w:val="666666"/></w:rPr>'
+            ppr = ''
+        elif style == 'Bullet':
+            rpr = '<w:rPr><w:sz w:val="24"/></w:rPr>'
+            ppr = '<w:pPr><w:ind w:left="420"/></w:pPr>'
+        else:
+            rpr = '<w:rPr><w:sz w:val="24"/></w:rPr>'
+            ppr = ''
+        return ('<w:p>%s<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r></w:p>'
+                % (ppr, rpr, _xml_esc(text)))
+
+    body = ''.join(_p(s, t) for s, t in paras)
+    document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:body>%s<w:sectPr/></w:body></w:document>' % body)
+    content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                     '<Default Extension="xml" ContentType="application/xml"/>'
+                     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+                     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+                     '</Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '</Relationships>')
+    doc_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+    core = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:title>%s</dc:title><dc:creator>词律探微</dc:creator>'
+            '</cp:coreProperties>' % _xml_esc(title or '论证稿'))
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('[Content_Types].xml', content_types)
+        z.writestr('_rels/.rels', rels)
+        z.writestr('word/document.xml', document)
+        z.writestr('word/_rels/document.xml.rels', doc_rels)
+        z.writestr('docProps/core.xml', core)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------- 只读连接（展示层专用）

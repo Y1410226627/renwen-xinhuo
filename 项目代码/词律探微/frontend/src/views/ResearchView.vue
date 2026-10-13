@@ -123,6 +123,57 @@
       </section>
 
       <!-- ③ 读音裁定 -->
+      <section v-if="tab === 'arguments'" class="rs-pane">
+        <h3>论证稿 <small class="dim">（可编辑、留修订链、可导出 Word/Markdown；每次编辑**追加**修订，旧版永不覆盖）</small></h3>
+        <button type="button" class="mini" @click="loadArgs">刷新</button>
+        <table class="rs-table">
+          <thead><tr><th>#</th><th>稿题</th><th>来源问句</th><th>修订</th><th>整理时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="a in aList" :key="a.id">
+              <td class="mono">{{ a.id }}</td>
+              <td>{{ a.title || '（未命名）' }}</td>
+              <td class="dim">{{ a.question }}</td>
+              <td class="num">{{ a.revision }}</td>
+              <td class="dim">{{ a.created_at }}</td>
+              <td>
+                <button type="button" class="mini" @click="viewArg(a.id)">查看</button>
+                <button type="button" class="mini" @click="exportArg(a.id, 'md')">Markdown</button>
+                <button type="button" class="mini" @click="exportArg(a.id, 'docx')">Word</button>
+                <button type="button" class="mini" @click="withdrawArg(a.id)">撤回</button>
+              </td>
+            </tr>
+            <tr v-if="!aList.length"><td colspan="6" class="dim">（还没有论证稿——在「声情问答」勾选「论证辅助草稿」提问后，可在此整理、编辑与导出）</td></tr>
+          </tbody>
+        </table>
+        <div v-if="aView" class="rs-detail">
+          <h4>论证稿 {{ aView.draft.id }}（修订 {{ aView.revision.revision }} · {{ aView.revision.created_at }}）</h4>
+          <p class="dim">来源问句：{{ aView.draft.question || '（无）' }}</p>
+          <label class="rs-field">主张
+            <input v-model="aEdit.thesis" type="text" />
+          </label>
+          <div v-for="(c, i) in aEdit.claims" :key="i" class="rs-claim">
+            <p class="dim">分论点 {{ i + 1 }}</p>
+            <label class="rs-field">论点 <input v-model="c.claim" type="text" /></label>
+            <label class="rs-field">桥梁（形式→解释）<input v-model="c.bridge" type="text" /></label>
+            <label class="rs-field">评估
+              <select v-model="c.assessment">
+                <option value="supported">支持</option>
+                <option value="mixed">部分支持</option>
+                <option value="insufficient">证据不足</option>
+                <option value="unresolved">未决</option>
+              </select>
+            </label>
+            <label class="rs-field">替代解释（；分隔）<input v-model="c.altText" type="text" /></label>
+            <label class="rs-field">缺证（；分隔）<input v-model="c.gapText" type="text" /></label>
+          </div>
+          <label class="rs-field">局限（；分隔）<input v-model="aEdit.limitText" type="text" /></label>
+          <p>
+            <button type="button" class="mini" @click="saveArg">保存新修订</button>
+            <button type="button" class="mini" @click="aView = null">收起</button>
+          </p>
+        </div>
+      </section>
+
       <section v-if="tab === 'pron'" class="rs-pane">
         <h3>读音裁定 <small class="dim">（选定/撤回都写决策事件；解析页与证据块按裁定修正展示）</small></h3>
         <div class="rs-row">
@@ -325,6 +376,7 @@ defineProps({
 const TABS = [
   { key: 'materials', label: '文献摘录' },
   { key: 'facts', label: '研究事实' },
+  { key: 'arguments', label: '论证稿' },
   { key: 'pron', label: '读音裁定' },
   { key: 'cipu', label: '词谱对照' },
   { key: 'works', label: '我的录入' },
@@ -628,6 +680,107 @@ function viewSnap(id) {
   })
 }
 
+/* ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions）：论证稿——列表 / 查看 /
+ *   编辑（**追加修订**、乐观锁）/ 导出（Markdown / Word）/ 撤回。
+ *   与「文献摘录」同一纪律：写操作带 `client_token` 幂等；旧修订**永不覆盖**。 */
+const aList = ref([])
+const aView = ref(null)
+const aEdit = ref({ thesis: '', claims: [], limitText: '' })
+
+function _splitSemi(s) {
+  return String(s || '').split(/[；;]/).map((x) => x.trim()).filter(Boolean)
+}
+
+async function loadArgs() {
+  if (!isOnline.value) { return }
+  try {
+    const j = await api.arguments(true)
+    aList.value = (j && j.result) || []
+  } catch (e) { flash('', e.message) }
+}
+
+async function viewArg(id) {
+  try {
+    const j = await api.argument(id)
+    const r = j && j.result
+    if (!r) { return }
+    aView.value = r
+    const d = r.revision.data || {}
+    aEdit.value = {
+      thesis: d.thesis || '',
+      limitText: (d.limitations || []).join('；'),
+      claims: (d.claims || []).map((c) => ({
+        claim: c.claim || '', bridge: c.bridge || '',
+        assessment: c.assessment || 'insufficient',
+        altText: (c.alternatives || []).join('；'),
+        gapText: (c.gaps || []).join('；'),
+        evidence: c.evidence || [],
+      })),
+    }
+  } catch (e) { flash('', e.message) }
+}
+
+async function saveArg() {
+  if (!aView.value) { return }
+  const d = {
+    thesis: aEdit.value.thesis,
+    claims: aEdit.value.claims.map((c) => ({
+      claim: c.claim, bridge: c.bridge, assessment: c.assessment,
+      alternatives: _splitSemi(c.altText), gaps: _splitSemi(c.gapText),
+      evidence: c.evidence || [],
+    })),
+    limitations: _splitSemi(aEdit.value.limitText),
+  }
+  try {
+    await post.argumentRevision({
+      draft_id: aView.value.draft.id,
+      expected_revision: aView.value.revision.revision,
+      data: d, note: '网页编辑', client_token: newToken(),
+    })
+    flash('已保存新修订', '')
+    await loadArgs()
+    await viewArg(aView.value.draft.id)
+  } catch (e) { flash('', e.message) }
+}
+
+async function withdrawArg(id) {
+  try {
+    await post.argumentWithdraw({ draft_id: id, why: '网页撤回', client_token: newToken() })
+    flash('已撤回（行保留）', '')
+    await loadArgs()
+  } catch (e) { flash('', e.message) }
+}
+
+function _blobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 4000)
+}
+
+async function exportArg(id, fmt) {
+  try {
+    const j = await api.argumentExport(id, fmt)
+    const r = j && j.result
+    if (!r) { return }
+    if (fmt === 'docx') {
+      const bin = atob(r.base64)
+      const arr = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) { arr[i] = bin.charCodeAt(i) }
+      _blobDownload(new Blob([arr], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }), r.filename)
+    } else {
+      _blobDownload(new Blob([r.text], { type: 'text/markdown;charset=utf-8' }), r.filename)
+    }
+    flash('已导出 ' + r.filename, '')
+  } catch (e) { flash('', e.message) }
+}
+
 onMounted(() => {
   if (!isOnline.value) { return }
   loadMaterials()
@@ -660,6 +813,10 @@ onMounted(() => {
 .rs-table th, .rs-table td { border-bottom: 1px solid var(--line, #d2caba); padding: 5px 8px; text-align: left; font-size: 13px; vertical-align: top; }
 .rs-table td.num, .rs-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .rs-detail { border: 1px solid var(--line, #d2caba); border-radius: 4px; padding: 10px 12px; margin: 8px 0; background: var(--panel, #fbf8f1); }
+/* ★ 2026-10-13 论证稿编辑区（scoped，只作用于本页）。 */
+.rs-field { display: block; margin: 4px 0; font-size: 13px; }
+.rs-field input, .rs-field select { width: 100%; max-width: 640px; padding: 3px 6px; font: inherit; }
+.rs-claim { border-left: 3px solid var(--accent, #a64333); padding-left: 8px; margin: 8px 0; }
 .rs-rev { border-bottom: 1px dashed var(--line, #d2caba); padding: 4px 0; }
 .rs-content { white-space: pre-wrap; margin: 4px 0; }
 .tag { display: inline-block; border: 1px solid var(--line, #d2caba); border-radius: 3px; padding: 0 6px; margin-right: 6px; font-size: 12px; }

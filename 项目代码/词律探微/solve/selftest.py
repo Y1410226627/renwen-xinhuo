@@ -909,6 +909,91 @@ def main():
     ok('相似问答：参照不存在 → 不崩且给出答案', bool(_r13c.get('answer')), _r13c.get('kind'))
     _c13c.close()
 
+    # ------------------------------------------------------------------
+    # 23) 论证稿库 / 依赖状态 / 锚点 / 失败码（2026-10-13 吸收 cilyutanwei）
+    #     对方指出我们「论证辅助没有独立可编辑的论证稿实体」；本轮把它落成**实体**并测到。
+    print('\n=== 23 论证稿库 / 依赖状态 / 锚点 / 失败码 ===')
+    import tempfile as _tf
+    import json as _json2
+    import zipfile as _zf
+    import research as _RS
+    import snapshot as _SN
+
+    _argdb = os.path.join(_tf.gettempdir(), '_selftest_arg_%d.db' % os.getpid())
+    for _suf in ('', '-wal', '-shm'):
+        try:
+            os.remove(_argdb + _suf)
+        except OSError:
+            pass
+    _ac = _RS.connect(_argdb)
+    _adata = {'thesis': '形式层偏仄',
+              'claims': [{'claim': '仄比高', 'bridge': '形式配置不直接等于情绪',
+                          'assessment': 'supported', 'evidence': ['E1']}],
+              'limitations': ['只提供形式层证据']}
+    _a1 = _RS.add_argument(_ac, _adata, snapshot_id='snap-20261013-000000-abc123',
+                           question='自检问句', title='自检稿')
+    ok('论证稿：新建返回 draft_id/revision',
+       _a1.get('draft_id') and _a1.get('revision') == 1, _a1)
+    _a2 = _RS.revise_argument(_ac, _a1['draft_id'], dict(_adata, thesis='修订主张'),
+                              expected_revision=1, note='自检编辑')
+    ok('论证稿：编辑**追加**修订（不覆盖）',
+       _a2.get('revision') == 2
+       and _RS.get_argument(_ac, _a1['draft_id'], 1)['revision']['data']['thesis'] == '形式层偏仄'
+       and _RS.get_argument(_ac, _a1['draft_id'], 2)['revision']['data']['thesis'] == '修订主张',
+       _a2)
+    _locked = False
+    try:
+        _RS.revise_argument(_ac, _a1['draft_id'], _adata, expected_revision=1)
+    except ValueError:
+        _locked = True
+    ok('论证稿：乐观锁（修订号不符即拒）', _locked)
+    _bad_arg = False
+    try:
+        _RS.add_argument(_ac, {'claims': [{'claim': 'x'}]})
+    except ValueError:
+        _bad_arg = True
+    ok('论证稿：缺 thesis 被拒', _bad_arg)
+    _md = _RS.render_argument_md(_adata, title='自检稿')
+    ok('论证稿：Markdown 渲染含「桥梁」与主张', ('桥梁' in _md) and ('形式层偏仄' in _md))
+    _docx = _RS.render_argument_docx(_adata, title='自检稿')
+    _is_zip = _docx[:2] == b'PK'
+    with _zf.ZipFile(__import__('io').BytesIO(_docx)) as _z:
+        _names = _z.namelist()
+        _doc = _z.read('word/document.xml').decode('utf-8')
+    ok('论证稿：Word 导出是合法 OOXML（5 part、中文保留）',
+       _is_zip and len(_names) == 5 and '形式层偏仄' in _doc, _names)
+    ok('论证稿：撤回后读取为 None',
+       _RS.withdraw_argument(_ac, _a1['draft_id'])['withdrawn'] is True
+       and _RS.get_argument(_ac, _a1['draft_id']) is None)
+    _ac.close()
+    for _suf in ('', '-wal', '-shm'):
+        try:
+            os.remove(_argdb + _suf)
+        except OSError:
+            pass
+
+    # 依赖状态（吸收对方的 dependency_state）：逐项细粒度，比快照级 stale 更细
+    _ds = _SN.dependency_state({'fingerprint': {'corpus': 'x', 'overrides': 'x',
+                                                'golden': 'x'}})
+    ok('依赖状态：逐项返回（corpus/overrides/golden/research/vector 五项）',
+       len(_ds['items']) == 5 and any(i['key'] == 'research' for i in _ds['items']),
+       [i['key'] for i in _ds['items']])
+
+    # 锚点（吸收对方的 @facts/@evidence）：无锚点逐字节不变
+    _t0, _u0 = _gen.expand_anchors('普通文字，无锚点。', {'blocks': [], 'spec': ''})
+    ok('锚点：无锚点时逐字节不变', _t0 == '普通文字，无锚点。' and _u0 == [], _u0)
+    _t1, _u1 = _gen.expand_anchors('事实：\n@facts', {'blocks': [], 'spec': '朝代=清'})
+    ok('锚点：@facts 展开为程序冻结内容', _u1 == ['facts'] and '【查询条件' in _t1, _u1)
+
+    # 失败码（吸收对方的 OUTPUT_FAILURE_CODES）：机器可判的枚举
+    _stx, _pbx, _cdx = _gen.parse_argument_ex('乱码', [])
+    ok('失败码：非 JSON → output_not_json', _cdx == ['output_not_json'], _cdx)
+    _stx2, _pbx2, _cdx2 = _gen.parse_argument_ex(_json2.dumps(
+        {'thesis': 'x', 'claims': [{'claim': 'y', 'assessment': 'maybe'}],
+         'limitations': ['z']}, ensure_ascii=False), [])
+    ok('失败码：缺 bridge 归入 missing_bridge',
+       'missing_bridge' in _cdx2, _cdx2)
+
     print('\n================ 自检汇总 ================')
     print('检查项 %d，失败 %d' % (N, len(FAIL)))
     if FAIL:

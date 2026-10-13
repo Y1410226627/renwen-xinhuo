@@ -146,6 +146,12 @@ export const api = {
   /* 冻结快照（功能 1）：列表 / 回查（回查**原文返回、不重算**，附「依赖已陈旧」标注）。 */
   snapshots: (n) => getJson('/api/snapshots', { n }),
   snapshot: (id) => getJson('/api/snapshots/' + encodeURIComponent(id)),
+  /* ★ 2026-10-13 新增（吸收 cilyutanwei 的 argument_revisions）：论证稿读接口。 */
+  arguments: (all) => getJson('/api/arguments', all ? { all: '1' } : {}),
+  argument: (id, revision) => getJson('/api/arguments/' + encodeURIComponent(id),
+    revision ? { revision } : {}),
+  argumentExport: (id, format) => getJson('/api/arguments/' + encodeURIComponent(id) + '/export',
+    { format: format || 'md' }),
   /* 读音裁定（功能 8）：候选。
      ★ 2026-10-11（审查·低）：删掉 9 个**零调用方**的导出
      （researchSummary / decisions / pronDecisions / cipuList / cipuCompare / intake /
@@ -251,5 +257,9 @@ export const post = {
   importBatch: (d) => postJson('/api/import', d),
   importRollback: (d) => postJson('/api/import/rollback', d),
   textVersion: (d) => postJson('/api/text_versions', d),
-  metaRevision: (d) => postJson('/api/meta_revisions', d)
+  metaRevision: (d) => postJson('/api/meta_revisions', d),
+  /* ★ 2026-10-13 新增：论证稿写接口（新建=一篇稿；编辑=**追加修订**，乐观锁）。 */
+  argument: (d) => postJson('/api/arguments', d),
+  argumentRevision: (d) => postJson('/api/arguments/revisions', d),
+  argumentWithdraw: (d) => postJson('/api/arguments/withdraw', d)
 };

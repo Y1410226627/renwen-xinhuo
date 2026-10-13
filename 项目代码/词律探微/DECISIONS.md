@@ -1694,3 +1694,38 @@ assessment 非法→拒、证据不足无 gaps→拒、引用不存在证据→�
 **交付链零改动**（`solver.py` 不导入 `ask`/`retrieve`，结构性隔离）。
 **未做（如实记录）**：可编辑论证稿的**持久化与修订链**（她的 `argument_revisions` 表）本轮未做——
 那属于研究库层的表结构变更，需另行评估；本轮只把**生成与校验**结构化。
+
+
+---
+
+## D56 ✅ 已接受（2026-10-13）：**她有的我们都要有**——补全六项（论证稿实体 / 锚点 / 失败码 / 依赖状态 / CSV 防护 / 核验分层）
+
+**缘起**：D55 只吸收了两项，并把「可编辑论证稿」等六项记为「未做」。**用户明确要求「她有的我们都要有」**
+——遂逐项补齐。**仍然只改问答层与研究库层，交付链零改动。**
+
+| # | 她有的 | 我们的落地 | 位置 |
+| --- | --- | --- | --- |
+| 1 | `argument_revisions`（**可编辑论证稿 + 修订链**） | ✅ **新表** `argument_drafts` + `argument_revisions`（`data/research.db`）；新建/追加修订/乐观锁/撤回/版本链/**Markdown 与 Word 导出**（手写最小 OOXML，纯标准库）；4 个写接口 + 3 个读接口 + 研究库第 8 分区 | `solve/research.py`、`web/serve.py`、`frontend/src/views/ResearchView.vue`、`frontend/src/api.js` |
+| 2 | `@facts` / `@evidence` **锚点机制** | ✅ `gen.expand_anchors()`：模型只写锚点，**程序**把冻结事实/证据填回；无锚点时**逐字节不变** | `solve/gen.py` |
+| 3 | 约 30 个**输出失败码** | ✅ `gen.FAILURE_CODES`（**20 个**）+ `classify_failures()`：`problems` 仍是人话（界面用），`codes` 是枚举（审计/统计用）；所有说法层返回体都带 `codes` | `solve/gen.py` |
+| 4 | `dependency_state` **实时陈旧检测** | ✅ `snapshot.dependency_state()`：**逐依赖项**（corpus/overrides/golden/**research**/**vector**）各自「快照值 / 当前值 / 变没变 / 说明」；`capture()` 起同时记 research+vector 指纹 | `solve/snapshot.py` |
+| 5 | `safe_cell` **CSV 公式注入防护** | ✅ **早已具备**（核查后确认）：`frontend/src/core/ui.js` 的 `csvCell()` 对 `^[=+@]`、`^\t\r`、`^-[^0-9.]` 前缀加 `'`——与她的 `safe_cell` **同法**。本轮**只核实、未改动**（避免动 core 冻结基线） | `frontend/src/core/ui.js` |
+| 6 | **核验深度分层** | ✅ `GLOSSARY.md` 新增「六、核验深度分层」：数字转录一致 / 来源准入 / 底本校勘 / 语境裁定 / 单篇年代 / 四层分离，逐条带 `_Avoid_` | `GLOSSARY.md` |
+
+**关键纪律（与既有体系一致）**：
+- 论证稿**追加不覆盖**（`argument_revisions` 成链，`parent_id`）；撤回 = 标记（行保留）；每次动作写**决策事件**（`kind='argument'`）；
+- 写接口统一 `client_token` 幂等 + `_write_guard` 同源校验（与材料/事实/版本链同一套）；
+- 修订走**乐观锁**（`expected_revision` 不符即 400，不覆盖别人刚写的）；
+- 论证稿数据经 `_arg_norm()` **只保留已知字段**（防任意注入），长度与条数设上限；
+- 锚点与失败码**纯附加**——`check_numbers` 判定、`produce()` 的 narrate 路径**一字未改**。
+
+**验证**：`selftest` **278 → 290**（新增 12 项：论证稿 CRUD/乐观锁/渲染/Word/撤回、依赖状态五项、锚点、失败码）；
+`web/test_api.py` **171 → 175**（新增 4 项论证稿接口，用临时库不碰真实档案）；
+`check-core` 213,972/0 ｜ `ssr-smoke` 31/0 ｜ `check-types` 0 错误 ｜ `test_render` 522,242/0 ｜
+`verify_views` 43,459/0 ｜ `test_ui` 147/0；`answers_700.jsonl` SHA256 `bf863368…` **逐字节不变**。
+
+**影响**：`solve/research.py`、`solve/gen.py`、`solve/snapshot.py`、`solve/selftest.py`、
+`web/serve.py`、`web/test_api.py`、`frontend/src/api.js`、`frontend/src/views/ResearchView.vue`、
+`GLOSSARY.md`、`接口文档.md`；**交付链零改动**。
+**仍不打算做的（如实说明，非能力不足）**：她的 **PostgreSQL / React / Alembic / GitHub Issues 流程**——
+那是**技术栈与流程的选择**，不是能力优劣；强行迁移会破坏我们的「零服务依赖 + 结构性零回归」两条立身之本。

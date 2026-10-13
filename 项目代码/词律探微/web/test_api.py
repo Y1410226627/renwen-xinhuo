@@ -543,6 +543,48 @@ def main():
     finally:
         S.get_llm = _oldget
 
+    # ---------- 论证稿接口（2026-10-13 新增；用**临时**研究库，不碰真实档案）----------
+    import tempfile as _tf2
+    import research as _RS2
+    _tdb = os.path.join(_tf2.gettempdir(), '_testapi_arg_%d.db' % os.getpid())
+    for _sfx in ('', '-wal', '-shm'):
+        try:
+            os.remove(_tdb + _sfx)
+        except OSError:
+            pass
+    _oldconn = S.get_research_conn
+    S.get_research_conn = lambda: _RS2.connect(_tdb)
+    try:
+        _r1 = S.q_research_write('/api/arguments', {
+            'title': '门禁用稿', 'question': 'q',
+            'data': {'thesis': 't', 'claims': [{'claim': 'c', 'bridge': 'b',
+                                                'assessment': 'supported'}],
+                     'limitations': ['l']}})
+        ok('论证稿接口：新建返回 draft_id', bool(_r1.get('draft_id')), _r1)
+        _did = _r1['draft_id']
+        _r2 = S.q_research_write('/api/arguments/revisions', {
+            'draft_id': _did, 'expected_revision': 1,
+            'data': {'thesis': 't2', 'claims': [{'claim': 'c', 'bridge': 'b'}],
+                     'limitations': ['l']}})
+        ok('论证稿接口：修订号 +1（追加，不覆盖）', _r2.get('revision') == 2, _r2)
+        _stale = False
+        try:
+            S.q_research_write('/api/arguments/revisions', {
+                'draft_id': _did, 'expected_revision': 1,
+                'data': {'thesis': 'x', 'claims': [{'claim': 'y', 'bridge': 'z'}]}})
+        except ValueError:
+            _stale = True
+        ok('论证稿接口：过期修订被拒（乐观锁）', _stale)
+        _w = S.q_research_write('/api/arguments/withdraw', {'draft_id': _did, 'why': 't'})
+        ok('论证稿接口：撤回（行保留）', _w.get('withdrawn') is True, _w)
+    finally:
+        S.get_research_conn = _oldconn
+        for _sfx in ('', '-wal', '-shm'):
+            try:
+                os.remove(_tdb + _sfx)
+            except OSError:
+                pass
+
     # ---------- 汇报 ----------
     print('服务端门禁：比对项 %d 项，不符 %d 项' % (CMP[0], len(BAD)))
     for b in BAD[:20]:
