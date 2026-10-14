@@ -87,7 +87,7 @@ TASK_READ_PARTS = (
 # ════════════════════════════════════════════════════════════════════════════════
 # 结构化论证（2026-10-13：论证稿结构化 + 输出契约）
 # --------------------------------------------------------------------------------
-# 由来：对方在 docs/功能三参考仓库实现阅读-20261010.md 中指出我们的「论证辅助」
+# 由来：自查发现我们的「论证辅助」
 #   ① 「本质是切换任务提示，生成短篇四层草稿」——**没有独立可编辑的论证稿实体**；
 #   ② 「数字曾出现，不等于它支持当前句子的具体论断」——护栏的软肋。
 # 吸收：把论证从「一段散文」升级为**结构化 JSON**，并对每条分论点强制要求
@@ -98,7 +98,7 @@ TASK_READ_PARTS = (
 #   调用方回落既有模板。本模块默认路径（narrate）**逐字未改**，故对既有行为零影响。
 # ════════════════════════════════════════════════════════════════════════════════
 
-# 评估态四值（吸收对方的 assessment 枚举）：支持 / 混合 / 证据不足 / 未决
+# 评估态四值（四态 assessment 枚举）：支持 / 混合 / 证据不足 / 未决
 ASSESSMENTS = ('supported', 'mixed', 'insufficient', 'unresolved')
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -275,7 +275,7 @@ def _slist(v, cap):
 def parse_argument_ex(raw, blocks):
     """解析并**校验**模型返回的结构化论证稿。返回 `(结构 or None, 问题列表, 失败码列表)`。
 
-    校验规则（吸收对方 `validate_answer` 的逐项思路，落到论证稿）：
+    校验规则（逐项校验，落到论证稿）：
       1) 必须是 JSON 对象，且 `thesis` 非空；
       2) `claims` 为 1—`_ARG_MAX_CLAIMS` 条；
       3) 每条 `claim`、`bridge` 非空——**bridge 是硬要求**（形式→解释的桥梁）；
@@ -333,7 +333,7 @@ def parse_argument_ex(raw, blocks):
             ass = 'insufficient'
         if ass in ('insufficient', 'unresolved') and not gaps:
             problems.append('claims[%d] assessment=%s 时 gaps 不得为空' % (i, ass))
-        # 证据编号存在性（吸收对方「锚点必须真实存在」）
+        # 证据编号存在性（锚点必须真实存在）
         eids = []
         for e in ev:
             e_norm = e if e.startswith('E') else ('E' + e.lstrip('Ee'))
@@ -387,7 +387,7 @@ def render_argument(struct):
 
 def produce_argument(llm, res, kind, boundary, max_tokens=900, temperature=0.2,
                      on_delta=None):
-    """生成**结构化论证稿**（吸收对方 Claim 结构）。失败一律 `ok=False`，调用方回落。
+    """生成**结构化论证稿**（论证稿结构化）。失败一律 `ok=False`，调用方回落。
 
     返回体比 `produce()` 多两个字段：
       · `struct`：结构化论证稿（ok=True 时非 None）；
@@ -416,7 +416,7 @@ def produce_argument(llm, res, kind, boundary, max_tokens=900, temperature=0.2,
                 'struct': None, 'trace': None, 'codes': codes,
                 'problems': ['论证稿结构校验未通过：' + '；'.join(probs[:4])]}
     text = render_argument(struct)
-    # 锚点展开（吸收对方 @facts/@evidence）：模型只写锚点，**程序**把冻结内容填回
+    # 锚点展开（@facts/@evidence）：模型只写锚点，**程序**把冻结内容填回
     text, anchors = expand_anchors(text, res)
     # 护栏：结构化稿仍须过四道（数字/引文/边界），并附数字可追溯性审计
     check_body = text + ('\n【推断边界｜%s问句】%s' % (kind, boundary))

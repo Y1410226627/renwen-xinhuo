@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""snapshot_answers.py —— **答案产物版本化 + 逐版差异**（借自朋友项目的 Analysis/Revision 纪律）。
+"""snapshot_answers.py —— **答案产物版本化 + 逐版差异**（借鉴通行做法的 Analysis/Revision 纪律）。
 
-由来（2026-10-05，朋友项目对照）：
-    朋友用 `AnalysisRevision` / `DecisionEvent` 做到「**每轮留快照、可回看任意历史版**」。
+由来（2026-10-05，对照通行做法）：
+    通行做法用 `AnalysisRevision` / `DecisionEvent` 做到「**每轮留快照、可回看任意历史版**」。
     反观我们：`tools/loop_check.py` 有「代码树冻结」与「两遍逐字节一致」，但
     **答案产物本身没有版本化**——改一版引擎重跑，旧答案就没了。
     第 13 轮那个回归，是**跑 100 遍自检偶然抓到**的；若有逐版快照，就能像

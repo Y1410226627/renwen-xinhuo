@@ -863,7 +863,7 @@ def _clean_ask_result(res, client, t0):
     """把问答结果整理成前端 JSON（**q_ask 与流式端点共用**，避免两处走样）。"""
     res['blocks'] = [{k: v for k, v in b.items() if k != 'raw'} for b in res['blocks']]
     res['verify'] = {'ok': res['verify'][0], 'problems': res['verify'][1]}
-    # ⚠ 2026-10-05 新增（朋友对照）：把「为什么是这个结论/为什么答不出」**结构化成八态**，
+    # ⚠ 2026-10-05 新增（对照通行做法）：把「为什么是这个结论/为什么答不出」**结构化成八态**，
     #   附在结果里（纯附加字段，不改既有答句、进不了 solver → 零回归安全）。
     try:
         import answer_reason as _AR
@@ -925,7 +925,7 @@ def _answer_accepts_ctx_pids():
 
     背景（多轮「结果集」通路，2026-10-08）：前端把上一轮命中的 pid 集合经 `ctx_pids` 送到
     服务端，最终要写进 `spec.ctx_pids`。但 `ask.answer` 的该形参由**另一条战线**负责加——
-    在对方改完之前硬传会 `TypeError`。故这里做一次**特性探测**：支持才透传，不支持就
+    在外部签名就绪之前硬传会 `TypeError`。故这里做一次**特性探测**：支持才透传，不支持就
     **一字不传**（旧行为逐字不变、不报错、不回归）。
     """
     try:

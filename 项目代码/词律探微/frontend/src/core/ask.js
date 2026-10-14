@@ -74,7 +74,7 @@ function askHtml(j) {
     + (v.ok ? '通过' : '未通过') + '</span>'
     + ((v.problems && v.problems.length) ? ('　问题：' + U.esc(v.problems.join('；'))) : '')
     + '　｜　问题类型：' + U.esc(j.kind || '—') + (j.refused ? '（已拒答）' : '')
-    // ⚠ 2026-10-05 新增（朋友对照）：把「结论的理由」按**八态**显示——「查了没有」与
+    // ⚠ 2026-10-05 新增（对照通行做法）：把「结论的理由」按**八态**显示——「查了没有」与
     //   「不支持」「来源不可得」「多解」分开，用户不必从整段文案里猜。
     + ((j.reason && j.reason.label) ? ('　｜　结论理由：' + U.esc(j.reason.label)) : '')
     + (j.parse_source ? ('　｜　查询理解：' + U.esc(j.parse_source)) : '')

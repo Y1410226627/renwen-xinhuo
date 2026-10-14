@@ -371,7 +371,7 @@ def main():
         ok('说法层：合法叙述 → 采纳', _good['ok'] is True, _good['problems'])
 
         # ── 2026-10-13 新增（论证稿结构化 + 输出契约）──
-        #    对方在《功能三参考仓库实现阅读》里指出：我们的 selftest **从未测 `argument=True`
+        #    自查发现：我们的 selftest **从未测 `argument=True`
         #    路径**，论证辅助「只是切换任务提示」。这里把结构化论证的**结构校验**逐条测到。
         import json as _json
         _st_ok = _json.dumps({
@@ -418,7 +418,7 @@ def main():
         _r_nj, _p_nj = _rejected('这不是 JSON')
         ok('结构化论证：非 JSON → 拒并回落', _r_nj, _p_nj)
 
-        # 数字可追溯性审计（吸收对方批评：数字出现 ≠ 支持当前论断）
+        # 数字可追溯性审计（回应「数字出现 ≠ 支持当前论断」）
         _blk = [{'eid': 'E1', 'dynasty': '清', 'author': '甲', 'title': '题', 'cipai': '题',
                  'sent_n': 4, 'han_len': 20, 'ping': 8, 'ze': 12, 'ze_ratio': 60.0,
                  'scene': '后段上升', 'pid': 'p#1', 'change': None, 'threshold': 5, 'lines': []}]
@@ -911,7 +911,7 @@ def main():
 
     # ------------------------------------------------------------------
     # 23) 论证稿库 / 依赖状态 / 锚点 / 失败码（2026-10-13 新增）
-    #     对方指出我们「论证辅助没有独立可编辑的论证稿实体」；本轮把它落成**实体**并测到。
+    #     自查发现「论证辅助没有独立可编辑的论证稿实体」；本轮把它落成**实体**并测到。
     print('\n=== 23 论证稿库 / 依赖状态 / 锚点 / 失败码 ===')
     import tempfile as _tf
     import json as _json2
@@ -972,20 +972,20 @@ def main():
         except OSError:
             pass
 
-    # 依赖状态（吸收对方的 dependency_state）：逐项细粒度，比快照级 stale 更细
+    # 依赖状态（dependency_state）：逐项细粒度，比快照级 stale 更细
     _ds = _SN.dependency_state({'fingerprint': {'corpus': 'x', 'overrides': 'x',
                                                 'golden': 'x'}})
     ok('依赖状态：逐项返回（corpus/overrides/golden/research/vector 五项）',
        len(_ds['items']) == 5 and any(i['key'] == 'research' for i in _ds['items']),
        [i['key'] for i in _ds['items']])
 
-    # 锚点（吸收对方的 @facts/@evidence）：无锚点逐字节不变
+    # 锚点（@facts/@evidence）：无锚点逐字节不变
     _t0, _u0 = _gen.expand_anchors('普通文字，无锚点。', {'blocks': [], 'spec': ''})
     ok('锚点：无锚点时逐字节不变', _t0 == '普通文字，无锚点。' and _u0 == [], _u0)
     _t1, _u1 = _gen.expand_anchors('事实：\n@facts', {'blocks': [], 'spec': '朝代=清'})
     ok('锚点：@facts 展开为程序冻结内容', _u1 == ['facts'] and '【查询条件' in _t1, _u1)
 
-    # 失败码（吸收对方的 OUTPUT_FAILURE_CODES）：机器可判的枚举
+    # 失败码（输出失败码枚举）：机器可判的枚举
     _stx, _pbx, _cdx = _gen.parse_argument_ex('乱码', [])
     ok('失败码：非 JSON → output_not_json', _cdx == ['output_not_json'], _cdx)
     _stx2, _pbx2, _cdx2 = _gen.parse_argument_ex(_json2.dumps(
