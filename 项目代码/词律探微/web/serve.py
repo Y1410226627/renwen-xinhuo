@@ -2169,6 +2169,9 @@ class H(BaseHTTPRequestHandler):
                     # 导出：md 回文本，docx 回 base64（前端解码下载；避免二进制管线）。
                     _data = _row['revision']['data']
                     _title = _row['draft'].get('title') or ('论证稿%d' % _did)
+                    # ⚠ 2026-10-15（安全官 P3-3）：文件名**净化**——虽走 JSON body 无注入，
+                    #   但去掉路径分隔符/控制字符，避免观感差或落盘异常（serve.py 已 import re）。
+                    _title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', str(_title))[:80] or '论证稿'
                     _meta = {'来源问句': _row['draft'].get('question') or '（无）',
                              '修订号': _row['revision']['revision'],
                              '整理时间': _row['revision']['created_at']}

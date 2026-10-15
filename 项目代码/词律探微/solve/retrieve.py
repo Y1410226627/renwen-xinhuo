@@ -19,6 +19,7 @@
   python retrieve.py --db data/corpus.db --query "后段上升 清 临江仙"
 """
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -3118,6 +3119,43 @@ def search(conn, query, topk=5, weights=(0.40, 0.20, 0.15, 0.10, 0.15), explain=
                             '声律': pzs, '向量': vec})
 
 
+# ---------------------------------------------------------------- 题名旁路覆盖（D63 / Design A）
+# ⚠ 2026-10-15（落实 `DECISIONS.md` D63 前置条件 3，按安全官 P1-1 采用 Design A）：
+#   全库 58,852 条题名已由大模型**逐条审核**，产出旁路覆盖表 `data/title_cover.json`
+#   （生成器：`tools/title_cover.py`）。此处**只做展示层覆盖**，三条纪律：
+#     ① 开关 `LVC_TITLE_COVER` **默认关闭**；关闭时 `items_of` 输出**逐字节如旧**（零回归）；
+#     ② **只写 `display_cipai`/`display_title` 两个展示字段**；`cipai`/`title` **保持语料真值**
+#        （它们是护栏白名单来源，绝不可被展示数据污染）；**绝不**动 `_sql`/`parse_query`；
+#     ③ **不写** `corpus.db`（旁路表，只读加载）。
+_TITLE_COVER_CACHE = {}
+
+
+def _title_cover():
+    """`LVC_TITLE_COVER` 开启时返回 `{pid: {...}}`，否则 `None`（**默认关闭 → 恒 None**）。
+
+    开关值既可以是**真值**（用默认表 `data/title_cover.json`），也可以是**覆盖表路径**。
+    加载失败（文件缺失/非法 JSON）→ 返回 `None`（等于关闭），**绝不**让主链崩。
+    """
+    val = (os.environ.get('LVC_TITLE_COVER') or '').strip()
+    if val in ('', '0', 'false', 'False', 'no', 'off'):
+        return None
+    if val in _TITLE_COVER_CACHE:
+        return _TITLE_COVER_CACHE[val]
+    if os.path.sep in val or (os.path.altsep and os.path.altsep in val) or os.path.exists(val):
+        path = val
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'data', 'title_cover.json')
+    cover = None
+    try:
+        with open(os.path.abspath(path), encoding='utf-8') as f:
+            cover = json.load(f)
+    except Exception:                                            # noqa: BLE001
+        cover = None
+    _TITLE_COVER_CACHE[val] = cover
+    return cover
+
+
 def items_of(conn, pids, scores=None, explain=False, routes=None):
     """按给定篇序组装结果（问答层与极值/排序题共用同一份字段口径）。
 
@@ -3127,6 +3165,7 @@ def items_of(conn, pids, scores=None, explain=False, routes=None):
     """
     scores = scores or {}
     routes = routes or {}
+    _tc = _title_cover()                   # 题名旁路覆盖（默认关 → None，逐字节如旧）
     pids = list(pids)
     if not pids:
         return []
@@ -3149,6 +3188,13 @@ def items_of(conn, pids, scores=None, explain=False, routes=None):
                 'source': r[14], 'score': round(scores.get(pid, 0.0), 4)}
         if explain:
             item['contrib'] = {name: round(d.get(pid, 0), 4) for name, d in routes.items()}
+        if _tc:                            # 题名旁路覆盖：**只写 display_* 展示字段**
+            _ov = _tc.get(pid)             # cipai/title 保持**语料真值**（护栏白名单来源）
+            if _ov:
+                if _ov.get('cipai'):
+                    item['display_cipai'] = _ov['cipai']
+                if _ov.get('title'):
+                    item['display_title'] = _ov['title']
         out.append(item)
     return out
 
@@ -3244,8 +3290,9 @@ def main():
     print('\n召回 %d 篇：' % len(rows))
     for i, r in enumerate(rows, 1):
         print('  [%d] %.4f %s·%s《%s》（%s）%d 句 / %d 字，仄 %d，仄声比例 %.1f%%，声情 %s'
-              % (i, r['score'], r['dynasty'], r['author'], r['title'], r['cipai'], r['n_line'],
-                 r['n_char'], r['n_ze'], r['ze_ratio'], r['scene']))
+              % (i, r['score'], r['dynasty'], r['author'],
+                 r.get('display_title') or r['title'], r.get('display_cipai') or r['cipai'],
+                 r['n_line'], r['n_char'], r['n_ze'], r['ze_ratio'], r['scene']))
         print('      出处：%s' % r['pid'])
         if args.explain:
             print('      贡献：%s' % r['contrib'])

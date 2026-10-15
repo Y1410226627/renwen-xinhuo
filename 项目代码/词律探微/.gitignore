@@ -57,6 +57,11 @@ _scratch_*
 !answers_700.jsonl
 **/data/eval_*.jsonl
 **/data/regress_*.jsonl
+# 题名旁路覆盖表：由 tools/title_cover.py 从 data/title_review.jsonl **再生**，不入仓
+# （生成：python tools/title_cover.py；缺失时 retrieve._title_cover() 优雅降级为「无覆盖」）
+**/data/title_cover.json
+**/data/title_cover_lowconf.json
+**/data/title_cover_quarantine.json
 
 # ---------- 大体积可再生产物 ----------
 # 派生侧车库：由 tools/build_indexes.py 只读派生，可再生（200MB+）

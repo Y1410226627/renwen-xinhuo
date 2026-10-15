@@ -55,6 +55,19 @@ GUARD_PASS_AGG = '通过（数字全部来自分组统计、口径已写明、�
 GUARD_PASS_PAIR = '通过（数字全部来自分组统计与证据块、引文逐字落地、边界声明与问句类型匹配）'
 
 
+def _disp_title(b):
+    """**展示用**题名：`LVC_TITLE_COVER` 覆盖值优先，缺省回落语料真值。
+
+    ⚠ 只用于**渲染**；护栏仍只认 `b['title']`（语料真值），见 `evidence.texts_of` /
+    `guard._pool_extras`。开关关闭时 `display_title` 不存在 → 恒等于 `b['title']`（零回归）。
+    """
+    return (b.get('display_title') or b.get('title')) or ''
+
+
+def _disp_cipai(b):
+    """**展示用**词牌：覆盖值优先，缺省回落语料真值（同 `_disp_title`）。"""
+    return (b.get('display_cipai') or b.get('cipai')) or ''
+
 
 def _with_unsupported(spec, ok, problems):
     """⚠ 2026-10-02 修：**守卫必须知道"引擎认账了没"**。
@@ -173,7 +186,7 @@ def _extract_answer(conn, spec, blocks):
     parts = []
     for b in blocks[:5]:
         pid = b.get('pid')
-        title = b.get('title') or b.get('cipai') or ''
+        title = _disp_title(b) or _disp_cipai(b)
         try:
             rows = conn.execute('SELECT idx,text FROM lines WHERE pid=? ORDER BY idx', (pid,)).fetchall()
         except Exception:
@@ -1400,7 +1413,8 @@ def _answer_by_plan(conn, question, topk=3, llm=None, context=None, ctx_pids=Non
     elif blocks:
         _b0 = blocks[0]
         text = ('满足条件共 %d 篇，最前者为%s《%s》。'
-                % (len(f.pids), (_b0.get('author') or ''), (_b0.get('title') or _b0.get('cipai') or '')))
+                % (len(f.pids), (_b0.get('author') or ''),
+                   (_disp_title(_b0) or _disp_cipai(_b0))))
     elif f.kind in ('set', 'single') and not f.pids:
         text = ('现有语料未见支持：该条件在库中没有命中的作品。'
                 if not _nf else
@@ -2140,8 +2154,8 @@ def _answer_pair(conn, question, spec, pnote, kind='数值型', llm=None, narrat
         out.append('　　　第 %d 对（组内 %d 首，谱长 %d 位，%s）：%s·%s《%s》[%s] 与 '
                    '%s·%s《%s》[%s]；各 %d 句／%d 字与 %d 句／%d 字，平仄串逐位相同。'
                    % (k, grp['n'], len(grp['sig']), share,
-                      a['dynasty'], a['author'], a['title'], ea,
-                      b['dynasty'], b['author'], b['title'], eb,
+                      a['dynasty'], a['author'], _disp_title(a), ea,
+                      b['dynasty'], b['author'], _disp_title(b), eb,
                       a['sent_n'], a['han_len'], b['sent_n'], b['han_len']))
     out.append('　　　【配对复核】独立复算：另用 Python 逐篇重算平仄串再分组，得 %d 组、%d 对'
                '（与上面一致）；并逐位比对展示的每一对：%s。'
@@ -2576,8 +2590,10 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
         allow += re.findall(r'\d+', b['pid'])
         # ⚠ 2026-10-03：**篇目元数据自带的数字**不是论断数字——语料里确有「刘镇2」「杨适1」
         #   这类带序号的作者名，展示出来就会被护栏判「数字无出处」（实测 Q0093/Q0136）。
-        allow += re.findall(r'\d+', '%s%s%s' % (b.get('author') or '', b.get('title') or '',
-                                                b.get('cipai') or ''))
+        allow += re.findall(r'\d+', '%s%s%s%s%s' % (b.get('author') or '', b.get('title') or '',
+                                                    b.get('cipai') or '',
+                                                    b.get('display_title') or '',
+                                                    b.get('display_cipai') or ''))
         # ⚠ 2026-10-11 修（二期能力增补 · 语义检索暴露的**既有隐患**）：证据块正文里的
         #   **句序序数**（`evidence.render_text` 写的「第 N 句」）**不是论断数字**，只是定位标号；
         #   旧版 `allow` 未放行它 → 只要展示的篇里有一句的序号 ≥2（如「第 2 句」），
@@ -2639,7 +2655,7 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
             head = ('【结论】未给结构化条件，按语义相关度排序（融合分）展示前 %d 篇；'
                     '融合排序最前者为 '
                     '%s·%s《%s》：全篇 %d 句 / %d 字，平 %d、仄 %d，仄声比例 %.1f%%，声情 %s [E1]。'
-                    % (len(blocks), b0['dynasty'], b0['author'], b0['title'], b0['sent_n'],
+                    % (len(blocks), b0['dynasty'], b0['author'], _disp_title(b0), b0['sent_n'],
                        b0['han_len'], b0['ping'], b0['ze'], b0['ze_ratio'], b0['scene']))
     elif ei is not None:
         more = '（按【%s%s】排序展示前 %d 篇）' \
@@ -2648,7 +2664,7 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
                 '全篇 %d 句 / %d 字，平 %d、仄 %d，仄声比例 %.1f%%，声情 %s [E1]。'
                 % (spec.describe(), total, more, ei['label'],
                    '最高' if spec.extreme == 'max' else '最低',
-                   b0['dynasty'], b0['author'], b0['title'], b0['sent_n'],
+                   b0['dynasty'], b0['author'], _disp_title(b0), b0['sent_n'],
                    b0['han_len'], b0['ping'], b0['ze'], b0['ze_ratio'], b0['scene']))
     else:
         more = '（全库仅此 %d 篇，已全部列出）' % total if total <= len(blocks) \
@@ -2656,7 +2672,7 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
                   else '（此处展示融合排序前 %d 篇；本问没有指定排序指标）' % len(blocks))
         head = ('【结论】在条件〔%s〕下共命中 %d 篇%s；融合排序最前者为 %s·%s《%s》：'
                 '全篇 %d 句 / %d 字，平 %d、仄 %d，仄声比例 %.1f%%，声情 %s [E1]。'
-                % (spec.describe(), total, more, b0['dynasty'], b0['author'], b0['title'],
+                % (spec.describe(), total, more, b0['dynasty'], b0['author'], _disp_title(b0),
                    b0['sent_n'], b0['han_len'], b0['ping'], b0['ze'], b0['ze_ratio'],
                    b0['scene']))
     # ⚠ 2026-10-08 新增（主人实测驱动）：「**提取型**」问题（第 N 句第 M 字）——用户要的
@@ -2736,7 +2752,7 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
             elif '声律模式' in rs:
                 note = '；该篇第 %d 句合声律模式 %s' % (m['idx'] + 1, spec.pz or '')
         out.append('　　　另见 [%s] %s·%s《%s》：%d 句 / %d 字，仄声比例 %.1f%%，声情 %s%s。'
-                   % (b['eid'], b['dynasty'], b['author'], b['title'], b['sent_n'], b['han_len'],
+                   % (b['eid'], b['dynasty'], b['author'], _disp_title(b), b['sent_n'], b['han_len'],
                       b['ze_ratio'], b['scene'], note))
     out.append('【证据】每条证据都带出处与引擎算出的数字：')
     out.append(evidence.render_text(blocks))
@@ -2811,7 +2827,7 @@ def _answer_impl(conn, question, topk=3, with_lines=1, kind=None, llm=None, narr
                                           ei['label'],
                                           '最大值' if spec.extreme == 'max' else '最小值',
                                           ei['value'], ei['n_ties'],
-                                          b0['dynasty'], b0['author'], b0['title']))
+                                          b0['dynasty'], b0['author'], _disp_title(b0)))
         r = gen.produce(llm, res_now, kind, BOUNDARIES[kind], argument=argument,
                         on_delta=on_delta)
         narrative = r

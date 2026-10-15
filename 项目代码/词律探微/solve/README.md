@@ -1682,6 +1682,9 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
    `LVC_VECTOR=1` 才启用（默认关 → 零影响）。3000 篇试跑实测：
    「描写边塞风雪」→ 朱熹「春色欲来时，先散满天风雪」、「写隐逸闲适」→「挂冠归去旧烟萝」——
    **词面不重合的语义查询真的命中了**。
+   **健康自检**：`"$PY" solve/vector_index.py --health`——报告索引可用性 + **嵌入端点探活**
+   （实发一次嵌入请求）+ 覆盖率，判定 `ok/degraded/down`（退出码 0/1）。降级纪律：端点不可达 /
+   索引不可用 → 相似检索**返回空并如实说明**，**绝不静默降级成答非所问**（见 D65）。
 4. **两个验收器**：`tools/omission_check.py`（**遗漏集测试**，首跑抓到 6 类逃过既有门禁的不一致）+
    `tools/understand_eval.py`（**LLM 理解回归**，mock+live，发现 5 类 schema 缺口与 3 个真实误答风险）。
 
@@ -1721,6 +1724,28 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 | `LVC_VECTOR` | 关 | 开启真向量召回（受限检索 + RRF） |
 | `LVC_RERANK` | 关 | 精排（本机 reranker 多文档区分度不足） |
 | `LVC_PZ_GRAM` | 关 | 平仄 n-gram 倒排（实测更慢，默认关） |
+| `LVC_TITLE_COVER` | 关 | **题名旁路覆盖**（见下）；关时 `items_of`/`poem_block` 输出**逐字节如旧** |
+
+### 题名旁路覆盖（`LVC_TITLE_COVER`，**默认关**，2026-10-15 / D65）
+
+全库 58,852 条题名已由大模型**逐条审核**（`data/title_review.jsonl`：结构化判定 2,842 +
+「已核验无需改动」56,012）。`tools/title_cover.py`（**只读**）把其中「**实质改动**且
+`confidence ≥ 0.7`」的 **2,796** 条抽成旁路表 `data/title_cover.json`（**不写 `corpus.db`**）。
+
+- 生成：`"$PY" tools/title_cover.py`（`--dry-run` 只统计；`--verify` 复核；`--threshold` 调门槛）。
+  该表由 `data/title_review.jsonl` **再生**，故已入 `.gitignore`（**不入仓**）；缺失时
+  `retrieve._title_cover()` **优雅降级为「无覆盖」**（返回 `None`、绝不报错 → 新克隆可正常跑）。
+- 接入（Design A，安全官 P1-1）：开关开启时，`retrieve.items_of`（检索结果）与
+  `evidence.poem_block`（证据块/答案展示）把覆盖值写进**展示字段** `display_cipai`/`display_title`；
+  `cipai`/`title` **保持语料真值**——它们是护栏白名单来源（`evidence.texts_of` /
+  `guard._pool_extras`），**绝不让展示数据进护栏**。渲染层读 `display_* || 真值`；
+  **不动** `_sql`/`parse_query`、不写语料库、**护栏一行不改**。
+- **默认关闭** → 关时**不写任何 `display_*`**，输出**逐字节如旧**（`selftest` 298/0、双集回归、
+  `answers_700` SHA256 `bf863368…` 不变）。
+- 说明：审核为**大模型判定**，覆盖表专用验收与领域专家抽检**尚未完成**（D63 前置条件 1/2），
+  故维持默认关。低置信 15 条另存 `data/title_cover_lowconf.json`；**与字数形态矛盾**的
+  **21** 条（如 DB `宴桃源・如梦令` 被判「阮郎归」，但 17/21 为 33 字=如梦令体）另存
+  `data/title_cover_quarantine.json` 并**不进覆盖表**（均仅人工复核，同样不入仓）。
 
 ### 快速自检
 

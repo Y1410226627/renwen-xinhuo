@@ -1908,3 +1908,82 @@ D61 称题名审核成果「pid 命名空间与 `corpus.db` 不一致 → 暂缓
 `selftest` 294/0、双集回归全过、`doc_check` 9/9。
 
 > **注**：`_历史产物/` 已被 `.gitignore` 排除（不上传），其中的基线副本未改动。
+
+---
+
+## D65 ✅ 已完成（2026-10-15）：**题名旁路覆盖表落地** + **向量检索健康自检/降级修复** + **大文件 No-Go**
+
+> 处置缺陷 #1/#2/#3（题名/词牌数据管线）、#4（大文件）、#5（向量检索韧性）。
+> 落实 D63 的**前置条件 3**（只改展示字段、默认关、`LVC_TITLE_COVER`、关时逐字节如旧）。
+
+### 一、题名旁路覆盖表（缺陷 #1/#2/#3）
+
+- **产出工具** `tools/title_cover.py`（**只读**：`corpus.db` 仅 `SELECT`，`PRAGMA query_only`）。
+- **数据事实（全量实测）**：审核表 `data/title_review.jsonl` 共 58,854 行 =
+  结构化判定 **2,842** + 压缩「已核验无需改动」**56,012**；结构化里 **1 条 pid
+  （`ci.0005.base.json#247`）缺朝代段**，是 `ci.清.0005.base.json#247` 的**重复行**
+  （审核表内两行并存、内容一致）→ 语料覆盖实为 **100%**。
+- **覆盖表 `data/title_cover.json`**：以 `poems.cipai/title` 为权威基线**逐字段比对**，
+  取「实质改动」**2,832** 条中 `confidence ≥ 0.7` 的 **2,796** 条
+  （清 2,411 / 宋 379 / 元 6；均为「词牌+题名同时变」= 粘连切分或异名正名）。
+  低置信 **15** 条另存 `data/title_cover_lowconf.json`；`--verify` 复核 2,796 条**异常 0**。
+- **复核隔离（2026-10-15，qa-lead 复核发现）**：DB `cipai` 含「宴桃源」的 **21** 条，LLM 一律
+  判为「阮郎归」（47 字体），但其中 **17 条 `han_len=33`（如梦令体）**、仅 4 条 47 字——
+  「宴桃源／如梦令」本属同一词牌，归并方向与字数矛盾 → **隔离**，另存
+  `data/title_cover_quarantine.json`（**不进覆盖表**）。
+  **对照（不隔离）**：DB=「浪淘沙」的 5 条，4 条 133 字=**浪淘沙慢体**、1 条 55 字=**令体**，
+  与 LLM 判定（→浪淘沙慢/浪淘沙令）**一致** → 保留（DB 自身 `浪淘沙` 混入 18 篇 133 字，属语料侧错误）。
+- **接入点（重要更正）**：任务书称「`retrieve.items_of` 是唯一证据块构造点」**不成立**——
+  证据块的 `title` 由 `solve/evidence.py::poem_block` **重新查库**得到（并喂护栏引文白名单
+  `texts_of`）。故覆盖在**两处**落点：`retrieve.items_of`（检索结果字段）+ `evidence.poem_block`
+  （证据块/答案展示）。两处共用 `retrieve._title_cover()`，同一开关 `LVC_TITLE_COVER`。
+- **接入方式（Design A，安全官 P1-1 返工）**：覆盖值**只写 `display_cipai`/`display_title`**，
+  `cipai`/`title` **保持语料真值**。原因：`title`/`cipai` 是护栏白名单来源
+  （`evidence.texts_of` 读 `title`；`guard._pool_extras` 读 `title`/`cipai`）——若把**展示**值
+  写进 `title`，臆造题名会被护栏当作**合法引文**（护栏②失效；安全官 PoC 已证）。改为 display_*
+  后：臆造 `display_title` 被引用 → `guard.check_citations` **返回 False**（护栏只看真值）。
+  渲染层读 `display_* || 真值`（`ask.py` / `evidence.render_text` / `frontend/src/core/ask.js`）；
+  **护栏一行不改**。
+- **开关**：`LVC_TITLE_COVER` 默认关（值可为真值或覆盖表路径）；关时 `_title_cover()` 恒返回
+  `None` → 不写任何 `display_*` → `items_of`/`poem_block` 输出**逐字节如旧**。覆盖表缺失时
+  `_title_cover()` **优雅降级为「无覆盖」**（返回 `None`，绝不报错）。**不动** `_sql`/`parse_query`，
+  **不写** `corpus.db`。覆盖表为**再生派生物** → 已入 `.gitignore`（不入仓）。
+- **实测两态**：问「清 高旭」——关：`卖花声`/`丑奴儿令夜不成寐…`；开：`浪淘沙`/`丑奴儿令·夜不成寐…`
+  （渲染层显示正名，`block['title']` 仍为真值），护栏 `verify=(True,[])`（开态**自洽**）。
+- **自检锁**：`selftest` §25 断言「臆造 `display_title` 不被护栏当作合法引文」「臆造 `title` 会
+  被护栏误判通过（旧漏洞）」「开态 `title`/`cipai` 仍为语料真值」。
+- **门禁**：`selftest` **298/0**、`check_all --only sha256,selftest,regress` 全过，
+  `answers_700` SHA256 = `bf863368…ff7d1e`（**逐字节不变**）；前端六门禁全过（见下）。
+
+### 二、向量检索健康自检与降级修复（缺陷 #5）
+
+- **新增健康入口** `python solve/vector_index.py --health`：索引可用性 + **嵌入端点探活**
+  （实发一次嵌入请求）+ 覆盖率；判定 `ok/degraded/down`，退出码 0/1。
+- **降级如实说明**：①端点不可达（索引可用）→ 返回空并**如实说明**（原已实现，本轮实测确认）；
+  ②**索引不可用** → 原 `answer_similar` 返回 `None` 回落主链，主链把「与《X》类似的词」当成
+  「定位 X」来答（实测：答成「条件〔朝代=清；词牌=小重山；题名=…〕下共命中 1 篇」→ **答非所问**）。
+  本轮改为**同样接管并如实说明**（`_honest_unavailable`），**不静默降级**。
+- **顺带修** `vector_index.coverage()` 的 `by_dynasty`：旧按 `pid.split('.')[1]` 取朝代，
+  对 `ci.song.*` / `yuanqu.json#*` 误判 → 宋/元被误报「篇级全缺」；改用语料库 `poems.dynasty`
+  权威映射。**纯报告函数**，无门禁依赖。
+- **门禁**：`selftest` 294/0（含相似问答三态断言）、双集回归全过。
+
+### 三、大文件重构：**No-Go**（缺陷 #4）
+
+`retrieve.py` 3,456 行 / 94 函数（最大 `_parse_core` 315）；`ask.py` 2,888 行 / 58 函数
+（最大 `_answer_impl` 617）。**结论：本轮不做整体重构**，依据四条：
+1. **交付链已隔离**（D07）：`solver.py` 只 `import corpus/pronounce/prosody`，`retrieve/ask`
+   **不在交付链**——文件大小是**可维护性**问题，**不是正确性缺陷**，不阻塞交付。
+2. **门禁绑定内部名**：`selftest` 直接引用 `retrieve._sql/parse_query/count_hits/cover_fields/
+   coverage_of/verify_spec_on_poem/cn_num/extreme_info/search` 与 `ask.answer/understand/
+   answer_similar/BOUNDARIES/_allow_disclose`（约 15 个）→ 拆模块必**断门禁**。
+3. **无功能驱动**：纯为「行数」重构属**投机性改动**，与「先证再判、改动最小」纪律相悖；
+   零回归靠门禁兜底，但 617 行函数重构的**回归面**大、收益小。
+4. **现有组织不差**：文件按 M6–M8 分节、docstring 密集，非「面条代码」。
+**建议（若将来有功能驱动）**：仅对 `_answer_impl` 做「**抽私有函数、不改逻辑、保留公共名**」
+的定向重构，配 `selftest + 双集 regress + verify_1000` 全档验证。
+
+### 四、遗留（未在本轮范围）
+
+- D63 前置条件 1（**覆盖表专用验收**：自建「按词牌检索」金标准抽样题）与
+  条件 2（**领域专家抽检**）**仍未完成**；故 `LVC_TITLE_COVER` 维持**默认关闭**。

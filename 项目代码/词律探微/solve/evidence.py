@@ -169,6 +169,23 @@ def poem_block(conn, pid, top_lines=1, spec=None):
                     out['pron_adjusted'] = _adj
         except Exception:                                      # noqa: BLE001
             pass
+    # ⚠ 2026-10-15（Design A，安全官 P1-1）：题名旁路覆盖**只写 `display_*` 展示字段**，
+    #   `title`/`cipai` **保持语料真值**。理由：`title`/`cipai` 是护栏白名单的来源
+    #   （`texts_of` 读 `title`；`guard._pool_extras` 读 `title`/`cipai`）——若把**展示数据**
+    #   写进去，臆造题名就会被护栏当作**合法引文**（护栏②形同虚设）。
+    #   开关 `LVC_TITLE_COVER` **默认关闭** → 不写任何 `display_*` → 输出**逐字节如旧**。
+    #   渲染层读 `display_* || title`（见 ask.py / ask.js）；护栏**一行不改**。
+    try:
+        _tc = retrieve._title_cover()
+    except Exception:                                          # noqa: BLE001
+        _tc = None
+    if _tc:
+        _ov = _tc.get(pid)
+        if _ov:
+            if _ov.get('cipai'):
+                out['display_cipai'] = _ov['cipai']
+            if _ov.get('title'):
+                out['display_title'] = _ov['title']
     return out
 
 
@@ -257,8 +274,10 @@ def render_text(blocks, with_char=False):
     """纯文本排版（供人工阅读与落盘核对）。"""
     out = []
     for b in blocks:
+        # 展示层：覆盖值优先（护栏**不看这里**；护栏只读 title/cipai，见 texts_of/_pool_extras）
         out.append('[%s] %s·%s《%s》（%s）' % (b['eid'], b['dynasty'], b['author'],
-                                              b['title'], b['cipai']))
+                                              b.get('display_title') or b['title'],
+                                              b.get('display_cipai') or b['cipai']))
         out.append('     篇级：%d 句 / %d 字，平 %d、仄 %d，仄声比例 %.1f%%；声情 %s，变化 %.1f'
                    % (b['sent_n'], b['han_len'], b['ping'], b['ze'], b['ze_ratio'],
                       b['scene'], b['change']))

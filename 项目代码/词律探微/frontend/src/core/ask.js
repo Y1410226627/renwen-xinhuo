@@ -26,7 +26,7 @@ function blockHtml(b) {
     + '</td><td>' + U.esc(L.text) + '</td><td>' + U.hz(L.pz || '') + '</td><td>'
     + U.esc(L.tail || '') + '</td></tr>').join('');
   return '<div class="e"><b>[' + U.esc(b.eid) + ']</b> ' + U.esc(b.dynasty) + '·' + U.esc(b.author)
-    + '《' + U.esc(b.title || b.cipai) + '》'
+    + '《' + U.esc(b.display_title || b.title || b.display_cipai || b.cipai) + '》'
     + '<div class="m">' + b.sent_n + ' 句 / ' + b.han_len + ' 字，平 ' + b.ping + '、仄 ' + b.ze
     + '，仄声比例 ' + b.ze_ratio + '%，声情 ' + U.esc(b.scene)
     + (b.n_match ? ('｜命中条件的句：' + b.n_match + ' 句') : '')

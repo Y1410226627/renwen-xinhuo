@@ -1015,6 +1015,70 @@ def main():
            bool(_v) and ('不判定谁对' in _v['note']) and ('不是清代实际读音' in _v['note']))
         ok('双口径：不存在的篇返回 None', _TP.dual_view(_sq10.connect(_db10), 'no.such#0') is None)
 
+    # ============ §25 题名旁路覆盖（Design A：展示数据**绝不进护栏白名单**）============
+    # 安全官 P1-1：`title`/`cipai` 是护栏白名单来源（`evidence.texts_of` / `guard._pool_extras`）。
+    # 若把**展示**值写进 `title`，臆造题名会被护栏当成**合法引文** → 护栏②「引文必须逐字
+    # 来自语料」形同虚设。Design A：覆盖只写 `display_*`；护栏只看 `title`/`cipai`。
+    # 本项**锁死**该不变量：臆造 `display_title` 必须**被护栏拒绝**。
+    print('\n--- 题名旁路覆盖（Design A：display_* 不进护栏）---')
+    import evidence as _ev25
+    import guard as _gd25
+    _db25 = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'data', 'corpus.db')
+    _sq25 = __import__('sqlite3')
+    _rt25 = __import__('retrieve')
+    _c25 = _sq25.connect(_db25)
+    _pid25 = _c25.execute('SELECT pid FROM poems LIMIT 1').fetchone()[0]
+    _blk25 = _ev25.poem_block(_c25, _pid25, top_lines=1)
+    _blk25['eid'] = 'E1'
+    ok('题名覆盖：默认关闭 → poem_block 无 display_* 字段',
+       'display_title' not in _blk25 and 'display_cipai' not in _blk25)
+    _b25a = dict(_blk25)
+    _b25a['display_title'] = '臆造题名ZZZ'
+    _ok25a, _ = _gd25.check_citations('【结论】见「臆造题名ZZZ」[E1]。', [_b25a])
+    ok('题名覆盖：臆造 display_title **不被**护栏当作合法引文', _ok25a is False)
+    _b25b = dict(_blk25)
+    _b25b['title'] = '臆造题名ZZZ'
+    _ok25b, _ = _gd25.check_citations('【结论】见「臆造题名ZZZ」[E1]。', [_b25b])
+    ok('题名覆盖：臆造 title **会**被护栏误判通过（旧漏洞，故必须用 display_*）', _ok25b is True)
+    # 开态：title/cipai 保持语料真值，覆盖值只落 display_*
+    os.environ['LVC_TITLE_COVER'] = '1'
+    try:
+        _rt25._TITLE_COVER_CACHE.clear()
+        _cov25 = _rt25._title_cover()
+        if _cov25:
+            _pidc = next(iter(_cov25))
+            _c25b = _sq25.connect(_db25)
+            _b25c = _ev25.poem_block(_c25b, _pidc, top_lines=1)
+            _row25 = _c25b.execute('SELECT cipai,title FROM poems WHERE pid=?', (_pidc,)).fetchone()
+            ok('题名覆盖：开态 title/cipai 仍为语料真值、覆盖值只在 display_*',
+               _b25c['title'] == (_row25[1] or '') and _b25c['cipai'] == (_row25[0] or '')
+               and _b25c.get('display_title') == _cov25[_pidc]['title'], _b25c.get('display_title'))
+            _c25b.close()
+        else:
+            ok('题名覆盖：覆盖表缺失 → _title_cover() 优雅返回 None（不报错）', True)
+    finally:
+        os.environ.pop('LVC_TITLE_COVER', None)
+        _rt25._TITLE_COVER_CACHE.clear()
+    _c25.close()
+
+    # ============ §26 LLM FACTS 只用语料真值（Design A 配套，安全官 P2-3）============
+    # 覆盖值只进 `display_*` 展示字段；**进大模型的 FACTS 必须是语料真值**——否则模型会
+    # 引用「展示题名」而当护栏只认语料 `title` 时被判「引文未落地」，或把展示值当事实复述。
+    # `gen.facts()` 只用 `b['title'] or b['cipai']`（语料真值）；本项**锁死**该不变量。
+    print('\n--- LLM FACTS 只用语料真值（display_* 不进 FACTS）---')
+    import gen as _gen26
+    _blk26 = {
+        'eid': 'E1', 'dynasty': '清', 'author': '高旭', 'pid': 'x#1',
+        'title': '卖花声', 'cipai': '卖花声',
+        'display_title': '浪淘沙', 'display_cipai': '浪淘沙',
+        'sent_n': 8, 'han_len': 54, 'ping': 20, 'ze': 22, 'ze_ratio': 40.7,
+        'scene': '后段下降', 'change': 1.0, 'threshold': 3.0, 'lines': [],
+    }
+    _f26 = _gen26.facts({'spec': '词人=高旭', 'blocks': [_blk26]})
+    ok('FACTS：含语料真值 title（卖花声）', '卖花声' in _f26)
+    ok('FACTS：**不含** display_title 值（浪淘沙）——只认语料真值', '浪淘沙' not in _f26)
+
     print('\n================ 自检汇总 ================')
     print('检查项 %d，失败 %d' % (N, len(FAIL)))
     if FAIL:

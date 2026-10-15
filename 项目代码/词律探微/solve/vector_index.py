@@ -75,8 +75,11 @@ def _post(url, body, timeout=_TIMEOUT):
         return json.loads(r.read().decode('utf-8'))
 
 
-def embed(texts):
-    """文本列表 → 向量列表（自动分批）。任一批失败 → 返回 None（调用方降级）。"""
+def embed(texts, timeout=_TIMEOUT):
+    """文本列表 → 向量列表（自动分批）。任一批失败 → 返回 None（调用方降级）。
+
+    `timeout` 可覆盖单次请求超时（健康自检用较短超时，避免端点挂死时久等）。
+    """
     host, _ = _read_llm_cfg()
     if not host:
         return None
@@ -84,7 +87,7 @@ def embed(texts):
     for i in range(0, len(texts), _BATCH):
         try:
             d = _post(host + '/v1-openai/embeddings',
-                      {'model': embed_model(), 'input': texts[i:i + _BATCH]})
+                      {'model': embed_model(), 'input': texts[i:i + _BATCH]}, timeout=timeout)
         except Exception:                                        # noqa: BLE001
             return None
         vs = [x.get('embedding') for x in (d.get('data') or [])]
@@ -194,13 +197,15 @@ def coverage(conn=None, deep=False):
             _dyn = dict((r[0], r[1]) for r in conn.execute(
                 'SELECT dynasty, COUNT(*) FROM poems GROUP BY dynasty'))
             _idx_dyn = {}
+            # ⚠ 2026-10-15 修（如实报告）：pid 形态**不止一种**——`ci.清.*`（第二段即朝代）
+            #   之外，还有 `ci.song.*`（第二段是 'song'）、`yuanqu.json#*`（无朝代段）。
+            #   旧写法 `_pid.split('.')[1]` 把后两类误判成 'song'/'json#*' → 宋/元被
+            #   误报「篇级全缺」（实测：宋 21053/21053、元 11057/11057 假缺口）。
+            #   改用语料库 `poems.dynasty` 的**权威映射**（pid→朝代），无则回退启发式。
+            _dmap = dict(conn.execute('SELECT pid, dynasty FROM poems'))
             for m in pm:
                 _pid = m.get('pid') if isinstance(m, dict) else getattr(m, 'pid', '')
-                # pid 形如 ci.清.xxx / ci.宋.xxx / ci.元.xxx —— 第二段即朝代
-                try:
-                    _d = _pid.split('.')[1]
-                except IndexError:
-                    _d = '?'
+                _d = _dmap.get(_pid) or (_pid.split('.')[1] if '.' in _pid else '?')
                 _idx_dyn[_d] = _idx_dyn.get(_d, 0) + 1
             for d, tot in _dyn.items():
                 out['by_dynasty'][d] = {'indexed': _idx_dyn.get(d, 0), 'total': tot}
@@ -513,12 +518,93 @@ def similar(pid, topk=10, conn=None, allow=None, exclude_self=True):
         return []
 
 
+def health(conn=None, probe=True, probe_timeout=10):
+    """**健康自检**：索引 / 嵌入端点 / 覆盖率 三件事**各自如实报告**（缺陷 #5 交付）。
+
+    返回 dict：`index`(info)、`endpoint`(探活结果)、`coverage`(给了 conn 才有)、
+    `verdict` ∈ {ok, degraded, down}、`why`（一句人话）。
+
+    纪律：**绝不吞错**——端点不可达 → `endpoint.ok=False` 且 `why` 写明原因；
+    索引不可用 → `index.ok=False`。上层据此**如实说明**，不静默降级成错误答案。
+    """
+    import time
+    available(force=True)
+    idx = info()
+    rep = {'index': idx, 'endpoint': None, 'coverage': None, 'verdict': '', 'why': ''}
+    if probe:
+        host, _ = _read_llm_cfg()
+        if not host:
+            rep['endpoint'] = {'ok': False, 'url': '', 'model': embed_model(),
+                               'why': '未配置嵌入端点（solve/data/llm_local.json 缺 url）'}
+        else:
+            url = host + '/v1-openai/embeddings'
+            t0 = time.time()
+            v = embed(['健康自检'], timeout=probe_timeout)
+            rep['endpoint'] = {
+                'ok': bool(v), 'url': url, 'model': embed_model(),
+                'ms': int((time.time() - t0) * 1000),
+                'dim': (len(v[0]) if v else None),
+                'why': '' if v else ('嵌入端点不可达 / 返回异常（%d 秒内未取到向量）'
+                                     % probe_timeout),
+            }
+    if conn is not None:
+        try:
+            rep['coverage'] = coverage(conn)
+        except Exception as e:                                   # noqa: BLE001
+            rep['coverage'] = {'complete': None, 'notes': ['覆盖率核验失败：%r' % e]}
+    ep_ok = (rep['endpoint'] or {}).get('ok')
+    if not idx.get('ok'):
+        rep['verdict'], rep['why'] = 'down', (
+            '向量索引不可用：%s（相似检索将返回空并**如实说明**，不静默降级成错误答案）'
+            % (idx.get('why') or '原因未注明'))
+    elif rep['endpoint'] is not None and not ep_ok:
+        rep['verdict'], rep['why'] = 'degraded', (
+            '索引可用，但**嵌入端点不可达**：相似检索取不到查询向量 → 返回空并**如实说明**')
+    else:
+        rep['verdict'], rep['why'] = 'ok', '索引与嵌入端点均可用'
+    return rep
+
+
+def format_health(rep):
+    """把 `health()` 结果排版成可读报告。"""
+    idx = rep['index']
+    lines = ['=== 向量检索健康自检 ===',
+             '索引可用     : %s%s' % (idx.get('ok'),
+                                     ('（%s）' % idx.get('why')) if idx.get('why') else ''),
+             '  模型/维度  : %s / %s（索引版本 v%s，要求 v%s）'
+             % (idx.get('model'), idx.get('dim'),
+                idx.get('index_version'), idx.get('expected_version')),
+             '  载入条数   : 篇 %s / 句 %s（构建于 %s）'
+             % (idx.get('loaded_poems'), idx.get('loaded_lines'), idx.get('built_at'))]
+    ep = rep.get('endpoint')
+    if ep is not None:
+        lines.append('嵌入端点     : %s（%s）' % (ep.get('ok'), ep.get('why') or '可达'))
+        if ep.get('url'):
+            lines.append('  %s  模型=%s  维度=%s  用时=%sms'
+                         % (ep['url'], ep.get('model'), ep.get('dim'), ep.get('ms')))
+    cov = rep.get('coverage')
+    if cov is not None:
+        lines.append('覆盖率       : complete=%s（篇 %s/%s）'
+                     % (cov.get('complete'), cov.get('indexed_poems'), cov.get('total_poems')))
+        for n in (cov.get('notes') or [])[:5]:
+            lines.append('  · %s' % n)
+    lines.append('判定         : %s —— %s' % (rep['verdict'].upper(), rep['why']))
+    return '\n'.join(lines)
+
+
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description='向量索引自检')
+    ap = argparse.ArgumentParser(description='向量索引自检 / 健康检查')
     ap.add_argument('--q', action='append', default=[], help='语义查询（可多次）')
     ap.add_argument('--similar', type=int, default=0, help='找与该 pid 主题相近的作品')
+    ap.add_argument('--health', action='store_true',
+                    help='健康自检：索引可用性 + 嵌入端点探活 + 覆盖率（退出码 0=ok 否则 1）')
     a = ap.parse_args()
+    if a.health:
+        c = sqlite3.connect(os.path.join(_ROOT, 'data', 'corpus.db'))
+        rep = health(conn=c, probe=True)
+        print(format_health(rep))
+        return 0 if rep['verdict'] == 'ok' else 1
     available()          # 先触发一次加载，`info()` 才有内容（否则首行恒 ok:false，误导）
     print('index info: %s' % json.dumps(info(), ensure_ascii=False))
     for q in (a.q or ['写秋景的词']):
@@ -526,12 +612,12 @@ def main():
         for pid, sc in search(q, topk=3):
             print('   pid=%-8s %.4f' % (pid, sc))
     if a.similar:
-        import sqlite3
         c = sqlite3.connect(os.path.join(_ROOT, 'data', 'corpus.db'))
         print('\n与 pid=%d 相近：' % a.similar)
         for pid, sc in similar(a.similar, topk=3, conn=c):
             print('   pid=%-8s %.4f' % (pid, sc))
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

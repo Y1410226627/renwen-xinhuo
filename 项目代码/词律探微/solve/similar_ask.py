@@ -115,6 +115,37 @@ def _resolve_reference(conn, question):
     return best[0], label
 
 
+def _honest_unavailable(question, ref_note, reason):
+    """向量不可用（索引缺失 / 端点不可达）时的**如实说明**回复。
+
+    **绝不**回落主链、**绝不**静默换一个问题去答（那就是「答非所问」）。
+    返回结构与「被接管」的正常回答同构，调用方可直接返回。
+    """
+    import guard
+    text = ('【查询理解】（来源：语义相似检索）与所述参照**主题相近**的作品。\n'
+            '　　　' + (ref_note or '（未取得参照说明）') + '\n'
+            '【结论】语义检索**当前未返回结果**——可能原因：' + reason + '。'
+            '为避免**答非所问**，此处不回落为其它解释；请稍后重试，'
+            '或改用结构化条件（朝代 / 词牌 / 句脚字 / 仄声比例区间等）提问。\n'
+            '【推断边界｜优劣型问句】本条不含任何篇目结论，也不构成文学价值判断。')
+    ok, problems = guard.verify(text, [], boundary_kind='优劣型', allow=(0,))
+    return {
+        'question': question,
+        'spec': ref_note,
+        'kind': '语义相似',
+        'blocks': [],
+        'answer': text,
+        'verify': (ok, problems),
+        'refused': False,
+        'problems': problems,
+        'total': 0,
+        'narrator': 'template',
+        'parse_source': '语义相似检索（向量不可用，如实说明）',
+        'parse_notes': [ref_note],
+        'safety': {'ok': True},
+    }
+
+
 def answer_similar(conn, question, topk=5, min_score=0.0):
     """语义相似作答主函数。**返回 dict 或 None**。
 
@@ -131,7 +162,15 @@ def answer_similar(conn, question, topk=5, min_score=0.0):
     except Exception:                                            # noqa: BLE001
         return None
     if not VI.available(conn):
-        return None
+        # ⚠ 2026-10-15 修（缺陷 #5，实测驱动）：索引不可用时**也必须如实说明**，
+        #   不得 `return None` 回落主链——否则主链会把「与《X》类似的词」当成「定位 X」
+        #   来答（实测：索引缺失时该问句被答成「在条件〔朝代=清；词牌=小重山；题名=…〕下
+        #   共命中 1 篇」→ **答非所问**）。与「端点不可达」分支同一套「接管并如实说明」。
+        _m = _BOOK_TITLE_RE.search(question or '')
+        _lab = _m.group(1).strip() if _m else ''
+        return _honest_unavailable(
+            question, ('参照对象【%s】' % _lab) if _lab else '',
+            '向量索引不可用（%s）' % (VI.why() or '原因未注明'))
 
     import evidence
     import guard
@@ -160,28 +199,8 @@ def answer_similar(conn, question, topk=5, min_score=0.0):
         #   答的是那篇的篇级统计）——**答非所问，且用户无从察觉**。
         #   既然「相似意图 + 参照可定位/可检索」已经确凿，就应**接管并如实说明不可用**，
         #   而不是悄悄换一个问题去答（这与本项目的「未验证就说未验证」同一条纪律）。
-        text = ('【查询理解】（来源：语义相似检索）与所述参照**主题相近**的作品。\n'
-                '　　　' + (ref_note or '（未取得参照说明）') + '\n'
-                '【结论】语义检索**当前未返回结果**——可能原因：嵌入端点不可达 / '
-                '向量索引不可用 / 确无相近篇目。为避免**答非所问**，此处不回落为其它解释；'
-                '请稍后重试，或改用结构化条件（朝代 / 词牌 / 句脚字 / 仄声比例区间等）提问。\n'
-                '【推断边界｜优劣型问句】本条不含任何篇目结论，也不构成文学价值判断。')
-        ok, problems = guard.verify(text, [], boundary_kind='优劣型', allow=(0,))
-        return {
-            'question': question,
-            'spec': ref_note,
-            'kind': '语义相似',
-            'blocks': [],
-            'answer': text,
-            'verify': (ok, problems),
-            'refused': False,
-            'problems': problems,
-            'total': 0,
-            'narrator': 'template',
-            'parse_source': '语义相似检索（向量不可用，如实说明）',
-            'parse_notes': [ref_note],
-            'safety': {'ok': True},
-        }
+        return _honest_unavailable(question, ref_note,
+                                   '嵌入端点不可达 / 向量索引不可用 / 确无相近篇目')
 
     hits = [(p, s) for p, s in hits if s >= min_score][:topk]
     if not hits:
