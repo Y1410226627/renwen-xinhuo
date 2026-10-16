@@ -37,6 +37,12 @@ import uuid
 MAX_SESSIONS = 50            # 最多保留 50 个会话（超出按最近使用淘汰）
 MAX_TURNS = 20               # 每个会话最多保留 20 轮（超出丢最旧）
 MAX_PIDS_PER_TURN = 20000    # 每轮 pid 上限；超出→截断并标记 truncated: True
+_SID_RE = re.compile(r'^[A-Za-z0-9_-]{1,80}$')  # sid 会落盘为文件名；不允许路径分隔符/点号
+
+
+def valid_sid(sid):
+    """sid 只能是短文件名安全字符；拒绝路径片段、点号和控制字符。"""
+    return isinstance(sid, str) and _SID_RE.fullmatch(sid) is not None
 
 # ───────── 结果集合的**语义类型**（2026-10-08 第二轮审查 §22 新增） ─────────
 # 旧版把「上一轮结果集」当成一种东西，实际上两种**可追问性完全不同**：
@@ -333,7 +339,11 @@ class ContextStore:
             return self.sessions.get(sid)
 
     def get_or_create(self, sid):
-        """按 sid 取会话；不存在则（用该 sid）新建。sid 为空则新建一个。"""
+        """按安全 sid 取会话；不存在则（用该 sid）新建。sid 为空则新建一个。"""
+        sid = str(sid).strip() if sid is not None else None
+        sid = sid or None
+        if sid and not valid_sid(sid):
+            raise ValueError('sid 格式无效（仅允许 1–80 位字母、数字、下划线或连字符）')
         with self._lock:
             s = self.sessions.get(sid) if sid else None
             if s is None:
@@ -382,7 +392,10 @@ class ContextStore:
 
     # ---- 持久化 ----
     def _path(self, sid):
-        return os.path.join(self.dirpath, '%s.json' % sid) if self.dirpath else None
+        # 即使上游漏校验，也不能让不可信值离开会话目录。
+        if not self.dirpath or not valid_sid(sid):
+            return None
+        return os.path.join(self.dirpath, '%s.json' % sid)
 
     def load_one(self, sid):
         p = self._path(sid)
@@ -416,9 +429,11 @@ class ContextStore:
     def save(self, session):
         if not self.persist or session is None:
             return False
+        p = self._path(session.sid)
+        if not p:
+            return False
         try:
             os.makedirs(self.dirpath, exist_ok=True)
-            p = self._path(session.sid)
             # ★ 2026-10-11（审查·中）：临时文件名原来是**固定的** `p + '.tmp'`。
             #   同一 sid 的两次保存并发时（重发 / 双击 / 多线程）会**写同一个临时文件**：
             #   两份内容交错写进去，最后 `os.replace` 上去的是一份**混合的坏 JSON**，

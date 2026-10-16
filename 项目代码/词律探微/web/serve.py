@@ -14,9 +14,9 @@
 接口（全部返回 JSON，字段即文档）：
     /api/ask?q=...&topk=3&parse=1&narrate=1&argument=1&ctx=...[&ctx_pids=p1,p2,...][&sid=...&carry=1]
                 真实引擎作答（检索→证据块→护栏）
-                （ctx＝上一轮「问句+解析」摘要；ctx_pids＝上一轮**命中的篇 id 集合**
-                  （逗号分隔或重复参数），用于把「那里面……」的指代落到**真实结果集**上；
-                  两者都只在 parse=1 时生效。返回体附 `ctx_pids.{received,consumed}`
+                （ctx＝上一轮「问句+解析」摘要，仅模型理解路使用；ctx_pids＝上一轮**命中的篇 id 集合**
+                  （逗号分隔或重复参数），可供问答链把「那里面……」落到**真实结果集**上；
+                  返回体附 `ctx_pids.{received,consumed}`
                   如实回告服务端收到了几个 id、后端理解层是否已消费）
                 ⚠ 2026-10-08 新增（外部审查 A/B 项）：
                   · `sid`   —— **服务端会话 id**。带上它，服务端把本轮**完整**结果集
@@ -2029,10 +2029,12 @@ class H(BaseHTTPRequestHandler):
     # ⚠ 2026-10-16（修复 ②）：**大模型端点限流**（令牌桶 + 并发上限）。见 `_llm_admit`。
     @staticmethod
     def _is_llm_endpoint(path, g):
-        """本请求是否会真正调用大模型（决定是否过限流）。"""
+        """本请求是否可能调用大模型（决定是否过限流；问答入口按能力保守准入）。"""
         b = lambda k: (g(k) or '').lower() in ('1', 'true', 'yes', 'on')      # noqa: E731
-        if path == '/api/ask':
-            return b('narrate') or b('argument') or b('parse') or b('llm')
+        # 问答链会根据开放/未解析问句和规划路动态决定是否调用模型；只检查显式开关会漏限。
+        # 流式问答也走同一条链。两种入口统一做准入，宁可对少量纯规则问句保守限流。
+        if path in ('/api/ask', '/api/ask_stream'):
+            return True
         if path in ('/api/summarize', '/api/nl2query'):
             return (g('llm', '1') or '').lower() not in ('0', 'false', 'no')
         return False
@@ -2192,6 +2194,12 @@ class H(BaseHTTPRequestHandler):
         g = lambda k, d='': (qs.get(k, [d])[0] if qs.get(k) else d)
         _llm_slot = False
         try:
+            session_sid = None
+            if u.path in ('/api/ask', '/api/ask_stream'):
+                session_sid = (g('sid') or '').strip() or None
+                if session_sid and not CONTEXT.valid_sid(session_sid):
+                    return self._send(_err('BAD_PARAM',
+                        'sid 格式无效（仅允许 1–80 位字母、数字、下划线或连字符）'), code=400)
             # ⚠ 2026-10-16（修复 ②）：大模型端点限流（令牌桶 + 并发上限），超出 429（统一信封）。
             if self._is_llm_endpoint(u.path, g):
                 _deny = self._llm_admit()
@@ -2235,7 +2243,7 @@ class H(BaseHTTPRequestHandler):
                                         # 多轮「结果集」：支持逗号分隔或重复参数（见 _split_ctx_pids）
                                         ctx_pids=qs.get('ctx_pids'),
                                         # 服务端会话（外部审查 A）：带 sid 时用服务端完整结果集
-                                        sid=((g('sid') or '').strip() or None),
+                                        sid=session_sid,
                                         carry=b('carry'),
                                         # ★ P2-5：模型/端点可指定（受校内本地约束）
                                         model=(g('model') or '').strip() or None,
@@ -2266,7 +2274,7 @@ class H(BaseHTTPRequestHandler):
                                           # 多轮「结果集」：支持逗号分隔或重复参数
                                           ctx_pids=qs.get('ctx_pids'),
                                           # 服务端会话（外部审查 A）
-                                          sid=((g('sid') or '').strip() or None),
+                                          sid=session_sid,
                                           carry=b('carry'),
                                           model=(g('model') or '').strip() or None,
                                           endpoint=(g('endpoint') or '').strip() or None):
