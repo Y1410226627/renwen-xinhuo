@@ -523,6 +523,22 @@ def list_meta_revisions(conn, pid, scope=None):
 URL_SCHEMES_OK = ('http', 'https')
 
 
+def _existing_material_id(conn, value, field='material_id'):
+    """规范化研究材料外键值，并拒绝不存在的材料引用。"""
+    if value is None or value == '':
+        return None
+    if isinstance(value, bool):
+        raise ValueError('%s 必须是已存在的正整数材料编号' % field)
+    try:
+        mid = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('%s 必须是已存在的正整数材料编号' % field)
+    if (mid <= 0 or (isinstance(value, float) and not value.is_integer()) or
+            conn.execute('SELECT 1 FROM materials WHERE id=?', (mid,)).fetchone() is None):
+        raise ValueError('%s 指向的材料不存在：%s' % (field, value))
+    return mid
+
+
 def safe_url(u, field='source_url', required=False):
     """校验并返回来源地址；只放行 http/https。空串（不填）合法通过。
 
@@ -679,31 +695,96 @@ def get_material_chain(conn, material_id):
 
 
 # ---------------------------------------------------------------- 功能 7：研究事实库
-def verify_fact_evidence(corpus_conn, poem_pid, line_idx, evidence,
-                         span_start=None, span_end=None):
-    """把「引文」与语料原文**逐字核对**（功能 7 硬约束：找不到出处的不许入库）。
+def _fact_index(value, field):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError('%s 必须是非负整数' % field)
+    try:
+        out = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('%s 必须是非负整数' % field)
+    if out < 0 or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError('%s 必须是非负整数' % field)
+    return out
 
-    返回 `(ok, detail)`。核验口径（与 `corpus.db` 的 `lines`/`poems` 表直接对齐）：
-      · 给了 `line_idx`：在该**句**里找（原样文本，含句末标点，句序从 0 起）；
-      · 未给：在该篇 `raw` 全篇里找；
-      · 给了 `span_start/span_end`：区间内容必须**恰等于**引文（最强定位，char 索引）。
-    """
+
+def _fact_source_text(corpus_conn, poem_pid, line_idx, personal_conn=None):
+    """取作品原文或指定句；personal:<id> 从研究库解析，其余从只读语料库取。"""
+    if poem_pid.startswith('personal:'):
+        if personal_conn is None:
+            return None, '个人作品连接不可用', '个人作品不可读'
+        try:
+            wid = int(poem_pid[len('personal:'):])
+            if wid <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return None, '个人作品编号无效', '个人作品编号无效'
+        try:
+            row = personal_conn.execute(
+                'SELECT content, withdrawn FROM personal_works WHERE id=?', (wid,)).fetchone()
+        except Exception as e:                                    # noqa: BLE001
+            return None, '个人作品不可读', '个人作品不可读：%s' % type(e).__name__
+        if row is None:
+            return None, '个人作品不存在', '个人作品不存在：%s' % poem_pid
+        if int(row[1] or 0):
+            return None, '个人作品已撤回', '个人作品已撤回：%s' % poem_pid
+        content = row[0] or ''
+        if line_idx is None:
+            return content, '全篇', None
+        try:
+            sentences, _ = Engine(_pronouncer()).lines(content)
+        except Exception as e:                                    # noqa: BLE001
+            return None, '个人作品切句失败', '个人作品切句失败：%s' % type(e).__name__
+        if line_idx >= len(sentences):
+            return None, '句序不存在', '个人作品中没有第 %d 句' % (line_idx + 1)
+        return sentences[line_idx], '第 %d 句' % (line_idx + 1), None
+
+    if corpus_conn is None:
+        return None, '语料连接不可用', '调用方未提供语料连接'
+    where = '作品'
     try:
         if line_idx is not None:
             row = corpus_conn.execute('SELECT text FROM lines WHERE pid=? AND idx=?',
-                                      (poem_pid, int(line_idx))).fetchone()
-            text = row[0] if row else None      # 位置索引：调用方连接未必设 row_factory
-            where = '第 %d 句' % (int(line_idx) + 1)
+                                      (poem_pid, line_idx)).fetchone()
+            where = '第 %d 句' % (line_idx + 1)
         else:
-            row = corpus_conn.execute('SELECT raw FROM poems WHERE pid=?', (poem_pid,)).fetchone()
-            text = row[0] if row else None
+            row = corpus_conn.execute('SELECT raw FROM poems WHERE pid=?',
+                                      (poem_pid,)).fetchone()
             where = '全篇'
     except Exception as e:                                        # noqa: BLE001
-        return (False, '语料不可读：%r' % e)
-    if not text:
-        return (False, '篇/句不在语料中（pid=%s，%s）' % (poem_pid, where))
-    if span_start is not None and span_end is not None:
-        seg = text[int(span_start):int(span_end)]
+        return None, where, '语料不可读：%s' % type(e).__name__
+    if row is None:
+        return None, where, '篇/句不在语料中（pid=%s，%s）' % (poem_pid, where)
+    return row[0] or '', where, None
+
+
+def verify_fact_evidence(corpus_conn, poem_pid, line_idx, evidence,
+                         span_start=None, span_end=None, personal_conn=None):
+    """把「引文」与语料或个人作品原文**逐字核对**（功能 7 硬约束）。
+
+    返回 `(ok, detail)`。核验口径（与 `corpus.db` 的 `lines`/`poems` 表直接对齐）：
+      · 给了 `line_idx`：在该**句**里找（原样文本，含句末标点，句序从 0 起）；
+      · 未给：在该篇 `raw` 全篇里找；个人作品按同一切句引擎定位；
+      · 给了 `span_start/span_end`：区间内容必须**恰等于**引文（最强定位，char 索引）。
+    """
+    evidence = str(evidence or '')
+    try:
+        line_idx = _fact_index(line_idx, 'line_idx')
+        span_start = _fact_index(span_start, 'span_start')
+        span_end = _fact_index(span_end, 'span_end')
+    except ValueError as e:
+        return False, str(e)
+    if (span_start is None) != (span_end is None):
+        return False, 'span_start 与 span_end 必须同时提供'
+    text, where, source_error = _fact_source_text(
+        corpus_conn, str(poem_pid or '').strip(), line_idx, personal_conn)
+    if source_error:
+        return False, source_error
+    if span_start is not None:
+        if span_end < span_start or span_end > len(text):
+            return False, '区间超出正文范围或结束位置早于起点'
+        seg = text[span_start:span_end]
         if seg != evidence:
             return (False, '区间内容与引文不一致：%r ≠ %r' % (seg, evidence))
         return (True, '区间逐字一致')
@@ -723,25 +804,58 @@ def add_fact(conn, statement, material_id=None, locator='', poem_pid=None, line_
       2. 给 `poem_pid` + `evidence` 时**逐字核验**：传了 `corpus_conn` 就真核验、
          不一致即拒绝入库；没传就**不假装核验过**（`verified=False` 并注明未核对）。
     """
-    if not (statement or '').strip():
+    statement = str(statement or '').strip()
+    poem_pid = str(poem_pid or '').strip() or None
+    evidence = str(evidence or '')
+    if poem_pid and poem_pid.startswith('personal:'):
+        try:
+            personal_id = int(poem_pid[len('personal:'):])
+            if personal_id <= 0:
+                raise ValueError
+            poem_pid = 'personal:%d' % personal_id
+        except (TypeError, ValueError):
+            raise ValueError('poem_pid 的 personal 编号必须是正整数')
+    if material_id == '':
+        material_id = None
+    if not statement:
         raise ValueError('statement 为必填')
     if material_id is None and not poem_pid:
         raise ValueError('找不到出处的登记不许入库：material_id 或 poem_pid 至少给一个')
-    verified, detail = 0, '未核对'
-    if poem_pid and evidence and corpus_conn is not None:
-        vok, detail = verify_fact_evidence(corpus_conn, poem_pid, line_idx, evidence,
-                                           span_start, span_end)
-        if not vok:
-            raise ValueError('引文与原文不一致，拒绝入库：%s' % detail)
-        verified = 1
-    elif poem_pid and evidence:
-        detail = '未核对（调用方未提供语料连接）'
+    line_idx = _fact_index(line_idx, 'line_idx')
+    span_start = _fact_index(span_start, 'span_start')
+    span_end = _fact_index(span_end, 'span_end')
+    if (span_start is None) != (span_end is None):
+        raise ValueError('span_start 与 span_end 必须同时提供')
+    if (line_idx is not None or span_start is not None) and not poem_pid:
+        raise ValueError('line_idx / span_* 必须和 poem_pid 一起提供')
+    if span_start is not None and not evidence:
+        raise ValueError('提供 span_* 区间时必须同时提供 evidence')
 
     def fn(c):
+        mid = _existing_material_id(c, material_id)
+        if mid is None and not poem_pid:
+            raise ValueError('找不到出处的登记不许入库：material_id 或 poem_pid 至少给一个')
+        verified, detail = 0, '未核对'
+        if poem_pid:
+            is_personal = poem_pid.startswith('personal:')
+            if is_personal or corpus_conn is not None:
+                text, _where, source_error = _fact_source_text(
+                    corpus_conn, poem_pid, line_idx, personal_conn=c)
+                if source_error:
+                    raise ValueError('研究事实的作品出处无效：%s' % source_error)
+            if evidence and (is_personal or corpus_conn is not None):
+                vok, detail = verify_fact_evidence(
+                    corpus_conn, poem_pid, line_idx, evidence, span_start, span_end,
+                    personal_conn=c)
+                if not vok:
+                    raise ValueError('引文与原文不一致，拒绝入库：%s' % detail)
+                verified = 1
+            elif evidence:
+                detail = '未核对（调用方未提供语料连接）'
         cur = c.execute(
             'INSERT INTO facts(created_at,statement,material_id,locator,poem_pid,line_idx,'
             'span_start,span_end,evidence,verified,client_token) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-            (_now(), statement, material_id, locator, poem_pid, line_idx, span_start,
+            (_now(), statement, mid, locator, poem_pid, line_idx, span_start,
              span_end, evidence, verified, client_token))
         return {'fact_id': cur.lastrowid, 'verified': bool(verified), 'verify_detail': detail}
 
@@ -997,11 +1111,12 @@ def add_personal_work(conn, title, content, author='', cipai='', verification_st
         raise ValueError('「已对上来源」必须写明来源（source 不得为空）——不许空口自证')
 
     def fn(c):
+        material_id = _existing_material_id(c, source_material_id, 'source_material_id')
         cur = c.execute(
             'INSERT INTO personal_works(created_at,author,title,cipai,content,'
             'verification_state,source,source_material_id,source_locator,checked_at,checked_by)'
             ' VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-            (_now(), author, title, cipai, content, st, source, source_material_id,
+            (_now(), author, title, cipai, content, st, source, material_id,
              source_locator, _now() if st != 'draft' else None, actor if st != 'draft' else None))
         return {'work_id': cur.lastrowid, 'verification_state': st,
                 'label': _VERIFY_LABELS.get(st, st)}
@@ -1026,12 +1141,13 @@ def set_work_verification(conn, work_id, state, source='', source_material_id=No
             else source
         if st == 'source_matched' and not (src or '').strip():
             raise ValueError('「已对上来源」必须写明来源（source 不得为空）')
+        material_id = _existing_material_id(
+            c, source_material_id if source_material_id is not None else w['source_material_id'],
+            'source_material_id')
         c.execute('UPDATE personal_works SET verification_state=?, source=?,'
                   ' source_material_id=?, source_locator=?, checked_at=?, checked_by=?'
                   ' WHERE id=?',
-                  (st, src, source_material_id if source_material_id is not None
-                   else w['source_material_id'],
-                   source_locator, _now(), actor, wid))
+                  (st, src, material_id, source_locator, _now(), actor, wid))
         d = _insert_decision(c, 'verify', 'work:%d' % wid, 'set_state',
                              payload={'work_id': wid, 'from': w['verification_state'],
                                       'to': st, 'source': src},
@@ -1172,7 +1288,9 @@ def import_rows(conn, tag, files, actor='import', note='', client_token=None):
         raise ValueError('files 为空：没有可导入的内容')
     prepared = []
     meta = []
-    for f in files:
+    for fi, f in enumerate(files):
+        if not isinstance(f, dict):
+            raise ValueError('files[%d] 必须是 JSON 对象（含 name / rows）' % fi)
         name = str(f.get('name') or 'inline.jsonl')
         rows = list(f.get('rows') or [])
         for i, r in enumerate(rows):
@@ -1220,13 +1338,15 @@ def import_rows(conn, tag, files, actor='import', note='', client_token=None):
                 if ex is not None:
                     skipped += 1
                     continue
+                material_id = _existing_material_id(
+                    c, r.get('source_material_id'), 'source_material_id')
                 w = c.execute(
                     'INSERT INTO personal_works(created_at,author,title,cipai,content,'
                     'verification_state,source,source_material_id,source_locator)'
                     ' VALUES(?,?,?,?,?,?,?,?,?)',
                     (_now(), str(r.get('author') or ''), str(r.get('title') or '').strip(),
                      str(r.get('cipai') or ''), str(r.get('content') or ''),
-                     'draft', str(r.get('source') or ''), r.get('source_material_id'),
+                     'draft', str(r.get('source') or ''), material_id,
                      str(r.get('source_locator') or ''))).lastrowid
                 c.execute('INSERT INTO import_rows(batch_id,file,row_key,row_sha,payload,work_ref)'
                           ' VALUES(?,?,?,?,?,?)',
