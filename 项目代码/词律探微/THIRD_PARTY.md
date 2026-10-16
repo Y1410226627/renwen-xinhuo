@@ -12,8 +12,8 @@
 | 上游仓库 | <https://github.com/hulbji/couyun>（「凑韵·诗词格律检测工具」） |
 | 固定版本 | commit `1744e87f850c2205bc231bfdd858256036c0e4db`（2026-10-04 取数） |
 | 许可 | **MIT License**，`Copyright (c) 2026 hulbji`（全文见 `data/cipu/LICENSE-couyun.txt`） |
-| 分发文件 | `data/cipu/normalized-rules.json`（144 体规范）、`data/cipu/tune-registry.json`（20 词牌注册表）、`data/cipu/manifest.json`（上游取数清单）、`data/cipu/LICENSE-couyun.txt` |
-| SHA256 | `normalized-rules.json` = `0852477f1ec4c0b0cc24d79fa98489abd637d6517c0676efb779a8468c93aab0`<br>`tune-registry.json` = `bf8a49ee6e4b3dd8eebb8ac318676231ba083b819631933df1605300d3dcfbb8`<br>`manifest.json` = `8200dcfabbf934bb917c1a8c9310121f0a28d1e87bac6c3effea50330989aea0`<br>`LICENSE-couyun.txt` = `a22fdea1d0af3ad9385c4e642aa1898f64053349b39fa276b37fb2eb75e595d2` |
+| 分发文件 | `data/cipu/normalized-rules.json`（144 体规范）、`data/cipu/tune-registry.json`（20 词牌注册表）、`data/cipu/tune-alias-table.json`（**817 词牌**正名/别名表，派生自上游 `couyun/ci_pu/ci_index.json`）、`data/cipu/manifest.json`（上游取数清单）、`data/cipu/LICENSE-couyun.txt` |
+| SHA256 | `normalized-rules.json` = `0852477f1ec4c0b0cc24d79fa98489abd637d6517c0676efb779a8468c93aab0`<br>`tune-registry.json` = `bf8a49ee6e4b3dd8eebb8ac318676231ba083b819631933df1605300d3dcfbb8`<br>`tune-alias-table.json` = `e9c2a41422d9d872edca7718e783b55247af396e77f679cca91a9143e8be5ac3`<br>`manifest.json` = `8200dcfabbf934bb917c1a8c9310121f0a28d1e87bac6c3effea50330989aea0`<br>`LICENSE-couyun.txt` = `a22fdea1d0af3ad9385c4e642aa1898f64053349b39fa276b37fb2eb75e595d2` |
 | 底本说明 | 上游数据系**搜韵（sou-yun.cn）公开转写**的整理，**未核对原书影像**。任何界面与文档一律注明「参照来源：搜韵公开转写（未核原书）」，**严禁**写成「钦定词谱原书核验」。 |
 
 > 我方**原样分发**，未修改上述 JSON 文件；读取、拆句校验与对照逻辑在 `solve/cipu.py`，
@@ -56,3 +56,10 @@ hulbji/couyun @1744e87…
 - 口径红线：《广韵》候选为**历史音韵参考，只展示、不参与平仄计算**——本系统平仄按
   普通话四声（题库口径），人工裁定只收普通话读音；不据广韵韵目宣称押韵、不作清代语音推断。
 - 词谱数据（既有）：couyun（MIT）——见 data/cipu/README.md。
+
+## 派生数据（非第三方，随仓分发的中间产物）
+
+| 文件 | 来源与说明 |
+| --- | --- |
+| `data/rhyme/_chars.json` | **本仓自产**：从语料（清/宋/元）提取的**去重汉字表**（7,711 字），作为 `node tools/export_tshet_uinh.mjs` 的查询输入，用于生成 `tshet_uinh.json`。不含第三方内容，无独立许可（随本项目同许可）。SHA256 = `ba2596acfa0af908a23d8fc165dd1cf5dc87c127daa3a13a64f3a6065aeebb06` |
+| `data/rhyme/tshet_uinh.json` | 由上述输入经 tshet-uinh（MIT）导出（见上「推音」节）。SHA256 = `b7843aab97a2aa60864cc52b739a2f26621a99bbef2d0d1759eb1efefd800f8e` |

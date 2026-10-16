@@ -88,7 +88,7 @@ solve/                        交付链（**答案的唯一来源**，不 import
 
 web/   演示页与后端服务
 ├── serve.py         本地服务：/api/*（含写接口 POST，见 接口文档 §3.4）+ 静态页；问答页取 web/dist/ask/，离线视图取 data/vue/
-├── test_api.py      服务端门禁（143 项）
+├── test_api.py      服务端门禁（176 项）
 ├── test_research.py 研究库门禁（89 项；功能 1/6/7/8/11/12/13/15/18）
 ├── test_cipu.py     词谱门禁（23 项；功能 9）
 ├── build_views.py   生成离线视图**数据**（pack.js/graph.json/rev.js）+ 门禁用的 JSON
@@ -100,7 +100,7 @@ frontend/  Vue3 + Vite 前端（**视图与逻辑层的唯一真源**）
 ├── src/core/       纯逻辑唯一真源（UMD，可被 node 门禁与 Vue 共用）：
 │   metrics.js 声律指标 / ui.js 样式与工具 / parse.js 判定表与渲染
 │   review.js 校订队列 / ask.js 问答渲染
-├── src/views/      6 视图组件：IndexView / AskView / ParseView(离线+在线) / GraphView / ReviewView
+├── src/views/      7 视图组件：IndexView / AskView / ParseView(离线+在线) / CipuView / ResearchView / GraphView / ReviewView
 ├── src/components/AppShell.vue   外壳（导航/主题/页脚）
 ├── src/api.js      /api/* 客户端（含 SSE 流式解析）  src/stores/theme.js 主题
 ├── tools/build-all.mjs  一键构建（**先 Vite 后 Python**，顺序不能反）
@@ -117,7 +117,7 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 
 ## 三、改完先跑什么（门禁四件套 + 快照）
 
-> **★ 一键入口（最常用）**：`python tools/check_all.py --fast`（10–20 秒）／全档 `python tools/check_all.py`（3–6 分钟）。
+> **★ 一键入口（最常用）**：`python tools/check_all.py --fast`（10–20 秒）／全档 `python tools/check_all.py`（约 20–25 分钟，含 verify_1000）。
 > 全档跑齐：交付答案 SHA256 + **双集零回归（regress）** + `selftest` + `test_api` + `check-core` + `verify_1000`。
 > 失败**即停**，缺环境**显式 SKIP**（不算通过）。`--list` 只看要跑哪些，`--only` 只跑指定门禁。
 > ★ **2026-10-13 补**：双集回归（`--only regress`，约 14 秒）进全档——此前只校 `answers_700` 的
@@ -126,7 +126,7 @@ data/  corpus.db、golden_sha.json、corpus_manifest.json、存疑清单.md、we
 | 命令 | 管什么 |
 | --- | --- |
 | `python tools/check_all.py [--fast]` | **★ 统一门禁入口**（推荐；见上） |
-| `python solve/selftest.py` | 结构/安全/说法层自检（当前 **294 项 0 失败**） |
+| `python solve/selftest.py` | 结构/安全/说法层自检（当前 **300 项 0 失败**） |
 | `python tools/regress.py --questions <题面> --gold <答案> --tag 公开` | **双集零回归**（逐字节哈希；公开 `BF863368…`、第二套 `ACEF8B15…`）——全档已内置，也可单独 `--only regress` |
 | `python solve/tone_policy.py --pid <pid>` | **声律双口径对照**（评测口径 vs 《广韵》历史口径；逐字位四态，见 `GLOSSARY` 第六节） |
 | `python tools/verify_1000.py` | **逐题复核：答非所问 + 准确性**（条件理解一致性 + 形态 + 真值） |

@@ -30,10 +30,18 @@
      * 三色克制：纸底 / 墨字 / 朱红；字体分层：楷（标题·词正文）/ 仿宋（正文）/ 宋（控件·表）/ Georgia（数字）。
      * 仅调「外观」，不改任何类名与 DOM，故不影响门禁的文本断言与页面审计。 */
     var ROOT = ':root{--bg:#f5f1e8;--panel:#fbf8f1;--panel2:#f6f0e4;--panel3:#fcf9f4;'
-      + '--ink:#292722;--ink2:#746e62;--ink3:#8a6a53;--line:#d2caba;--line2:#d8cdbc;'
+      + '--ink:#292722;--ink2:#6b6558;--ink3:#7d5f49;--line:#d2caba;--line2:#d8cdbc;'
       + '--accent:#a64333;--accent-d:#9b4332;--accent2:#8a6a53;--ping:#2f5d7c;--ze:#9b4332;'
       + '--ok:#2f6b41;--warn:#8e3025;'
       + '--shadow:0 1px 2px rgba(74,58,38,.05),0 8px 24px rgba(74,58,38,.07);'
+      /* ⚠ 2026-10-16（前端审查·兼容性）：下列「回退变量」是为不支持 `color-mix()` 的旧内核
+         （Chromium < 111，部分国产浏览器）准备的**等价纯色**。用法一律「先 var() 再 color-mix()」双写：
+         支持的浏览器取后者（视觉不变），不支持的取前者（不再整条声明失效）。
+         数值 = 该 color-mix 在**本主题**下的等价 rgba（亮/暗各一套，故不能用一组写死 rgba）。 */
+      + '--row-alt:rgba(246,240,228,.45);--row-hover:rgba(166,67,51,.07);'
+      + '--hit-bg:rgba(138,106,83,.18);--mark-bg:rgba(166,67,51,.18);'
+      + '--legend-bar:rgba(166,67,51,.55);--focus-ring:rgba(166,67,51,.55);'
+      + '--warn-bg:rgba(142,48,37,.08);'
       + '--r:4px;--mono:"Cascadia Mono","Consolas","Sarasa Mono SC",monospace;'
       + '--kai:LocalKai,"KaiTi","STKaiti","Kaiti SC","楷体",serif;'
       + '--fang:LocalFang,"FangSong","STFangsong","FangSong_GB2312","仿宋",serif;'
@@ -49,7 +57,12 @@
       + '--ink:#ece5d6;--ink2:#a99d89;--ink3:#c9ab8c;--line:#3a332a;--line2:#443c31;'
       + '--accent:#cd7a63;--accent-d:#d98a70;--accent2:#c9ab8c;--ping:#8fb6d4;--ze:#d98a70;'
       + '--ok:#8fce9f;--warn:#e6a08f;'
-      + '--shadow:0 1px 2px rgba(0,0,0,.45),0 8px 22px rgba(0,0,0,.42)';
+      + '--shadow:0 1px 2px rgba(0,0,0,.45),0 8px 22px rgba(0,0,0,.42)'
+      /* 暗色下同名的回退变量（与亮色各自一套，保证旧内核暗色也正确） */
+      + ';--row-alt:rgba(39,33,25,.45);--row-hover:rgba(205,122,99,.07);'
+      + '--hit-bg:rgba(201,171,140,.18);--mark-bg:rgba(205,122,99,.18);'
+      + '--legend-bar:rgba(205,122,99,.55);--focus-ring:rgba(205,122,99,.55);'
+      + '--warn-bg:rgba(230,160,143,.08)';
 
     var CSS = [
       FONT,
@@ -101,8 +114,8 @@
       'th,td{border-bottom:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}',
       'thead th{background:var(--panel2);position:sticky;top:0;z-index:3;font-weight:600;'
       + 'box-shadow:inset 0 -1px 0 var(--line);font-family:var(--song);letter-spacing:.04em}',
-      'tbody tr:nth-child(2n){background:color-mix(in srgb,var(--panel2) 45%,transparent)}',
-      'tbody tr:hover{background:color-mix(in srgb,var(--accent) 7%,transparent)}',
+      'tbody tr:nth-child(2n){background:var(--row-alt);background:color-mix(in srgb,var(--panel2) 45%,transparent)}',
+      'tbody tr:hover{background:var(--row-hover);background:color-mix(in srgb,var(--accent) 7%,transparent)}',
       '.mono{font-family:var(--mono);letter-spacing:.5px}',
       '.ping{color:var(--ping);font-weight:600}.ze{color:var(--ze);font-weight:600}',
       '.dim{color:var(--ink2);font-size:12.5px}',
@@ -117,8 +130,8 @@
       'pre,code,.code{font-family:var(--mono);font-size:12.5px}',
       'pre{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);padding:10px;overflow:auto}',
       'code{background:var(--panel2);border-radius:3px;padding:1px 5px}',
-      'tr.hit>td{background:color-mix(in srgb,var(--accent2) 18%,transparent)}',
-      'mark{background:color-mix(in srgb,var(--accent) 18%,transparent);color:inherit;border-radius:3px}',
+      'tr.hit>td{background:var(--hit-bg);background:color-mix(in srgb,var(--accent2) 18%,transparent)}',
+      'mark{background:var(--mark-bg);background:color-mix(in srgb,var(--accent) 18%,transparent);color:inherit;border-radius:3px}',
       '.bar{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);'
       + 'padding:8px 0;margin-top:10px}',
       '.q{background:var(--panel);border-left:3px solid var(--accent);padding:9px 13px;'
@@ -144,7 +157,7 @@
       '.legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:13px;margin:4px 0}',
       '.legend i{display:inline-block;width:13px;height:13px;border-radius:50%;vertical-align:-2px;'
       + 'margin-right:5px}',
-      '.legend u{display:inline-block;width:26px;height:3px;background:color-mix(in srgb,var(--accent) 55%,transparent);'
+      '.legend u{display:inline-block;width:26px;height:3px;background:var(--legend-bar);background:color-mix(in srgb,var(--accent) 55%,transparent);'
       + 'vertical-align:4px;margin-right:5px}',
       '.tip{position:fixed;z-index:60;background:var(--ink);color:var(--bg);border-radius:6px;'
       + 'padding:4px 9px;font-size:12.5px;pointer-events:none;opacity:0;transition:opacity .12s}',

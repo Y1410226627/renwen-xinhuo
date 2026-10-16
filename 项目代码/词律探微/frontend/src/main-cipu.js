@@ -8,7 +8,8 @@
  */
 import { createApp } from 'vue';
 import { UI } from './core/index.mjs';
+import { installErrorHandler } from './error-boundary.js';
 import CipuView from './views/CipuView.vue';
 
 UI.inject();
-createApp(CipuView).mount('#app');
+installErrorHandler(createApp(CipuView)).mount('#app');

@@ -18,13 +18,13 @@
 ## 1. 五分钟上手
 
 ```bash
-# 1) 解释器（项目自带一套隔离环境；用绝对路径最稳）
-PY="C:/Users/湮貉/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe"
+# 1) 解释器（指向本项目隔离环境的解释器；本机绝对路径不入仓）
+PY="<项目Python>"
 
 # 2) 改完随手验（10–20 秒；pre-commit 钩子跑的就是这一档）
 "$PY" tools/check_all.py --fast
 
-# 3) 提交前 / 答辩前 / CI（2–4 分钟，跑齐五道门禁）
+# 3) 提交前 / 答辩前 / CI（约 20–25 分钟，跑齐六道门禁）
 "$PY" tools/check_all.py
 
 # 4) 只看要跑哪些门禁
@@ -59,7 +59,7 @@ PY="C:/Users/湮貉/.workbuddy-ai/binaries/python/envs/default/Scripts/python.ex
 | 档位 | 含哪些门禁 | 何时用 |
 | --- | --- | --- |
 | `--fast` | 交付答案 SHA256 + `selftest` | 改完随手验 / pre-commit（10–20 秒） |
-| 全档 | fast + `test_api` + `check-core` + `verify_1000` | 提交前 / 答辩前 / CI（2–4 分钟） |
+| 全档 | fast + `test_api` + `check-core` + `verify_1000` | 提交前 / 答辩前 / CI（约 20–25 分钟，含 verify_1000） |
 
 失败**即停**；缺环境**显式 SKIP**（不算通过）。退出码：`0` 通过 / `1` 有失败 / `2` 环境不满足。
 
@@ -68,7 +68,7 @@ PY="C:/Users/湮貉/.workbuddy-ai/binaries/python/envs/default/Scripts/python.ex
 | 门禁 | 命令 | 管什么 | 当前值 |
 | --- | --- | --- | --- |
 | **A 零回归锚点** | （内建于 `check_all.py`） | `answers_700.jsonl` SHA256 恒等 | `bf863368…f7d1e` |
-| **B 自检** | `python solve/selftest.py` | 结构 / 安全 / 说法层断言 | **294 项 0 失败** |
+| **B 自检** | `python solve/selftest.py` | 结构 / 安全 / 说法层断言 | **300 项 0 失败** |
 | **C 服务端** | `python web/test_api.py` | `/api/*` 接口（不起服务、不联网） | **176 项** |
 | **D 前端逻辑层** | `node frontend/tools/check-core.cjs` | core 真源 vs 冻结基线（全库逐字节） | **213,972 项** |
 | **E 逐题复核** | `python tools/verify_1000.py` | 1000 题答非所问 + 准确性 | **1000 题** |

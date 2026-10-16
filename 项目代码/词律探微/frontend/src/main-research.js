@@ -5,7 +5,8 @@
  */
 import { createApp } from 'vue';
 import { UI } from './core/index.mjs';
+import { installErrorHandler } from './error-boundary.js';
 import ResearchView from './views/ResearchView.vue';
 
 UI.inject();
-createApp(ResearchView).mount('#app');
+installErrorHandler(createApp(ResearchView)).mount('#app');

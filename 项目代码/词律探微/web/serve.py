@@ -41,7 +41,7 @@
     /api/compare?group_by=dynasty&values=宋,清&metric=ze_ratio   分组对比（两种口径都给）
     /api/catalog?top=20                                   语料总览统计（总篇/句/词人/词牌、朝代·来源·声情分布、榜）
     /api/identify?kind=cipai&text=临江仙慢                 实体身份判定（exact／ambiguous／unavailable + 近似提示）
-    /api/parse?pid=... /api/rand?dyn=清 /api/examples /api/llm
+    /api/parse?pid=... /api/rand?dyn=清 /api/examples /api/llm /api/health
 
 设计原则（贯穿全项目）：
     **数字归引擎、文料归检索、说法归大模型、出处归引用。**
@@ -51,6 +51,7 @@
 """
 import argparse
 import json
+import logging
 import os
 import random
 import re
@@ -98,6 +99,52 @@ LOCK = threading.Lock()
 _TLS = threading.local()      # 线程本地连接（替代旧版共享单连接 CONN）
 LLM = None
 STAMP = time.strftime('%Y-%m-%d %H:%M:%S')
+
+# ⚠ 2026-10-16（第二轮安全审计 · 修复）：**可用性三件套**——连接超时 / 有界并发 / LLM 限流。
+#   审计实测（Py3.11）：原 `ThreadingHTTPServer` 无任何 socket 超时，200 个半开连接
+#   15s 后仍被持有；每连接一线程且线程数**无上限** → 单个慢速客户端即可耗尽线程（slowloris）。
+#   ① `H.timeout`（见类 H）：请求行/请求头读取超时，半开连接被回收；SSE 长连接单独豁免。
+#   ② `MAX_CONCURRENCY` 信号量：超出直接 503，避免线程无上限增长。
+#   ③ `_LLM_RATE` 令牌桶 + `_LLM_CONC`：大模型端点限流，超出 429。
+MAX_CONCURRENCY = int(os.environ.get('LVC_MAX_CONCURRENCY') or 64)
+LLM_RATE_PER_SEC = float(os.environ.get('LVC_LLM_RATE') or 3.0)     # 每秒补充令牌
+LLM_BURST = float(os.environ.get('LVC_LLM_BURST') or 6.0)           # 桶容量（突发）
+LLM_MAX_CONC = int(os.environ.get('LVC_LLM_CONC') or 4)
+REQUEST_TIMEOUT = float(os.environ.get('LVC_REQUEST_TIMEOUT') or 15.0)
+
+
+class _TokenBucket:
+    """最小令牌桶（线程安全）。`take()` 取 1 个令牌，不足返回 False。"""
+
+    def __init__(self, rate, capacity):
+        self.rate = max(0.0001, float(rate))
+        self.capacity = max(1.0, float(capacity))
+        self._tokens = self.capacity
+        self._ts = time.monotonic()
+        self._lock = threading.Lock()
+
+    def take(self):
+        with self._lock:
+            now = time.monotonic()
+            self._tokens = min(self.capacity, self._tokens + (now - self._ts) * self.rate)
+            self._ts = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
+
+
+_LLM_RATE = _TokenBucket(LLM_RATE_PER_SEC, LLM_BURST)
+_LLM_CONC = threading.BoundedSemaphore(LLM_MAX_CONC)
+
+# ⚠ 2026-10-16（修复 ③）：**结构化日志**（只用标准库）。安全事件与访问/错误分开记录。
+#   `_setup_logging()` 只在 main() 里装配 handler（导入本模块的门禁不产生日志副作用）。
+_logger = logging.getLogger('cilv.serve')            # 访问 / 错误
+_sec = logging.getLogger('cilv.serve.security')      # 安全事件（跨站写被拒 / 写失败）
+logging.getLogger('cilv').addHandler(logging.NullHandler())
+
+# 启动时跑一次 `PRAGMA integrity_check` 的结果缓存（健康检查读取，避免每次请求都全库扫描）。
+_DB_INTEGRITY = {'checked': False, 'result': None}
 
 # ⚠ 2026-10-08 新增（外部审查 A 项）：**服务端会话语境**（`solve/context.py`）。
 #   旧版多轮上下文全在前端（`lastTurn.pids.slice(0, 200)`），而 200 是**语义截断**——
@@ -183,6 +230,67 @@ def _err_detail(exc):
     if os.environ.get('LVC_DEBUG'):
         return '%s: %s' % (type(exc).__name__, exc)
     return type(exc).__name__
+
+
+def _setup_logging():
+    """装配结构化日志 handler（幂等；只在 main() 调用，导入本模块无副作用）。
+
+    ⚠ 2026-10-16（修复 ③）：原实现全项目无 `logging`，仅裸写 `sys.stderr`——
+    无级别 / 无时间戳结构 / 无法按 request_id 检索 / 无轮转。此处只用标准库。
+    """
+    root = logging.getLogger('cilv')
+    if any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        return
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s [%(name)s] %(message)s')
+    for name in ('cilv.serve', 'cilv.serve.security'):
+        lg = logging.getLogger(name)
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(fmt)
+        lg.addHandler(sh)
+        lg.propagate = False
+
+
+def _run_integrity_check():
+    """启动时跑一次只读 `PRAGMA integrity_check`，结果缓存供 `/api/health` 读取。
+
+    ⚠ 2026-10-16（修复 ⑤）：corpus.db 此前**无自身完整性校验**——损坏无法检出。
+    放在启动阶段（一次性），不进每请求热路径。
+    """
+    try:
+        r = get_conn().execute('PRAGMA integrity_check').fetchone()[0]
+        _DB_INTEGRITY.update({'checked': True, 'result': str(r)})
+    except Exception as e:                                       # noqa: BLE001
+        _DB_INTEGRITY.update({'checked': True, 'result': 'ERROR:%s' % type(e).__name__})
+    return _DB_INTEGRITY['result']
+
+
+def _health():
+    """健康检查（`GET /api/health`）：DB 可读 + 行数>0 + 向量索引状态 + integrity。
+
+    ⚠ 2026-10-16（修复 ④）：此前**无真正的 liveness/readiness 端点**——
+    `/api/examples`（静态）与 `/api/llm`（只看大模型）都不反映语料库 / 索引健康。
+    """
+    out = {'ok': True, 'code': 'OK'}
+    try:
+        n = get_conn().execute('SELECT COUNT(1) FROM poems').fetchone()[0]
+        out['poems'] = int(n)
+        if not n:
+            out.update({'ok': False, 'code': 'DB_EMPTY', 'error': '语料库为空'})
+    except Exception as e:                                       # noqa: BLE001
+        out.update({'ok': False, 'code': 'DB_UNREADABLE', 'error': _err_detail(e)})
+    try:
+        import vector_index as _VI
+        _av = bool(_VI.available())
+        out['vector_index'] = {'available': _av, 'why': None if _av else (_VI.why() or '未知')}
+    except Exception as e:                                       # noqa: BLE001
+        out['vector_index'] = {'available': False, 'why': _err_detail(e)}
+    out['integrity'] = {'checked': _DB_INTEGRITY['checked'], 'result': _DB_INTEGRITY['result']}
+    if _DB_INTEGRITY['checked'] and _DB_INTEGRITY['result'] != 'ok':
+        out.update({'ok': False, 'code': 'DB_INTEGRITY',
+                    'error': 'integrity_check=%s' % _DB_INTEGRITY['result']})
+    out['http_status'] = 200 if out['ok'] else 503
+    return out
 
 
 def _close_readonly():
@@ -1887,6 +1995,9 @@ def page_ask_html():
 
 class H(BaseHTTPRequestHandler):
     server_version = 'cilv-tanwei/1.0'
+    # ⚠ 2026-10-16（修复 ①）：请求行 / 请求头读取超时——半开连接（slowloris）15s 被回收。
+    #   SSE 是长连接，在 `/api/ask_stream` 分支里单独 `settimeout(None)` 豁免（见该处）。
+    timeout = REQUEST_TIMEOUT
 
     def _send(self, body, ctype='application/json; charset=utf-8', code=200):
         if isinstance(body, (dict, list)):
@@ -1900,7 +2011,27 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def log_message(self, fmt, *a):
-        sys.stderr.write('  · %s\n' % (fmt % a))
+        _logger.info('%s', fmt % a)
+
+    # ⚠ 2026-10-16（修复 ②）：**大模型端点限流**（令牌桶 + 并发上限）。见 `_llm_admit`。
+    @staticmethod
+    def _is_llm_endpoint(path, g):
+        """本请求是否会真正调用大模型（决定是否过限流）。"""
+        b = lambda k: (g(k) or '').lower() in ('1', 'true', 'yes', 'on')      # noqa: E731
+        if path == '/api/ask':
+            return b('narrate') or b('argument') or b('parse') or b('llm')
+        if path in ('/api/summarize', '/api/nl2query'):
+            return (g('llm', '1') or '').lower() not in ('0', 'false', 'no')
+        return False
+
+    def _llm_admit(self):
+        """LLM 端点准入：并发上限 + 令牌桶。返回拒绝原因（`None` = 放行）。"""
+        if not _LLM_CONC.acquire(blocking=False):
+            return '大模型并发已达上限，请稍后重试'
+        if not _LLM_RATE.take():
+            _LLM_CONC.release()
+            return '大模型调用过于频繁（限流），请稍后重试'
+        return None
 
     # ★ 2026-10-11（审查 H2）：写接口**同源校验**。
     #   浏览器对 `Content-Type: text/plain` 的跨站 POST 属「简单请求」、**不触发预检**，
@@ -1969,7 +2100,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(_err('BAD_JSON', '请求体必须是 JSON 对象'), code=400)
         _why = self._write_guard()                  # ★ 审查 H2：同源校验（见方法处注释）
         if _why:
-            sys.stderr.write('  ! POST %s 被同源校验拒绝：%s\n' % (u.path, _why))
+            _sec.warning('CROSS_ORIGIN_BLOCKED POST %s：%s', u.path, _why)
             return self._send(_err('CROSS_ORIGIN_BLOCKED', _why), code=403)
         try:
             result = q_research_write(u.path, data)
@@ -1983,7 +2114,7 @@ class H(BaseHTTPRequestHandler):
             #   （可能含本机路径、库结构、SQL 片段），而同文件 do_GET 早已声明
             #   「不回吐 traceback（P1-31）」——前后政策不一致。现统一：
             #   完整堆栈只进服务端日志，客户端只拿 code + 请求路径（细节靠 LVC_DEBUG 开）。
-            sys.stderr.write('  ! POST %s 失败：%r\n' % (u.path, e))
+            _sec.error('WRITE_FAILED POST %s：%r', u.path, e)
             return self._send(
                 _err('INTERNAL', '写入失败（%s）：%s；服务端日志有完整堆栈'
                      % (u.path, _err_detail(e))), code=500)
@@ -2002,7 +2133,15 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
         g = lambda k, d='': (qs.get(k, [d])[0] if qs.get(k) else d)
+        _llm_slot = False
         try:
+            # ⚠ 2026-10-16（修复 ②）：大模型端点限流（令牌桶 + 并发上限），超出 429（统一信封）。
+            if self._is_llm_endpoint(u.path, g):
+                _deny = self._llm_admit()
+                if _deny is not None:
+                    _sec.warning('RATE_LIMITED %s：%s', u.path, _deny)
+                    return self._send(_err('RATE_LIMITED', _deny), code=429)
+                _llm_slot = True
             if u.path in ('/', '/index_ask.html', '/ask.html'):
                 return self._send(page_ask_html(), 'text/html; charset=utf-8')
             # Vue 构建产物的静态资源（JS/CSS/字体），相对 ./assets/ 引用。
@@ -2046,6 +2185,12 @@ class H(BaseHTTPRequestHandler):
                                         endpoint=(g('endpoint') or '').strip() or None))
             if u.path == '/api/ask_stream':
                 # 流式问答：**不能用 _send**（那会带 Content-Length，浏览器要等整包）
+                # ⚠ 2026-10-16（修复 ①）：SSE 是长连接——**解除 15s socket 超时**，
+                #   否则等待大模型 / 长流时会被 `H.timeout` 掐断（本行是「不破坏 SSE」的落点）。
+                try:
+                    self.connection.settimeout(None)
+                except Exception:                                    # noqa: BLE001
+                    pass
                 b = lambda k: g(k).lower() in ('1', 'true', 'yes', 'on')
                 topk = min(10, max(1, _num(g('topk'), int) or 3))
                 self.send_response(200)
@@ -2299,6 +2444,10 @@ class H(BaseHTTPRequestHandler):
                 if snap is None:
                     return self._send(_err('NOT_FOUND', '快照不存在'), code=404)
                 return self._send({'ok': True, 'result': snap})
+            if u.path == '/api/health':
+                # ⚠ 2026-10-16（修复 ④）：真正的健康检查（DB 可读 + 行数>0 + 向量索引 + integrity）。
+                _h = _health()
+                return self._send(_h, code=_h.pop('http_status', 200))
             if u.path == '/api/llm':
                 c = get_llm()
                 return self._send({'available': c.available(), 'model': c.name,
@@ -2364,11 +2513,11 @@ class H(BaseHTTPRequestHandler):
             #   （会泄漏本机路径 / 目录结构 / 内部模块名 / 数据库位置 / 配置细节）。
             #   改为：完整堆栈只写服务端日志（按 rid 可查），客户端仅拿 request_id；
             #   本地调试需要细节时设 LVC_DEBUG=1。
-            sys.stderr.write('[error][%s] %s: %s\n%s\n'
-                             % (rid, type(exc).__name__, exc, traceback.format_exc()))
+            _logger.error('[%s] %s: %s\n%s', rid, type(exc).__name__, exc,
+                          traceback.format_exc())
             if getattr(self, '_sse_started', False):
                 # SSE 已发响应头：只能如实记日志，**不能再发第二个响应**（见上方注释）
-                sys.stderr.write('[sse][%s] 连接中断或写失败：%s\n' % (rid, type(exc).__name__))
+                _logger.warning('[sse][%s] 连接中断或写失败：%s', rid, type(exc).__name__)
                 return
             if os.environ.get('LVC_DEBUG'):
                 return self._send(
@@ -2376,6 +2525,59 @@ class H(BaseHTTPRequestHandler):
                          trace=traceback.format_exc().splitlines()[-4:],
                          request_id=rid), code=500)
             return self._send(_err('INTERNAL', '内部错误（请把 request_id 提供给维护者以定位日志）', request_id=rid), code=500)
+        finally:
+            # ⚠ 2026-10-16（修复 ②）：释放本请求占用的 LLM 并发槽（无论正常/异常/早退）。
+            if _llm_slot:
+                _LLM_CONC.release()
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """**有界并发**的 ThreadingHTTPServer（⚠ 2026-10-16 修复 ①）。
+
+    审计实测：原 `ThreadingHTTPServer` 每连接一线程且**无上限**——堆积半开连接即可耗尽线程。
+    这里用 `BoundedSemaphore(MAX_CONCURRENCY)` 限并发；超出**不再新建线程**，直接回 503
+    （项目统一 JSON 信封 `{ok,code,error}`）。`daemon_threads=True` 保证 Ctrl+C 能退出。
+    """
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._sem = threading.BoundedSemaphore(MAX_CONCURRENCY)
+
+    def process_request(self, request, client_address):
+        if not self._sem.acquire(blocking=False):
+            self._reject_overloaded(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:                                        # noqa: BLE001
+            self._sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._sem.release()
+
+    @staticmethod
+    def _reject_overloaded(request):
+        body = json.dumps({'ok': False, 'code': 'SERVER_BUSY',
+                           'error': '服务并发已达上限，请稍后重试'},
+                          ensure_ascii=False).encode('utf-8')
+        try:
+            request.sendall(
+                b'HTTP/1.1 503 Service Unavailable\r\n'
+                b'Content-Type: application/json; charset=utf-8\r\n'
+                b'Connection: close\r\n'
+                b'Content-Length: ' + str(len(body)).encode('ascii') + b'\r\n\r\n' + body)
+        except Exception:                                        # noqa: BLE001
+            pass
+        finally:
+            try:
+                request.close()
+            except Exception:                                    # noqa: BLE001
+                pass
 
 
 def main():
@@ -2384,11 +2586,13 @@ def main():
     ap.add_argument('--port', type=int, default=8000)
     ap.add_argument('--no-open', action='store_true')
     a = ap.parse_args()
+    _setup_logging()                                             # ⚠ 修复 ③：结构化日志
     if not os.path.exists(DB):
         print('找不到语料库 %s，请先跑：python build_corpus.py --corpus <语料根> --db data/corpus.db'
               % DB)
         return 2
     get_conn()
+    _logger.info('integrity_check=%s（corpus.db）', _run_integrity_check())   # ⚠ 修复 ⑤
     # 服务端会话：载入 data/sessions/ 的历史（失败静默，内存仍可用）。
     try:
         _n_sess = SESSIONS.load()
@@ -2432,7 +2636,7 @@ def main():
     srv = None
     for p in range(a.port, a.port + 10):          # 端口被占就顺延，别让主人对着报错发呆
         try:
-            srv = ThreadingHTTPServer((a.host, p), H)
+            srv = BoundedThreadingHTTPServer((a.host, p), H)
             if p != a.port:
                 print('端口 %d 被占用，改用 %d' % (a.port, p))
             a.port = p

@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 初赛公开集 | **公开集 700/700 = 100.0%** | `python solve/eval.py --pred answers_700.jsonl --gold <题面>` |
 | 第二套（保密，仅验收用） | 300/300 = 100.0% | 同上，换文件 |
-| 自检 | `python solve/selftest.py` → **294 项 0 失败** | 见 §20/§21（安全与说法层）与 §43（本轮新增：词面净化 + 相似意图拓宽） |
+| 自检 | `python solve/selftest.py` → **300 项 0 失败** | 见 §20/§21（安全与说法层）与 §43（本轮新增：词面净化 + 相似意图拓宽） |
 | 统一门禁 | `python tools/check_all.py [--fast]` → 全绿 | **一键入口**：SHA256 + selftest + test_api + check-core + verify_1000 |
 | 交付前体检 | `python solve/preflight.py` → 26/0/0 | 依赖、标定表、语料计数、答案契约、合规扫描 |
 | 库不变式 | `python tools/invariant_check.py` → 1,731,388 项 0 违反 | 从句级平仄串重算篇级指标 |
@@ -1256,7 +1256,7 @@ E2/E3 也终于成了真正的「第二、三名」（56.0% / 54.5%），不再�
 
 > 完整证据见根目录 `性能与正确性优化报告.md` 第 8–12 节
 
-**接入**：新增 provider `ucass` → `http://10.27.66.12/v1/chat/completions`，模型 `qwen3.8-27b`，
+**接入**：新增 provider `ucass` → `<内网端点>/v1/chat/completions`，模型 `qwen3.8-27b`，
 置于自动选择首位；密钥放 `solve/data/llm_local.json`（**不进源码**，环境变量优先）。
 `python solve/llm.py --check / --ping / --ask` 三条命令可自证。
 
@@ -1750,7 +1750,7 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 ### 快速自检
 
 ```bash
-PY="D:/conda_envs/langchain-env/python.exe"
+PY="<项目Python>"   # 例：指向本项目隔离环境的解释器（本机绝对路径不入仓）
 "$PY" solve/queryplan.py            # schema 对齐 + 布尔树 6 用例 + 往返 5 条
 "$PY" solve/plan_exec.py            # 执行器 15 项（逐步 vs 独立复算；含新算子 median/stddev/rank/project/mode/similar_to）
 "$PY" solve/planner.py --selftest   # 契约 / 无效实体 / NOT 语义 / 优雅降级

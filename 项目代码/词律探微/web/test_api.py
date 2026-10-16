@@ -339,7 +339,8 @@ def main():
        isinstance(_opts.get('models'), list) and isinstance(_opts.get('endpoints'), list)
        and isinstance(_opts.get('allow_hosts'), list))
     # 用假默认客户端钉死两条规则（校外端点被拒 / 校内指定生效），不联网：
-    _FAKE_URL = 'http://10.27.66.12/v1/chat/completions'
+    # ⚠ 2026-10-16：改用 **RFC5737 文档地址**（192.0.2.0/24），不再写真实内网 IP（信息泄露）。
+    _FAKE_URL = 'http://192.0.2.10/v1/chat/completions'
 
     class _FakeLocal:
         provider = 'ucass'
@@ -361,7 +362,7 @@ def main():
         ok('P2-5 校内端点 + 模型指定生效',
            _c2 is not _fake and _i2['specified'] is True and _i2['model'] == 'qwen-test'
            and _i2['endpoint'] == _FAKE_URL, repr(_i2))
-        ok('P2-5 端点白名单含默认主机', '10.27.66.12' in S.q_llm_options()['allow_hosts'],
+        ok('P2-5 端点白名单含默认主机', '192.0.2.10' in S.q_llm_options()['allow_hosts'],
            repr(S.q_llm_options()['allow_hosts']))
         _r25 = S.q_ask('清 临江仙 仄声比例高于45%', topk=3, model='qwen-test')
     finally:

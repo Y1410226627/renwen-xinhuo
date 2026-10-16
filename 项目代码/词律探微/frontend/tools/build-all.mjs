@@ -34,9 +34,11 @@ const ROOT = path.resolve(FRONTEND, '..');
  */
 function pythonExe() {
   const has = (p) => { try { return fs.existsSync(p); } catch { return false; } };
-  for (const c of [process.env.LVC_PYTHON, process.env.PYTHON,
-                   'D:/conda_envs/langchain-env/python.exe',
-                   'C:/Python314/python.exe']) {
+  /* ⚠ 2026-10-16：不再硬编码本机绝对路径（信息泄露）。额外绝对路径候选改由
+     `LVC_PYTHON_CANDIDATES`（分号分隔）提供；LVC_PYTHON / PYTHON 仍最优先。 */
+  const extra = (process.env.LVC_PYTHON_CANDIDATES || '')
+    .split(';').map((s) => s.trim()).filter(Boolean);
+  for (const c of [process.env.LVC_PYTHON, process.env.PYTHON, ...extra]) {
     if (c && has(c)) { return c; }            // 绝对路径：存在即采信（避开沙箱对 spawn 的拦截）
   }
   for (const c of ['python', 'python3', 'py']) {
@@ -148,7 +150,7 @@ cleanUnreferencedAssets(ASK);
 const py = pythonExe();
 if (!py) {
   console.error('✗ 找不到 python（试过 LVC_PYTHON / PYTHON / conda / 系统 PATH）');
-  console.error('  可显式指定：LVC_PYTHON=D:/conda_envs/langchain-env/python.exe node frontend/tools/build-all.mjs');
+  console.error('  可显式指定：LVC_PYTHON=<项目Python> node frontend/tools/build-all.mjs');
   process.exit(1);
 }
 console.log('  （使用解释器：' + py + '）');

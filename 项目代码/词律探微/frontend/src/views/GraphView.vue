@@ -35,7 +35,20 @@ import AppShell from '../components/AppShell.vue';
 const graph = ref(null);
 const kw = ref('');
 const hover = ref('');
-const tip = ref({ on: false, text: '', x: 0, y: 0 });
+/* ★ 2026-10-16（前端审查 P2·性能）：tip 只留**文本/显隐**，坐标不再进响应式。
+   改前 `tip.value = Object.assign({}, tip.value, {x,y})` 每次 mousemove 都换新对象 →
+   触发**整组件重渲**（90 节点 + 1248 条边，每条边重算 edgeOpacity）。
+   改后：文本/显隐走 tip（仅 enter/leave 变），坐标**直接写 DOM style**（tipEl），
+   mousemove 不再引发任何重渲。 */
+const tip = ref({ on: false, text: '' });
+const tipEl = ref(null);
+function placeTip(ev) {
+  const el = tipEl.value;
+  if (el && ev) {
+    el.style.left = (ev.clientX + 12) + 'px';
+    el.style.top = (ev.clientY - 28) + 'px';
+  }
+}
 /* 三态：load 有值 = 加载中；err 有值 = 出错；两者皆空且 graph 为空 = 空态。 */
 const load = ref('');
 const err = ref('');
@@ -211,13 +224,15 @@ function edgeOpacity(e) {
 }
 function onEnter(n, ev) {
   hover.value = n.k;
-  tip.value = { on: true, text: `${n.kind} ${n.k}：共 ${n.cnt} 篇`, x: ev.clientX + 12, y: ev.clientY - 28 };
+  tip.value = { on: true, text: `${n.kind} ${n.k}：共 ${n.cnt} 篇` };
+  placeTip(ev);
 }
 function onEdgeEnter(e, ev) {
   hover.value = '';
-  tip.value = { on: true, text: `词人 ${e.a} ↔ 词牌 ${e.c}：共 ${e.n} 篇`, x: ev.clientX + 12, y: ev.clientY - 28 };
+  tip.value = { on: true, text: `词人 ${e.a} ↔ 词牌 ${e.c}：共 ${e.n} 篇` };
+  placeTip(ev);
 }
-function onMove(ev) { tip.value = Object.assign({}, tip.value, { x: ev.clientX + 12, y: ev.clientY - 28 }); }
+function onMove(ev) { placeTip(ev); }
 function onLeave() { hover.value = ''; tip.value.on = false; }
 function clearKw() { kw.value = ''; }
 /* 点节点 → 设焦点（再点同一节点 = 退出探索）。 */
@@ -298,6 +313,9 @@ onUnmounted(() => { tip.value.on = false; });
       </div>
       <p v-else-if="load" class="loading"><span class="spin"></span> {{ load }}</p>
       <svg v-else-if="hasNodes" id="g" class="chart" xmlns="http://www.w3.org/2000/svg"
+           role="img"
+           :aria-label="'清代词人 ↔ 词牌 二部图：词人 ' + layout.nAu + ' 个、词牌 ' + layout.nCp
+             + ' 个、连线 ' + layout.nEdge + ' 条；节点可用 Tab 聚焦、回车进入多跳探索'"
            :viewBox="`0 0 ${layout.W} ${layout.H}`" :width="layout.W" :height="layout.H"
            font-family="Microsoft YaHei,serif">
         <path v-for="(e, i) in layout.paths" :key="'e' + i" class="ed"
@@ -308,9 +326,12 @@ onUnmounted(() => { tip.value.on = false; });
         <g v-for="(n, i) in layout.nodes" :key="'n' + i" class="nd"
            :class="{ focused: n.k === focus, ontrail: onTrail(n.k) }"
            :data-k="n.k" :data-kind="n.kind" :data-n="n.cnt"
+           role="button" tabindex="0"
+           :aria-label="n.kind + ' ' + n.k + '，共 ' + n.cnt + ' 篇，点此进入多跳探索'"
            :style="{ opacity: nodeOpacity(n), fontWeight: nodeWeight(n), cursor: 'pointer' }"
            @mouseover="onEnter(n, $event)" @mousemove="onMove($event)" @mouseout="onLeave"
-           @click="onNodeClick(n)">
+           @click="onNodeClick(n)"
+           @keydown.enter.prevent="onNodeClick(n)" @keydown.space.prevent="onNodeClick(n)">
           <circle :cx="n.x" :cy="n.y" :r="n.r" :fill="n.fill" />
           <text :x="n.tx" :y="n.y + 5" :text-anchor="n.anchor" :class="n.tclass">{{ n.k }}
             <tspan class="t-cnt">{{ n.cnt }}</tspan></text>
@@ -372,6 +393,7 @@ onUnmounted(() => { tip.value.on = false; });
 
 .loading { margin: 4px 0; color: var(--ink2); }
 .err { border-left: 4px solid var(--warn); border-radius: 6px; padding: 8px 12px;
+  background: var(--warn-bg);
   background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .err p { margin: 6px 0 0; }
 .empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 14px 16px;

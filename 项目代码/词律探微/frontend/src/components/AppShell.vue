@@ -91,9 +91,11 @@ const noteText = computed(() =>
  *    tab 高亮与 hover 过渡统一，键盘 Tab 到时有清晰焦点。 */
 header.top nav.tabs a { transition: background .15s, border-color .15s, color .15s; }
 header.top nav.tabs a.on { font-weight: 600;
+  box-shadow: 0 1px 0 var(--focus-ring);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 55%, transparent); }
 header.top nav.tabs a:focus-visible,
 header.top #theme:focus-visible {
+  outline: 2px solid var(--focus-ring);
   outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
 
 /* 2) 主题按钮：明确「当前是什么」，夜间态用强调色区分；窄屏不与 logo 抢行。 */

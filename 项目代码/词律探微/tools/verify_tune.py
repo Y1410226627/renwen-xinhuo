@@ -28,7 +28,7 @@
 
 用法
 ----
-    PY="D:/conda_envs/langchain-env/python.exe"
+    PY="<项目Python>"   # 例：指向本项目的隔离环境解释器（本机绝对路径不入仓）
     "$PY" tools/verify_tune.py                 # 三态表（自动探测覆盖表）
     "$PY" tools/verify_tune.py --cover         # 强制启用覆盖表（未就绪则报 SKIP）
     "$PY" tools/verify_tune.py --no-cover      # 强制「未启用」态

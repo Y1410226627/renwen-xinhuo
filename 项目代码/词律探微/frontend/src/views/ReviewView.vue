@@ -187,6 +187,7 @@ onMounted(async () => {
 
 .loading { margin: 4px 0; color: var(--ink2); }
 .err { border-left: 4px solid var(--warn); border-radius: 6px; padding: 8px 12px;
+  background: var(--warn-bg);
   background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .err p { margin: 6px 0 0; }
 .empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 14px 16px;
