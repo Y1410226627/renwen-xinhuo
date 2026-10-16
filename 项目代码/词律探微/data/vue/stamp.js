@@ -1,2 +1,2 @@
 /* stamp.js —— 页面生成时间探针（由 web/build_views.py 生成）。 */
-window.__STAMP__ = "2026-10-16 00:40:27";
+window.__STAMP__ = "2026-10-16 22:55:02";

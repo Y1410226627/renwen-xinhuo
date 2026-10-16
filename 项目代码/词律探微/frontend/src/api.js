@@ -31,6 +31,83 @@ function netMsg(label, detail) {
     + '若是刚更新过代码或页面，请按 Ctrl+F5 强制刷新后重试。';
 }
 
+/* 远程研究库读写共用部署令牌。并行加载多个研究列表时只弹出一次输入框。 */
+let memoryAccessToken = '';
+let accessTokenPrompt = null;
+
+function getAccessToken() {
+  try { return sessionStorage.getItem('lvc_write_token') || memoryAccessToken; }
+  catch (e) { return memoryAccessToken; }
+}
+
+function setAccessToken(token) {
+  memoryAccessToken = token || '';
+  try { sessionStorage.setItem('lvc_write_token', memoryAccessToken); } catch (e) { /* 本次页面仍可用 */ }
+}
+
+function promptAccessToken(message) {
+  if (!accessTokenPrompt) {
+    accessTokenPrompt = Promise.resolve().then(() => {
+      if (typeof window === 'undefined' || typeof window.prompt !== 'function') { return ''; }
+      return (window.prompt(message) || '').trim();
+    }).then((token) => {
+      if (token) { setAccessToken(token); }
+      return token;
+    }).finally(() => { accessTokenPrompt = null; });
+  }
+  return accessTokenPrompt;
+}
+
+const PRIVATE_RESEARCH_READS = new Set([
+  '/api/text_versions', '/api/meta_revisions', '/api/materials', '/api/material',
+  '/api/facts', '/api/arguments', '/api/research/summary',
+  '/api/pronounce/candidates', '/api/pronounce/decisions', '/api/works',
+  '/api/import/batches', '/api/research/decisions', '/api/snapshots',
+]);
+
+function hasResearchPid(raw) {
+  const values = Array.isArray(raw) ? raw : [raw];
+  return values.some((value) => /(?:^|[,，\s])(?:personal|material|fact):/.test(String(value || '')));
+}
+
+function needsResearchToken(path, params) {
+  if (PRIVATE_RESEARCH_READS.has(path)
+      || path.startsWith('/api/arguments/') || path.startsWith('/api/snapshots/')) { return true; }
+  if (path === '/api/ask' || path === '/api/ask_stream') {
+    return hasResearchPid(params && params.ctx_pids);
+  }
+  if (path === '/api/parse' || path === '/api/cipu/compare') {
+    return String((params && params.pid) || '').startsWith('personal:');
+  }
+  return false;
+}
+
+async function fetchWithAuthRetry(url, init, code, promptText, actionName) {
+  const send = (token) => {
+    const headers = Object.assign({}, (init && init.headers) || {});
+    if (token) { headers.Authorization = 'Bearer ' + token; }
+    return fetch(url, Object.assign({}, init || {}, { headers }));
+  };
+  let r = await send(getAccessToken());
+  if (r.status === 401) {
+    const j = await r.clone().json().catch(() => null);
+    if (j && j.code === code) {
+      const token = await promptAccessToken(promptText);
+      if (!token) { throw new Error('已取消研究库' + actionName + '：没有提供访问令牌'); }
+      r = await send(token);
+    }
+  }
+  return r;
+}
+
+function fetchWithStoredToken(url, init) {
+  const token = getAccessToken();
+  if (!token) { return fetch(url, init); }
+  const headers = Object.assign({}, (init && init.headers) || {},
+    { Authorization: 'Bearer ' + token });
+  return fetch(url, Object.assign({}, init || {}, { headers }));
+}
+
 async function withTimeout(ms, label, fn) {
   const ctrl = new AbortController();
   let hit = false;
@@ -76,8 +153,20 @@ export async function getJson(path, params) {
   }
   const url = b + path + (qs ? ('?' + qs) : '');
   return withTimeout(ASK_TIMEOUT_MS, '接口 ' + path, async (signal) => {
-    const r = await fetch(url, { signal });
-    if (!r.ok) { throw new Error('接口 ' + path + ' 返回 HTTP ' + r.status); }
+    let r;
+    if (needsResearchToken(path, params)) {
+      r = await fetchWithAuthRetry(url, { signal }, 'RESEARCH_AUTH_REQUIRED',
+        '此远程服务的研究库读取需要访问令牌（由部署者提供）', '读取');
+    } else if (path === '/api/parse') {
+      r = await fetchWithStoredToken(url, { signal });
+    } else {
+      r = await fetch(url, { signal });
+    }
+    if (!r.ok) {
+      const j = await r.clone().json().catch(() => null);
+      const detail = (j && typeof j.error === 'string') ? j.error : ('HTTP ' + r.status);
+      throw new Error('接口 ' + path + ' 失败：' + detail);
+    }
     return r.json();
   });
 }
@@ -95,28 +184,16 @@ export async function postJson(path, body) {
     throw new Error('离线模式：研究库的写入功能需要本地服务（python web/serve.py）');
   }
   return withTimeout(ASK_TIMEOUT_MS, '接口 ' + path, async (signal) => {
-    const send = (token) => fetch(b + path, {
+    const r = await fetchWithAuthRetry(b + path, {
       method: 'POST',
       signal,
-      headers: Object.assign({ 'Content-Type': 'application/json' },
-        token ? { Authorization: 'Bearer ' + token } : {}),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {})
-    });
+    }, 'WRITE_AUTH_REQUIRED', '此服务的研究库写操作需要写令牌（由部署者提供）', '写入');
     const readJson = async (response) => {
       try { return await response.json(); } catch (e) { return null; }
     };
-    let token = '';
-    try { token = sessionStorage.getItem('lvc_write_token') || ''; } catch (e) { /* 隐私模式可禁用存储 */ }
-    let r = await send(token);
     let j = await readJson(r);
-    if (r.status === 401 && j && j.code === 'WRITE_AUTH_REQUIRED'
-        && typeof window !== 'undefined' && typeof window.prompt === 'function') {
-      token = (window.prompt('此服务的研究库写操作需要写令牌（由部署者提供）') || '').trim();
-      if (!token) { throw new Error('已取消研究库写入：没有提供写令牌'); }
-      try { sessionStorage.setItem('lvc_write_token', token); } catch (e) { /* 仅本次请求使用 */ }
-      r = await send(token);
-      j = await readJson(r);
-    }
     if (!r.ok) {
       /* ★ 2026-10-11（审查 M12）：服务端错误信封已统一为 `{ok:false, code, error:<字符串>}`。
          这里同时兼容旧形状 `{error:{message}}`，避免服务端/前端版本错配时拿到 `[object Object]`。 */
@@ -199,7 +276,12 @@ export const api = {
       timer = setTimeout(() => { hit = true; try { ctrl.abort(); } catch (e) { /* 忽略 */ } }, ms);
     };
     arm(STREAM_FIRST_MS);
-    return fetch(b + '/api/ask_stream?' + qs, { signal: ctrl.signal }).then((r) => {
+    const streamUrl = b + '/api/ask_stream?' + qs;
+    const request = needsResearchToken('/api/ask_stream', params)
+      ? fetchWithAuthRetry(streamUrl, { signal: ctrl.signal }, 'RESEARCH_AUTH_REQUIRED',
+        '此远程服务的研究库读取需要访问令牌（由部署者提供）', '读取')
+      : fetch(streamUrl, { signal: ctrl.signal });
+    return request.then((r) => {
       /* ⚠ 2026-10-06 修（外部审查 P1，本轮第 7 项）：把三件事**拆开**，不再混成一句
          「该浏览器不支持流式」——
          改前 → `if (!r.ok || !r.body || !r.body.getReader) throw new Error('该浏览器不支持流式')`：

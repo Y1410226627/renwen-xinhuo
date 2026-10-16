@@ -1,0 +1,1 @@
+import{U as r,i as o,c as a}from"./AppShell-Des6vRt0.js";import{P as i}from"./ParseView-DSV6rWe1.js";import"./api-BbT2gW5F.js";import"./_plugin-vue_export-helper-DlAUqK2U.js";r.inject();o(a(i,{mode:"offline"})).mount("#app");

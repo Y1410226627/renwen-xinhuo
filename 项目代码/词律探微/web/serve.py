@@ -1905,7 +1905,7 @@ def _sse(kind, payload):
     return 'data: ' + json.dumps(body, ensure_ascii=False) + '\n\n'
 
 
-def q_parse(pid):
+def q_parse(pid, include_research=True):
     # ⚠ 2026-10-10（P2-1）：`personal:<n>` 前缀 = **个人作品**（研究库录入）。
     #   走 `research.analyze_work`（与建库同一引擎、同一口径），**绝不查 corpus.db**
     #   （那是只读交付语料）。解析页深链 `parse.html?pid=personal:<n>` 由此生效，前端零改动。
@@ -1946,7 +1946,7 @@ def q_parse(pid):
     out['raw'] = d.get('raw')
     # ⚠ 2026-10-09（功能 8）：该篇若有人工读音裁定 → 展示值按裁定修正（不改语料库）。
     #   无裁定 / 研究库不存在时**原样返回**（零回归）。
-    _rc = get_research_conn_ro()
+    _rc = get_research_conn_ro() if include_research else None
     if _rc is not None:
         try:
             _ls2, _adj = RSRCH.apply_pron_to_lines(_rc, pid, lines)
@@ -1958,7 +1958,7 @@ def q_parse(pid):
     return out
 
 
-def q_rand(dyn=''):
+def q_rand(dyn='', include_research=True):
     c = get_conn()
     with LOCK:
         # 原实现把**全部 58,852 个 pid 取回 Python** 再 random.choice（实测约 50 ms 的纯搬运，
@@ -1973,7 +1973,7 @@ def q_rand(dyn=''):
                         args + [random.randrange(n)]).fetchone()
     if not row:
         return _err('RAND_FAILED', '随机取样失败（请重试）')
-    return q_parse(row[0])
+    return q_parse(row[0], include_research=include_research)
 
 
 _ASK_HTML_CACHE = {'mtime': None, 'text': None}
@@ -2048,6 +2048,44 @@ class H(BaseHTTPRequestHandler):
             return '大模型调用过于频繁（限流），请稍后重试'
         return None
 
+    @staticmethod
+    def _has_research_pid(raw):
+        """请求上下文是否显式引用研究库对象。"""
+        return any(p.startswith(('personal:', 'material:', 'fact:'))
+                   for p in _split_ctx_pids(raw))
+
+    @classmethod
+    def _private_research_read(cls, path, g):
+        """远程部署时需要认证的研究库读取路由。纯语料浏览仍保持公开只读。"""
+        if path in {
+                '/api/text_versions', '/api/meta_revisions', '/api/materials',
+                '/api/material', '/api/facts', '/api/arguments',
+                '/api/research/summary', '/api/pronounce/candidates',
+                '/api/pronounce/decisions', '/api/works', '/api/import/batches',
+                '/api/research/decisions', '/api/snapshots'}:
+            return True
+        if path.startswith(('/api/arguments/', '/api/snapshots/')):
+            return True
+        if path in ('/api/ask', '/api/ask_stream'):
+            return cls._has_research_pid(g('ctx_pids'))
+        if path in ('/api/parse', '/api/cipu/compare'):
+            return (g('pid') or '').startswith('personal:')
+        return False
+
+    def _token_auth_required(self):
+        """远程绑定、显式令牌或代理请求均进入 Bearer 认证边界。"""
+        return (getattr(self.server, 'require_write_token', False)
+                or bool(getattr(self.server, 'write_token', ''))
+                or bool(self.headers.get('Forwarded')
+                        or self.headers.get('X-Forwarded-For')))
+
+    def _bearer_matches(self):
+        expected = getattr(self.server, 'write_token', '')
+        auth = self.headers.get('Authorization') or ''
+        scheme, sep, supplied = auth.partition(' ')
+        return bool(expected and sep and scheme.lower() == 'bearer'
+                    and secrets.compare_digest(supplied.strip(), expected))
+
     # ★ 2026-10-11（审查 H2）：写接口**同源校验**。
     #   浏览器对 `Content-Type: text/plain` 的跨站 POST 属「简单请求」、**不触发预检**，
     #   于是任意网页都能在用户本机静默调用 `/api/materials`、`/api/materials/withdraw`、
@@ -2081,23 +2119,16 @@ class H(BaseHTTPRequestHandler):
     def _write_auth_guard(self):
         """远程监听、反向代理或显式配置令牌时，要求 Bearer 写令牌。"""
         expected = getattr(self.server, 'write_token', '')
-        required = (getattr(self.server, 'require_write_token', False)
-                    or bool(expected)
-                    or bool(self.headers.get('Forwarded')
-                            or self.headers.get('X-Forwarded-For')))
-        if not required:
+        if not self._token_auth_required():
             return None
         if not expected:
             return '远程写入已关闭：服务端尚未配置 LVC_WRITE_TOKEN'
-        auth = self.headers.get('Authorization') or ''
-        scheme, sep, supplied = auth.partition(' ')
-        if (not sep or scheme.lower() != 'bearer'
-                or not secrets.compare_digest(supplied.strip(), expected)):
+        if not self._bearer_matches():
             return '此写操作需要有效的 Authorization: Bearer 写令牌'
         return None
 
-    def _write_transport_guard(self):
-        """远程写入只接受本机 HTTPS 反向代理转发，不能信任外部自报的转发头。"""
+    def _protected_transport_guard(self, operation):
+        """远程敏感数据只接受本机 HTTPS 反向代理，不能信任外部自报的转发头。"""
         forwarded = bool(self.headers.get('Forwarded') or self.headers.get('X-Forwarded-For'))
         required = getattr(self.server, 'require_write_token', False) or forwarded
         if not required:
@@ -2109,9 +2140,23 @@ class H(BaseHTTPRequestHandler):
         except (ValueError, IndexError, TypeError):
             peer_is_loopback = False
         if not forwarded or not peer_is_loopback:
-            return '远程研究库写入只接受本机 HTTPS 反向代理转发；请勿直接连接引擎端口'
+            return '远程研究库%s只接受本机 HTTPS 反向代理转发；请勿直接连接引擎端口' % operation
         if (self.headers.get('X-Forwarded-Proto') or '').lower() != 'https':
-            return '远程研究库写入必须经 HTTPS 反向代理，并设置 X-Forwarded-Proto: https'
+            return '远程研究库%s必须经 HTTPS 反向代理，并设置 X-Forwarded-Proto: https' % operation
+        return None
+
+    def _write_transport_guard(self):
+        """远程写入只接受本机 HTTPS 反向代理转发。"""
+        return self._protected_transport_guard('写入')
+
+    def _research_read_auth_guard(self):
+        """远程研究数据读取使用与写接口相同的 Bearer 令牌。"""
+        if not self._token_auth_required():
+            return None
+        if not getattr(self.server, 'write_token', ''):
+            return '远程研究库敏感数据读取已关闭：服务端尚未配置 LVC_WRITE_TOKEN'
+        if not self._bearer_matches():
+            return '研究库敏感数据读取需要有效的 Authorization: Bearer 写令牌'
         return None
 
     # ★ 2026-10-11（审查·低）：读路径的只读连接此前**只靠 GC 回收**；
@@ -2161,6 +2206,8 @@ class H(BaseHTTPRequestHandler):
         if _why:
             _sec.warning('CROSS_ORIGIN_BLOCKED POST %s：%s', u.path, _why)
             return self._send(_err('CROSS_ORIGIN_BLOCKED', _why), code=403)
+        # 审计人由服务端的认证方式决定；忽略请求体中可伪造的 actor 字段。
+        data['actor'] = 'bearer-token' if self._token_auth_required() else 'local-client'
         try:
             result = q_research_write(u.path, data)
             return self._send({'ok': True, 'result': result})
@@ -2194,6 +2241,16 @@ class H(BaseHTTPRequestHandler):
         g = lambda k, d='': (qs.get(k, [d])[0] if qs.get(k) else d)
         _llm_slot = False
         try:
+            if self._private_research_read(u.path, g):
+                _transport_why = self._protected_transport_guard('敏感数据读取')
+                if _transport_why:
+                    _sec.warning('RESEARCH_READ_TLS_BLOCKED GET %s', u.path)
+                    return self._send(_err('HTTPS_REQUIRED', _transport_why), code=403)
+                _auth_why = self._research_read_auth_guard()
+                if _auth_why:
+                    _sec.warning('RESEARCH_READ_AUTH_BLOCKED GET %s', u.path)
+                    return self._send(_err('RESEARCH_AUTH_REQUIRED', _auth_why), code=401)
+            research_access = (not self._token_auth_required() or self._bearer_matches())
             session_sid = None
             if u.path in ('/api/ask', '/api/ask_stream'):
                 session_sid = (g('sid') or '').strip() or None
@@ -2523,7 +2580,7 @@ class H(BaseHTTPRequestHandler):
                 # ★ 2026-10-11（P2-5）：可指定的模型 / 端点（仅限校内本地 Qwen）。
                 return self._send({'ok': True, 'result': q_llm_options()})
             if u.path == '/api/parse':
-                return self._send(q_parse(g('pid')))
+                return self._send(q_parse(g('pid'), include_research=research_access))
             if u.path == '/api/tone_policy':
                 # ★ 2026-10-13 新增：**声律双口径对照**（评测口径 vs 《广韵》历史口径）。
                 #   默认口径（普通话四声）**一字不改**——这里只把历史视角**并列**出来，
@@ -2536,7 +2593,7 @@ class H(BaseHTTPRequestHandler):
                     return self._send(_err('NOT_FOUND', '找不到该篇：%s' % g('pid')), code=404)
                 return self._send({'ok': True, 'result': _tv})
             if u.path == '/api/rand':
-                return self._send(q_rand(g('dyn')))
+                return self._send(q_rand(g('dyn'), include_research=research_access))
             if u.path == '/api/examples':
                 return self._send(EXAMPLES)
             # 静态视图：优先提供 Vue 构建产物（data/vue/），回退旧版手写视图（data/*.html）。
