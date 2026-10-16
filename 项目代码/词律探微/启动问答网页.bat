@@ -8,9 +8,10 @@ set "PY=%LVC_PYTHON%"
 if not exist "%PY%" if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
-rem Enable the planner-based route (Planner - Plan - Executor) by default.
+rem Match web/serve.py and the recorded No-Go decision: rule is the default route.
+rem Set LVC_PLANNER=plan explicitly to try Planner - Plan - Executor.
 rem Every answer reports which route it actually used (see route.used in /api/ask).
-if "%LVC_PLANNER%"=="" set "LVC_PLANNER=plan"
+if "%LVC_PLANNER%"=="" set "LVC_PLANNER=rule"
 
 rem Vector semantic retrieval is ON by default (LVC_VECTOR != 0); set LVC_VECTOR=0 to disable.
 rem It only fires on free-form semantic questions; formal-condition queries and official

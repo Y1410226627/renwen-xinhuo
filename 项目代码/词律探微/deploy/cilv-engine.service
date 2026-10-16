@@ -26,6 +26,8 @@ WorkingDirectory=/opt/cilvtanwei/项目代码/词律探微
 # 主从式：只绑回环，交给反向代理（见 deploy/nginx-cilv.conf）
 # 若要走「局域网直连」形态，把 127.0.0.1 换成 0.0.0.0 并放行防火墙端口。
 ExecStart=/usr/bin/python3 web/serve.py --host 127.0.0.1 --port 8010 --no-open
+# 代理传递 X-Forwarded-For，因此研究库 POST 必须令牌认证；创建 root-only 环境文件。
+EnvironmentFile=/etc/cilv-engine.env
 
 # 中文环境（日志与路径）
 Environment=LANG=C.UTF-8

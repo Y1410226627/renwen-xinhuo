@@ -23,7 +23,8 @@
 用法：
   python tools/review_apply.py --decisions data/review_decisions.csv --dry-run
   python tools/review_apply.py --decisions data/review_decisions.csv            # 写候选表并复算
-  python tools/review_apply.py --decisions data/review_decisions.csv --promote  # 升为交付表
+  # 晋升必须同时提供第二套题面与答案，并通过两套验收：
+  python tools/review_apply.py --decisions data/review_decisions.csv --questions2 <第二套题面> --gold2 <第二套答案> --promote
   python tools/review_apply.py --decisions data/review_decisions.csv \
       --questions2 <第二套题面> --gold2 <第二套答案>                            # 两套同时验收
 """
@@ -244,6 +245,13 @@ def main():
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--promote', action='store_true', help='升为交付覆写表（需两套均零回归且不降分）')
     args = ap.parse_args()
+
+    # 晋升门禁必须具备两套完整输入。把这项校验放在任何候选文件写入之前，
+    # 防止缺少第二套数据时只通过公开集就替换交付表。
+    if bool(args.questions2) != bool(args.gold2):
+        ap.error('--questions2 与 --gold2 必须同时提供')
+    if args.promote and not (args.questions2 and args.gold2):
+        ap.error('--promote 必须同时提供 --questions2 与 --gold2；单套结果只能生成候选表')
 
     print(GLOBAL_MODEL_NOTICE)
 

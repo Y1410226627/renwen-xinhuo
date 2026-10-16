@@ -50,11 +50,13 @@
 退出：Ctrl+C
 """
 import argparse
+import ipaddress
 import json
 import logging
 import os
 import random
 import re
+import secrets
 import sqlite3
 import sys
 import threading
@@ -111,6 +113,17 @@ LLM_RATE_PER_SEC = float(os.environ.get('LVC_LLM_RATE') or 3.0)     # 每秒补�
 LLM_BURST = float(os.environ.get('LVC_LLM_BURST') or 6.0)           # 桶容量（突发）
 LLM_MAX_CONC = int(os.environ.get('LVC_LLM_CONC') or 4)
 REQUEST_TIMEOUT = float(os.environ.get('LVC_REQUEST_TIMEOUT') or 15.0)
+
+
+def _is_loopback_bind(host):
+    """只把明确的回环地址视为本机绑定；未知主机名按远程监听处理。"""
+    value = str(host or '').strip().strip('[]').lower()
+    if value == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(value.split('%', 1)[0]).is_loopback
+    except ValueError:
+        return False
 
 
 class _TokenBucket:
@@ -2040,7 +2053,7 @@ class H(BaseHTTPRequestHandler):
     #     ① Content-Type 必须是 application/json —— 跨站表单只能发三种简单类型，
     #        发 JSON 就必须先过 CORS 预检（我们不发 ACAO 头 → 预检失败 → 浏览器拦下）；
     #     ② Origin 存在时必须与本站同源（Host 一致，或 localhost/127.0.0.1/[::1]）。
-    #   非浏览器客户端（curl / 脚本 / 门禁）没有 Origin，不受影响——本服务设计为本地单机。
+    #   该校验只用于降低浏览器跨站请求风险，**不是身份认证**；远程或代理访问另需写令牌。
     def _write_guard(self):
         """返回拒绝原因（人话）；`None` = 放行。"""
         ct = ((self.headers.get('Content-Type') or '').split(';')[0] or '').strip().lower()
@@ -2050,7 +2063,7 @@ class H(BaseHTTPRequestHandler):
                     % (ct or '空'))
         origin = self.headers.get('Origin')
         if not origin:
-            return None                       # 无 Origin：非浏览器客户端（curl/脚本/门禁）
+            return None                       # 身份认证由 _write_auth_guard 负责
         try:
             oh = (urlparse(origin).hostname or '').lower()
         except Exception:                                        # noqa: BLE001
@@ -2062,6 +2075,42 @@ class H(BaseHTTPRequestHandler):
             return None
         return ('跨站写入被拒绝：Origin 为 %s，与本站 %s 不同源'
                 '（本机服务只对同源页面开放写操作）' % (origin, host or '（未知 Host）'))
+
+    def _write_auth_guard(self):
+        """远程监听、反向代理或显式配置令牌时，要求 Bearer 写令牌。"""
+        expected = getattr(self.server, 'write_token', '')
+        required = (getattr(self.server, 'require_write_token', False)
+                    or bool(expected)
+                    or bool(self.headers.get('Forwarded')
+                            or self.headers.get('X-Forwarded-For')))
+        if not required:
+            return None
+        if not expected:
+            return '远程写入已关闭：服务端尚未配置 LVC_WRITE_TOKEN'
+        auth = self.headers.get('Authorization') or ''
+        scheme, sep, supplied = auth.partition(' ')
+        if (not sep or scheme.lower() != 'bearer'
+                or not secrets.compare_digest(supplied.strip(), expected)):
+            return '此写操作需要有效的 Authorization: Bearer 写令牌'
+        return None
+
+    def _write_transport_guard(self):
+        """远程写入只接受本机 HTTPS 反向代理转发，不能信任外部自报的转发头。"""
+        forwarded = bool(self.headers.get('Forwarded') or self.headers.get('X-Forwarded-For'))
+        required = getattr(self.server, 'require_write_token', False) or forwarded
+        if not required:
+            return None
+        # X-Forwarded-Proto 可由任何直连客户端伪造；只有同机代理的回环连接才可信。
+        try:
+            peer = ipaddress.ip_address(str(self.client_address[0]).split('%', 1)[0])
+            peer_is_loopback = peer.is_loopback
+        except (ValueError, IndexError, TypeError):
+            peer_is_loopback = False
+        if not forwarded or not peer_is_loopback:
+            return '远程研究库写入只接受本机 HTTPS 反向代理转发；请勿直接连接引擎端口'
+        if (self.headers.get('X-Forwarded-Proto') or '').lower() != 'https':
+            return '远程研究库写入必须经 HTTPS 反向代理，并设置 X-Forwarded-Proto: https'
+        return None
 
     # ★ 2026-10-11（审查·低）：读路径的只读连接此前**只靠 GC 回收**；
     #   ThreadingHTTPServer 每请求一条线程，长跑会攒下一批句柄。
@@ -2098,6 +2147,14 @@ class H(BaseHTTPRequestHandler):
             return self._send(_err('BAD_JSON', '请求体必须是 UTF-8 的 JSON 对象'), code=400)
         if not isinstance(data, dict):
             return self._send(_err('BAD_JSON', '请求体必须是 JSON 对象'), code=400)
+        _transport_why = self._write_transport_guard()
+        if _transport_why:
+            _sec.warning('WRITE_TLS_BLOCKED POST %s', u.path)
+            return self._send(_err('HTTPS_REQUIRED', _transport_why), code=403)
+        _auth_why = self._write_auth_guard()
+        if _auth_why:
+            _sec.warning('WRITE_AUTH_BLOCKED POST %s', u.path)
+            return self._send(_err('WRITE_AUTH_REQUIRED', _auth_why), code=401)
         _why = self._write_guard()                  # ★ 审查 H2：同源校验（见方法处注释）
         if _why:
             _sec.warning('CROSS_ORIGIN_BLOCKED POST %s：%s', u.path, _why)
@@ -2586,6 +2643,12 @@ def main():
     ap.add_argument('--port', type=int, default=8000)
     ap.add_argument('--no-open', action='store_true')
     a = ap.parse_args()
+    write_token = os.environ.get('LVC_WRITE_TOKEN', '').strip()
+    if write_token and not re.fullmatch(r'[A-Za-z0-9._~-]{32,}', write_token):
+        ap.error('LVC_WRITE_TOKEN 必须是至少 32 位的随机 ASCII 字符串（仅允许字母、数字、._~-）')
+    remote_bind = not _is_loopback_bind(a.host)
+    if remote_bind and not write_token:
+        ap.error('非回环监听必须先设置强随机环境变量 LVC_WRITE_TOKEN（至少 32 位 ASCII 字符）')
     _setup_logging()                                             # ⚠ 修复 ③：结构化日志
     if not os.path.exists(DB):
         print('找不到语料库 %s，请先跑：python build_corpus.py --corpus <语料根> --db data/corpus.db'
@@ -2637,6 +2700,8 @@ def main():
     for p in range(a.port, a.port + 10):          # 端口被占就顺延，别让主人对着报错发呆
         try:
             srv = BoundedThreadingHTTPServer((a.host, p), H)
+            srv.require_write_token = remote_bind
+            srv.write_token = write_token
             if p != a.port:
                 print('端口 %d 被占用，改用 %d' % (a.port, p))
             a.port = p

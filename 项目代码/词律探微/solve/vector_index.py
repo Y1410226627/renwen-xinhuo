@@ -17,7 +17,7 @@
      那种会把正确答案截断的老做法。
   4. **只读不建**：本模块只加载/检索；构建在 `build_vector_index.py`（CLI）。
   5. **失败降级**：网关不可达 / 索引缺失 / 版本不符 → `available()` 返回 False、`search` 返回 []，
-     **主链不因它崩**（默认 `LVC_VECTOR` 关闭，双重保险）。
+     **主链不因它崩**（向量路默认开启；设 `LVC_VECTOR=0` 关闭）。
   6. **不是事实检索器**：向量只回答「哪些最像」，**不回答**「全库里满足该语义的有哪些一个不少」
      ——后者仍需 SQL/精确条件。
 """
@@ -52,9 +52,24 @@ def _read_llm_cfg():
     try:
         with open(os.path.join(_ROOT, 'solve', 'data', 'llm_local.json'), encoding='utf-8') as f:
             cfg = json.load(f)
-        url = cfg.get('url') or ''
-        host = url.split('/v1/')[0] if '/v1/' in url else url.rstrip('/')
-        return host, cfg.get('key') or ''
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:                                            # noqa: BLE001
+        cfg = {}
+    try:
+        url = os.environ.get('LVC_EMBED_URL') or cfg.get('url') or ''
+        url = url.rstrip('/')
+        # 与 llm_embed.Embedder 的环境变量口径保持一致：LVC_EMBED_URL 可给基础 URL，
+        # 也可给完整的 OpenAI 兼容嵌入端点。这里内部统一返回基础 URL，供下方拼接路由。
+        endpoint = '/v1-openai/embeddings'
+        if url.endswith(endpoint):
+            host = url[:-len(endpoint)].rstrip('/')
+        elif url.endswith('/v1-openai'):
+            host = url[:-len('/v1-openai')].rstrip('/')
+        else:
+            host = url.split('/v1/')[0] if '/v1/' in url else url
+        key = os.environ.get('LVC_EMBED_KEY') or cfg.get('key') or ''
+        return host, key
     except Exception:                                            # noqa: BLE001
         return '', ''
 
@@ -67,6 +82,7 @@ def embed_model():
 def _post(url, body, timeout=_TIMEOUT):
     import urllib.request
     _, key = _read_llm_cfg()
+    timeout = int(os.environ.get('LVC_EMBED_TIMEOUT') or timeout)
     req = urllib.request.Request(
         url, data=json.dumps(body).encode('utf-8'),
         headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})

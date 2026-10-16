@@ -95,14 +95,28 @@ export async function postJson(path, body) {
     throw new Error('离线模式：研究库的写入功能需要本地服务（python web/serve.py）');
   }
   return withTimeout(ASK_TIMEOUT_MS, '接口 ' + path, async (signal) => {
-    const r = await fetch(b + path, {
+    const send = (token) => fetch(b + path, {
       method: 'POST',
       signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign({ 'Content-Type': 'application/json' },
+        token ? { Authorization: 'Bearer ' + token } : {}),
       body: JSON.stringify(body || {})
     });
-    let j = null;
-    try { j = await r.json(); } catch (e) { /* 解析失败按状态码报 */ }
+    const readJson = async (response) => {
+      try { return await response.json(); } catch (e) { return null; }
+    };
+    let token = '';
+    try { token = sessionStorage.getItem('lvc_write_token') || ''; } catch (e) { /* 隐私模式可禁用存储 */ }
+    let r = await send(token);
+    let j = await readJson(r);
+    if (r.status === 401 && j && j.code === 'WRITE_AUTH_REQUIRED'
+        && typeof window !== 'undefined' && typeof window.prompt === 'function') {
+      token = (window.prompt('此服务的研究库写操作需要写令牌（由部署者提供）') || '').trim();
+      if (!token) { throw new Error('已取消研究库写入：没有提供写令牌'); }
+      try { sessionStorage.setItem('lvc_write_token', token); } catch (e) { /* 仅本次请求使用 */ }
+      r = await send(token);
+      j = await readJson(r);
+    }
     if (!r.ok) {
       /* ★ 2026-10-11（审查 M12）：服务端错误信封已统一为 `{ok:false, code, error:<字符串>}`。
          这里同时兼容旧形状 `{error:{message}}`，避免服务端/前端版本错配时拿到 `[object Object]`。 */

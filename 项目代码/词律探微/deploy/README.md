@@ -18,6 +18,11 @@ python3 web/serve.py --host 127.0.0.1 --port 8010 --no-open
 sudo cp deploy/nginx-cilv.conf /etc/nginx/conf.d/cilv.conf
 sudo nginx -t && sudo systemctl reload nginx
 
+仓库中的 nginx 示例仅监听 HTTP/80。远程写请求会被拒绝；要开放写操作，需增加与引擎同机的 HTTPS/TLS 站点，
+并传递 `X-Forwarded-For` 与 `X-Forwarded-Proto: https`。引擎只信任本机回环地址的代理连接，不能由远程客户端伪造这些头。写令牌由 `/etc/cilv-engine.env` 提供。
+启用 systemd 前，先创建仅管理员可读的 `/etc/cilv-engine.env`，写入 `LVC_WRITE_TOKEN=<随机令牌>`，
+并执行 `chmod 600 /etc/cilv-engine.env`。
+
 # 3) 常驻（可选；把 Unit 里的路径与 User 改成实际值）
 sudo cp deploy/cilv-engine.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now cilv-engine

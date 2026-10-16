@@ -322,7 +322,7 @@ python reproduce.py --skip-build
 ### 21.3 本轮查出的真问题（都是「静默算错」型，不是崩溃型）
 
 1. **句脚字口径错**（`tail`）。旧实现取「去掉句末标点后的末字符」→ 全库 **2,583 处**句脚字是
-   `■`/`○`/`)` 这类非汉字（缺字占位符、英文右括号收尾），「句脚＝愁」这类韵脚检索会**静默漏行**。
+   `■`/`○`/`)` 这类非汉字（缺字占位符、英文右括号收尾），「句脚字＝愁」这类句脚检索会**静默漏行**。
    现改为**该句最后一个汉字**（与引擎同一份汉字区间 `corpus.HAN_RE`，单一来源），并加不变式第 14 类锁死。
 2. **前端映射漏了标定表**。`Pronouncer()` 不传参就**不带标定表**，页面把「绝」当平声 →
    同一首词页面上平 59、引擎平 58。改为显式传 `default_overrides_path()`，并加**启动断言**：
@@ -1679,7 +1679,8 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 3. **真向量语义检索**：`vector_index.py`（嵌入+faiss）+ `build_vector_index.py`（CLI，多粒度、
    manifest 绑定 corpus_sha、断点续跑）+ `fusion.py`（RRF + rerank）。网关实测可用：
    `/v1-openai/embeddings`（`qwen3-vl-embedding-8b`，4096 维）、`/v1/rerank`（`qwen3-reranker-4b`）。
-   `LVC_VECTOR=1` 才启用（默认关 → 零影响）。3000 篇试跑实测：
+   默认启用（设 `LVC_VECTOR=0` 关闭）。仅在语义类查询、向量索引与嵌入端点均可用时调用嵌入服务；
+   查询主题词会发送到 `solve/data/llm_local.json` 配置的嵌入端点。若要求完全离线或不发送查询，显式设 `LVC_VECTOR=0`。3000 篇试跑实测：
    「描写边塞风雪」→ 朱熹「春色欲来时，先散满天风雪」、「写隐逸闲适」→「挂冠归去旧烟萝」——
    **词面不重合的语义查询真的命中了**。
    **健康自检**：`"$PY" solve/vector_index.py --health`——报告索引可用性 + **嵌入端点探活**
@@ -1721,7 +1722,7 @@ mock 永不响应的 `fetch` → **30.009 秒**后得到超时提示；重建后
 | 环境变量 | 默认 | 作用 |
 | --- | --- | --- |
 | `LVC_PLANNER` | `rule` | `plan`（别名 `planner`）时走 Planner→Plan→Executor 主链 |
-| `LVC_VECTOR` | 关 | 开启真向量召回（受限检索 + RRF） |
+| `LVC_VECTOR` | 开 | 设为 `0` 关闭真向量召回（受限检索 + RRF） |
 | `LVC_RERANK` | 关 | 精排（本机 reranker 多文档区分度不足） |
 | `LVC_PZ_GRAM` | 关 | 平仄 n-gram 倒排（实测更慢，默认关） |
 | `LVC_TITLE_COVER` | 关 | **题名旁路覆盖**（见下）；关时 `items_of`/`poem_block` 输出**逐字节如旧** |

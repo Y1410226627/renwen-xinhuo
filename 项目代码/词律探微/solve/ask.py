@@ -1564,7 +1564,7 @@ def answer(conn, question, topk=3, with_lines=1, kind=None, llm=None, narrate=Fa
              'plan_seconds': trace.get('plan_seconds')}
     if not _enabled:
         route['note'] = ('规划路未启用（设环境变量 LVC_PLANNER=plan 可启用；'
-                         '`启动问答网页.bat` 已默认开启规划路）')
+                         '`启动问答网页.bat` 与直接启动均默认走规则路）')
     if isinstance(res, dict):
         res.setdefault('route', route)
     return res

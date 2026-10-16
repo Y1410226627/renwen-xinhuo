@@ -102,7 +102,7 @@ def main():
                 shutil.copy2(os.path.join(src, n), os.path.join(VDIR, n))
         print('复制完成，复核：')
         if _ok():
-            print('✅ 索引就绪。启动服务时设 `LVC_VECTOR=1` 即启用语义检索。')
+            print('✅ 索引就绪。语义查询默认尝试向量检索；设 `LVC_VECTOR=0` 可关闭。')
             return 0
         print('✗ 复制后仍不可用，请检查上面的原因。')
 
