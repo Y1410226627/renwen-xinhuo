@@ -445,7 +445,21 @@ def add_text_version(conn, pid, content, scope='corpus', version_type='manual',
                           ' ORDER BY id DESC LIMIT 1', (pid, scope)).fetchone()
             parent = r['id'] if r else None
         else:
-            parent = int(parent_id)
+            if isinstance(parent_id, bool):
+                raise ValueError('parent_id 必须指向同一作品、同一范围中的已有版本')
+            try:
+                parent = int(parent_id)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError('parent_id 必须指向同一作品、同一范围中的已有版本')
+            if parent <= 0 or (isinstance(parent_id, float) and not parent_id.is_integer()):
+                raise ValueError('parent_id 必须指向同一作品、同一范围中的已有版本')
+            _cp = c.execute('SELECT pid, scope FROM text_versions WHERE id=?',
+                            (parent,))
+            parent_row = _row(_cp, _cp.fetchone())
+            if parent_row is None:
+                raise ValueError('父版本 %s 不存在' % parent_id)
+            if parent_row['pid'] != pid or parent_row['scope'] != scope:
+                raise ValueError('父版本必须属于同一作品和同一 scope')
         # ★ 2026-10-11（审查·低）：改前 INSERT 与返回体**各调一次** `_now()`——
         #   跨过整秒边界时，返回给前端的 `created_at` 与库里存的那一行**差 1 秒**，
         #   前端拿它回显、拿库值排序，就会「我刚提交的版本显示排在下一秒」。
@@ -1596,9 +1610,12 @@ def list_arguments(conn, include_withdrawn=False):
 def withdraw_argument(conn, draft_id, why='', actor='human', client_token=None):
     """撤回论证稿（**行保留**，与材料/事实/作品同一纪律）。"""
     def fn(c):
-        row = c.execute('SELECT id FROM argument_drafts WHERE id=?', (draft_id,)).fetchone()
+        _cw = c.execute('SELECT id, withdrawn FROM argument_drafts WHERE id=?', (draft_id,))
+        row = _row(_cw, _cw.fetchone())
         if row is None:
             raise KeyError('论证稿不存在：%s' % draft_id)
+        if row['withdrawn']:
+            return {'draft_id': row['id'], 'withdrawn': True, 'note': '此前已撤回'}
         c.execute('UPDATE argument_drafts SET withdrawn=1, withdrawn_at=?, withdrawn_why=? '
                   'WHERE id=?', (_now(), why or '', draft_id))
         c.execute('INSERT INTO decisions(ts, actor, kind, subject, action, payload, basis, why) '
